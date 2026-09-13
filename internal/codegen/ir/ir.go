@@ -16,14 +16,14 @@ const (
 
 // File describes generated Go units (*.pb.go / *.msg.go + *.argos.go).
 type File struct {
-	IRVersion    int      `json:"ir_version,omitempty"`
-	Source       string   `json:"source,omitempty"`
-	GoPackage    string   `json:"go_package"`
-	GoModule     string   `json:"go_module,omitempty"`
-	ProtoPackage string   `json:"proto_package,omitempty"`
-	InputBase    string   `json:"input_base,omitempty"`
-	Outputs      Outputs  `json:"outputs,omitempty"`
-	OutputName   string   `json:"output_name,omitempty"` // legacy stub output name
+	IRVersion    int       `json:"ir_version,omitempty"`
+	Source       string    `json:"source,omitempty"`
+	GoPackage    string    `json:"go_package"`
+	GoModule     string    `json:"go_module,omitempty"`
+	ProtoPackage string    `json:"proto_package,omitempty"`
+	InputBase    string    `json:"input_base,omitempty"`
+	Outputs      Outputs   `json:"outputs,omitempty"`
+	OutputName   string    `json:"output_name,omitempty"` // legacy stub output name
 	Messages     []Message `json:"messages,omitempty"`
 	Services     []Service `json:"services"`
 	// FileDescriptor is a serialized google.protobuf.FileDescriptorProto (proto frontend).

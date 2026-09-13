@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/argos-io/argos/client"
-	"github.com/argos-io/argos/internal/option"
+	"github.com/argos-io/argos/option"
 	"github.com/argos-io/argos/stream"
 	"github.com/argos-io/argos/transport"
 )

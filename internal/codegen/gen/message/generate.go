@@ -6,10 +6,10 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/argos-io/argos/internal/codegen/ir"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
-	"github.com/argos-io/argos/internal/codegen/ir"
 )
 
 // Generate returns Go source for message types in file.

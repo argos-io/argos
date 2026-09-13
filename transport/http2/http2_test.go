@@ -6,7 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/filter"
+	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos/server"
+	"github.com/argos-io/argos/stream"
+
 	protobufcodec "github.com/argos-io/argos/codec/protobuf"
 	"github.com/argos-io/argos/errs"
 	echov1 "github.com/argos-io/argos/example/echo"
@@ -51,15 +55,15 @@ func TestGRPCStatusMapping(t *testing.T) {
 
 func startEcho(
 	t *testing.T,
-	opts ...argos.Option,
+	opts ...option.Option,
 ) *channel {
 	t.Helper()
 	tr := New().(*channel)
-	server := argos.NewServer()
-	service := server.NewService(append([]argos.Option{
-		argos.WithTransport(tr),
-		argos.WithListenAddress("127.0.0.1:0"),
-		argos.WithCodec(protobufcodec.New()),
+	server := server.New()
+	service := server.NewService(append([]option.Option{
+		option.WithTransport(tr),
+		option.WithListenAddress("127.0.0.1:0"),
+		option.WithCodec(protobufcodec.New()),
 	}, opts...)...)
 	echov1.RegisterEchoService(service, &echoServer{})
 
@@ -79,9 +83,9 @@ func startEcho(
 func TestEchoRoundTrip(t *testing.T) {
 	tr := startEcho(t)
 	client := echov1.NewEchoServiceClient(
-		argos.WithTransport(tr),
-		argos.WithListenAddress("127.0.0.1:0"),
-		argos.WithCodec(protobufcodec.New()),
+		option.WithTransport(tr),
+		option.WithListenAddress("127.0.0.1:0"),
+		option.WithCodec(protobufcodec.New()),
 	)
 	response, err := client.Echo(context.Background(), &echov1.EchoRequest{Msg: "http2"})
 	if err != nil {
@@ -96,23 +100,23 @@ func TestFilterUnauthenticated(t *testing.T) {
 	deny := func(
 		_ context.Context,
 		_ string,
-		_ argos.Stream,
-		_ argos.Handler,
+		_ stream.Stream,
+		_ filter.Handler,
 	) error {
-		return argos.Error(argos.Unauthenticated, "no token")
+		return errs.Error(errs.Unauthenticated, "no token")
 	}
-	tr := startEcho(t, argos.WithFilter(deny))
+	tr := startEcho(t, option.WithFilter(deny))
 
 	client := echov1.NewEchoServiceClient(
-		argos.WithTransport(tr),
-		argos.WithListenAddress("127.0.0.1:0"),
-		argos.WithCodec(protobufcodec.New()),
+		option.WithTransport(tr),
+		option.WithListenAddress("127.0.0.1:0"),
+		option.WithCodec(protobufcodec.New()),
 	)
 	_, err := client.Echo(context.Background(), &echov1.EchoRequest{Msg: "http2"})
 	if err == nil {
 		t.Fatal("Echo succeeded, want Unauthenticated")
 	}
-	if got := argos.CodeOf(err); got != argos.Unauthenticated {
+	if got := errs.CodeOf(err); got != errs.Unauthenticated {
 		t.Fatalf("client code = %d (err %v), want Unauthenticated", got, err)
 	}
 
@@ -134,7 +138,7 @@ func TestFilterUnauthenticated(t *testing.T) {
 		t.Fatalf("CloseSend: %v", err)
 	}
 	_, recvErr := f.Recv()
-	if recvErr == nil || argos.CodeOf(recvErr) != argos.Unauthenticated {
+	if recvErr == nil || errs.CodeOf(recvErr) != errs.Unauthenticated {
 		t.Fatalf("Recv = %v, want Unauthenticated", recvErr)
 	}
 }

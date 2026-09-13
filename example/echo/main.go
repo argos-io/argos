@@ -7,10 +7,11 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/argos-io/argos"
 	jsoncodec "github.com/argos-io/argos/codec/json"
 	protobufcodec "github.com/argos-io/argos/codec/protobuf"
 	echov1 "github.com/argos-io/argos/example/echo"
+	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/transport/http1"
 	"github.com/argos-io/argos/transport/http2"
 	"github.com/argos-io/argos/transport/tcp"
@@ -23,47 +24,47 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	ctx := context.Background()
-	server := argos.NewServer()
+	srv := server.New()
 	impl := echov1.NewEchoImpl()
 
-	for _, opts := range [][]argos.Option{
+	for _, opts := range [][]option.Option{
 		{
-			argos.WithTransport(http2.New()),
-			argos.WithListenAddress(":9090"),
-			argos.WithCodec(protobufcodec.New()),
+			option.WithTransport(http2.New()),
+			option.WithListenAddress(":9090"),
+			option.WithCodec(protobufcodec.New()),
 		},
 		{
-			argos.WithTransport(http1.New()),
-			argos.WithListenAddress(":8080"),
-			argos.WithCodec(jsoncodec.New()),
+			option.WithTransport(http1.New()),
+			option.WithListenAddress(":8080"),
+			option.WithCodec(jsoncodec.New()),
 		},
 		{
-			argos.WithTransport(ws.New()),
-			argos.WithListenAddress(":8081"),
-			argos.WithCodec(protobufcodec.New()),
+			option.WithTransport(ws.New()),
+			option.WithListenAddress(":8081"),
+			option.WithCodec(protobufcodec.New()),
 		},
 		{
-			argos.WithTransport(tcp.New()),
-			argos.WithListenAddress(":7000"),
-			argos.WithCodec(protobufcodec.New()),
+			option.WithTransport(tcp.New()),
+			option.WithListenAddress(":7000"),
+			option.WithCodec(protobufcodec.New()),
 		},
 		{
-			argos.WithTransport(udp.New()),
-			argos.WithListenAddress(":7001"),
-			argos.WithCodec(protobufcodec.New()),
+			option.WithTransport(udp.New()),
+			option.WithListenAddress(":7001"),
+			option.WithCodec(protobufcodec.New()),
 		},
 		{
-			argos.WithTransport(telnet.New()),
-			argos.WithListenAddress(":2323"),
-			argos.WithCodec(jsoncodec.New()),
-			argos.WithFilter(echov1.ServerAuth),
+			option.WithTransport(telnet.New()),
+			option.WithListenAddress(":2323"),
+			option.WithCodec(jsoncodec.New()),
+			option.WithFilter(echov1.ServerAuth),
 		},
 	} {
-		service := server.NewService(opts...)
+		service := srv.NewService(opts...)
 		echov1.RegisterEchoService(service, impl)
 	}
 
-	if err := server.Run(ctx); err != nil {
+	if err := srv.Run(ctx); err != nil {
 		slog.Error("echo server", "err", err)
 		os.Exit(1)
 	}

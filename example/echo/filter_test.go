@@ -7,9 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/codec"
 	jsoncodec "github.com/argos-io/argos/codec/json"
 	protobufcodec "github.com/argos-io/argos/codec/protobuf"
+	"github.com/argos-io/argos/errs"
+	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos/server"
+	"github.com/argos-io/argos/transport"
 	"github.com/argos-io/argos/transport/http1"
 	"github.com/argos-io/argos/transport/http2"
 	"github.com/argos-io/argos/transport/tcp"
@@ -19,14 +23,14 @@ import (
 )
 
 type addrTransport interface {
-	argos.Transport
+	transport.Transport
 	Addr() net.Addr
 }
 
 type transportCase struct {
 	name  string
 	newTR func() addrTransport
-	codec argos.Codec
+	codec codec.Codec
 }
 
 func waitListen(tr addrTransport) {
@@ -43,16 +47,16 @@ func waitListen(tr addrTransport) {
 func startFilteredServer(t *testing.T, tc transportCase) addrTransport {
 	t.Helper()
 	tr := tc.newTR()
-	server := argos.NewServer()
-	service := server.NewService(append(withLoopbackTransport(tr),
-		argos.WithCodec(tc.codec),
-		argos.WithFilter(ServerAuth),
+	srv := server.New()
+	service := srv.NewService(append(withLoopbackTransport(tr),
+		option.WithCodec(tc.codec),
+		option.WithFilter(ServerAuth),
 	)...)
 	RegisterEchoService(service, NewEchoImpl())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- server.Run(ctx) }()
+	go func() { done <- srv.Run(ctx) }()
 	waitListen(tr)
 	t.Cleanup(func() {
 		cancel()
@@ -101,14 +105,14 @@ func TestFilterRejectsWithoutToken(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := startFilteredServer(t, tc)
 			client := NewEchoServiceClient(
-				argos.WithTransport(tr),
-				argos.WithCodec(tc.codec),
+				option.WithTransport(tr),
+				option.WithCodec(tc.codec),
 			)
 			_, err := client.Echo(context.Background(), &EchoRequest{Msg: tc.name})
 			if err == nil {
 				t.Fatal("Echo succeeded, want Unauthenticated")
 			}
-			if got := argos.CodeOf(err); got != argos.Unauthenticated {
+			if got := errs.CodeOf(err); got != errs.Unauthenticated {
 				t.Fatalf("code = %d (err %v), want Unauthenticated", got, err)
 			}
 		})

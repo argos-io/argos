@@ -11,7 +11,7 @@ import (
 
 	"github.com/argos-io/argos/errs"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/internal/option"
+	"github.com/argos-io/argos/option"
 	"github.com/argos-io/argos/stream"
 )
 

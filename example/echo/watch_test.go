@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/codec"
+	"github.com/argos-io/argos/option"
+
 	jsoncodec "github.com/argos-io/argos/codec/json"
 	protobufcodec "github.com/argos-io/argos/codec/protobuf"
 	"github.com/argos-io/argos/transport/http1"
@@ -22,7 +24,7 @@ func TestWatchStreaming(t *testing.T) {
 	cases := []struct {
 		name  string
 		newTR func() addrTransport
-		codec argos.Codec
+		codec codec.Codec
 	}{
 		{
 			name:  "http2",
@@ -46,8 +48,8 @@ func TestWatchStreaming(t *testing.T) {
 			tr := tc.newTR()
 			startEchoServer(t, tr, tc.codec)
 			client := NewEchoServiceClient(
-				argos.WithTransport(tr),
-				argos.WithCodec(tc.codec),
+				option.WithTransport(tr),
+				option.WithCodec(tc.codec),
 			)
 			stream := client.Watch(context.Background(), &WatchRequest{Msg: tc.name})
 			want := []string{tc.name + " one", tc.name + " two", tc.name + " three"}
@@ -71,7 +73,7 @@ func TestWatchFailsOnUnaryTransports(t *testing.T) {
 	cases := []struct {
 		name  string
 		newTR func() addrTransport
-		codec argos.Codec
+		codec codec.Codec
 	}{
 		{
 			name:  "http1",
@@ -95,8 +97,8 @@ func TestWatchFailsOnUnaryTransports(t *testing.T) {
 			tr := tc.newTR()
 			startEchoServer(t, tr, tc.codec)
 			client := NewEchoServiceClient(
-				argos.WithTransport(tr),
-				argos.WithCodec(tc.codec),
+				option.WithTransport(tr),
+				option.WithCodec(tc.codec),
 			)
 			stream := client.Watch(context.Background(), &WatchRequest{Msg: tc.name})
 			event, err := stream.Recv()

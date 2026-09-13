@@ -5,8 +5,8 @@ import (
 	"context"
 
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/internal/option"
 	"github.com/argos-io/argos/metadata"
+	"github.com/argos-io/argos/option"
 	"github.com/argos-io/argos/selector"
 	"github.com/argos-io/argos/stream"
 	"github.com/argos-io/argos/transport"

@@ -3,18 +3,21 @@ package echov1
 import (
 	"context"
 
-	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/errs"
+	"github.com/argos-io/argos/filter"
+	"github.com/argos-io/argos/metadata"
+	"github.com/argos-io/argos/stream"
 )
 
 // ServerAuth rejects calls without authorization metadata.
 func ServerAuth(
 	ctx context.Context,
 	method string,
-	st argos.Stream,
-	next argos.Handler,
+	st stream.Stream,
+	next filter.Handler,
 ) error {
-	if argos.MetadataFromContext(ctx)["authorization"] == nil {
-		return argos.Error(argos.Unauthenticated, "missing token")
+	if metadata.FromContext(ctx)["authorization"] == nil {
+		return errs.Error(errs.Unauthenticated, "missing token")
 	}
 	return next(ctx, method, st)
 }
@@ -23,9 +26,9 @@ func ServerAuth(
 func ClientAuth(
 	ctx context.Context,
 	method string,
-	st argos.Stream,
-	next argos.Handler,
+	st stream.Stream,
+	next filter.Handler,
 ) error {
-	argos.MetadataFromContext(ctx)["authorization"] = []string{"Bearer x"}
+	metadata.FromContext(ctx)["authorization"] = []string{"Bearer x"}
 	return next(ctx, method, st)
 }

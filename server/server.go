@@ -6,7 +6,7 @@ import (
 	"errors"
 
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/internal/option"
+	"github.com/argos-io/argos/option"
 )
 
 // Server owns the services served together.
@@ -80,4 +80,3 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	return errors.Join(joined...)
 }
-

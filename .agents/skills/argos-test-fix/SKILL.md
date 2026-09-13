@@ -114,14 +114,14 @@ scripts/accept-grpcurl.sh 127.0.0.1:<port> msg
 - **intentional 行为变更**：改测试期望，并在回复里说明理由
 - **生成物变更**：改 `internal/codegen/gen` 后跑 `make test-generate`；若手写桩仍为准则同步 `example/echo/echo.argos.go`
 - **新 transport / 协议组合**：补 `transport/*_test.go`、`example/echo/*_test.go`，并在 `protocol_accept_test.go` + `scripts/accept-*.sh` 登记
-- **新导出 API**：根包行为用 `argos_test.go`；子包用 `*_test.go`
+- **新导出 API**：子包各自 `*_test.go`；server/client/option 回路用 `argos_test.go`
 
 ## 项目约束（修时不要破）
 
 - 派发只在 `server/binding.invoke`
 - `example/echo/impl.go` 不得出现传输/协议名
-- 传输实现 struct 名 `channel`；`New(addr) transport.Transport`
-- 生成代码只 import 根 `github.com/argos-io/argos`
+- 传输实现 struct 名 `channel`；`New() transport.Transport`
+- 生成桩按需 import 子包（`server`、`client`、`option`、`stream`、`errs`）；业务 impl 不得 import `transport/*`、`codec/*`
 - Lint 以 `go vet` + `staticcheck` 为准（golangci-lint 可能与 Go 1.27 不兼容）
 
 ## 输出格式

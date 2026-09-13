@@ -11,7 +11,7 @@
 | | |
 |---|---|
 | 定位 | **验证模型**，不是生产 RPC 框架 |
-| 入口 | 根包 `github.com/argos-io/argos`（生成代码只 import 此包） |
+| 入口 | 子包组合：`server`、`client`、`option`、`stream`、`filter`、`errs`、`metadata` 等 |
 | 传输 | `transport/{http2,http1,ws,tcp,udp,telnet}/` |
 | 真源 | 代码 + 测试 + 本文件；计划/设计文档不入库（勿建 `docs/`） |
 
@@ -20,14 +20,14 @@
 ## 目录与依赖
 
 ```
-argos.go                 # 门面：类型别名 + NewServer/NewClient/With*（生成代码唯一 import）
-errs/ metadata/          # 运行时基础类型，传输层可独立 import
+argos.go                 # 模块根（仅包注释；API 在各子包）
+errs/ metadata/          # 运行时基础类型
 filter/ stream/          # 调用链与消息层
 server/ client/          # 服务端绑定与客户端 Open
+option/                  # Service/Client 共用配置与 With*
 selector/                # 客户端 target 寻址：scheme 选实现，body 解析为 dial 地址（可含服务发现）
 codec/                   # Codec 接口；codec/{protobuf,json} 实现
 transport/               # Transport/Framer 接口；transport/{http2,...} 实现
-internal/option/         # 未导出 config，Server/Client 共用
 internal/wire/           # 自有族二进制信封（tcp/ws/udp）
 internal/statusmap/      # §8 HTTP/grpc-status 映射（http1/http2）
 internal/codegen/        # 工具链：ir → gen ← frontend；stub 编排 generate
@@ -43,17 +43,17 @@ argos_test.go            # 根包 loopback 集成测（测公开 API）
 
 | 层 | 结论 |
 |---|---|
-| 根 `argos` 门面 | ✅ 生成代码与业务只碰这一层 |
+| 子包直 import | ✅ 生成代码与业务按需 import 子包，根包不做 type alias |
 | `errs`/`metadata` 独立 | ✅ 传输实现不必 import 根包 |
-| `server`/`client` 分设 | ✅ 职责清晰；共用 `internal/option` |
+| `server`/`client`/`option` 分设 | ✅ 职责清晰；配置在 `option` |
 | `stream` 与 `transport.Framer` 并存 | ✅ 字节层 vs 消息层，见 stream 包注释 |
 | `internal/codegen` 与 `internal/cmd` 分离 | ✅ 生成逻辑可测、CLI 只做 flag 接线 |
 | `codec/codec.go` 仅接口 | ✅ 与 `transport/transport.go` 对称 |
-| 暂不动 | `argos_test.go` 留根目录（测门面契约）；`example/echo` 兼示例与集成测 |
+| 暂不动 | `argos_test.go` 留根目录（测 server/client/option 回路）；`example/echo` 兼示例与集成测 |
 
 **依赖方向（硬约束）**
 
-- 生成代码与业务：只 import 根 `argos`
+- 生成代码与业务：按需 import 子包（常见 `server`、`client`、`option`、`stream`、`errs`）；业务 impl **不得** import `transport/*`、`codec/*`
 - `transport/*`：import `transport`、`errs`、`metadata`；自有族加 `internal/wire`；http1/http2 加 `internal/statusmap`
 - 根 `argos` **不得** import 任何 `transport/*`
 
@@ -76,12 +76,12 @@ argos_test.go            # 根包 loopback 集成测（测公开 API）
 
 | 规则 | 说明 |
 |------|------|
-| 业务 / 生成桩 | **只** `import "github.com/argos-io/argos"` |
+| 业务 / 生成桩 | 按需 import 子包（如 `server`、`client`、`option`、`stream`、`filter`、`errs`、`metadata`） |
 | 业务 impl | **不得** import `transport/*`、`codec/*`（grep 不到 http/grpc/ws 等） |
 | 一个 Service | 恰好绑定 **一个 Transport + 一个 Codec** |
 | 多协议对外 | 同一份 `impl` 注册到 **多个** `Service`（各配不同 Transport/Codec/端口） |
 | 派发 | 只在 `*.argos.go` 的 `Register*` 里 method switch；**不要**在 impl 或 transport 里写派发 |
-| 错误 | 返回 `argos.Error(code, msg)`；不用 `google.golang.org/grpc/status` |
+| 错误 | 返回 `errs.Error(code, msg)`；不用 `google.golang.org/grpc/status` |
 | Codec | **必填**，无默认；与传输独立选配 |
 
 ### 推荐目录（用户项目或 `example/<svc>/`）
@@ -91,7 +91,7 @@ mysvc/
   mysvc.proto          # IDL
   mysvc.pb.go          # 消息类型（与 .proto 同包；示例已入库，见下）
   mysvc.argos.go       # argos generate stub（Register* + Client 桩）
-  impl.go              # 业务实现：只依赖 argos + pb 类型
+  impl.go              # 业务实现：仅 pb 类型；Filter 等按需加 filter/stream/metadata/errs
   auth.go              # 可选：Filter
   main.go              # //go:build ignore 或 cmd/ 下：选 transport、起 Server
 ```
@@ -132,37 +132,38 @@ go run github.com/argos-io/argos/cmd/argos generate stub \
 
 ```go
 import (
-    "github.com/argos-io/argos"
     protobufcodec "github.com/argos-io/argos/codec/protobuf"
+    "github.com/argos-io/argos/option"
+    "github.com/argos-io/argos/server"
     "github.com/argos-io/argos/transport/http2"
 )
 
-server := argos.NewServer()
+srv := server.New()
 impl := mysvc.NewXxxImpl()
-for _, opts := range [][]argos.Option{{
-    argos.WithTransport(http2.New()),
-    argos.WithListenAddress(":9090"),
-    argos.WithCodec(protobufcodec.New()),
+for _, opts := range [][]option.Option{{
+    option.WithTransport(http2.New()),
+    option.WithListenAddress(":9090"),
+    option.WithCodec(protobufcodec.New()),
 }} {
-    svc := server.NewService(opts...)
+    svc := srv.NewService(opts...)
     mysvc.RegisterXxxService(svc, impl)
 }
-server.Run(ctx)
+srv.Run(ctx)
 ```
 
 按名构造（可选）：import 子包后内置名已注册，可直接 `WithTransport("http2")` / `WithCodec("protobuf")`；常规写法仍用 `WithTransport(http2.New())`。
 
 **4. 客户端**
 
-生成桩提供 `NewXxxServiceClient(opts ...argos.Option)`。
+生成桩提供 `NewXxxServiceClient(opts ...option.Option)`。
 
 **Loopback 测试**（同进程、共享 Transport 实例）：
 
 ```go
 tr := http2.New()
 client := mysvc.NewXxxServiceClient(
-    argos.WithTransport(tr),
-    argos.WithCodec(protobufcodec.New()),
+    option.WithTransport(tr),
+    option.WithCodec(protobufcodec.New()),
 )
 ```
 
@@ -172,9 +173,9 @@ client := mysvc.NewXxxServiceClient(
 import _ "github.com/argos-io/argos/selector/ip" // 注册 ip scheme
 
 client := mysvc.NewXxxServiceClient(
-    argos.WithTarget("ip://127.0.0.1:9090"),
-    argos.WithTransport(http2.New()),
-    argos.WithCodec(protobufcodec.New()),
+    option.WithTarget("ip://127.0.0.1:9090"),
+    option.WithTransport(http2.New()),
+    option.WithCodec(protobufcodec.New()),
 )
 ```
 
@@ -194,9 +195,16 @@ client := mysvc.NewXxxServiceClient(
 ### Filter 与 Metadata
 
 ```go
-func Auth(ctx context.Context, method string, st argos.Stream, next argos.Handler) error {
-    if argos.MetadataFromContext(ctx)["authorization"] == nil {
-        return argos.Error(argos.Unauthenticated, "missing token")
+import (
+    "github.com/argos-io/argos/errs"
+    "github.com/argos-io/argos/filter"
+    "github.com/argos-io/argos/metadata"
+    "github.com/argos-io/argos/stream"
+)
+
+func Auth(ctx context.Context, method string, st stream.Stream, next filter.Handler) error {
+    if metadata.FromContext(ctx)["authorization"] == nil {
+        return errs.Error(errs.Unauthenticated, "missing token")
     }
     return next(ctx, method, st)
 }
@@ -204,7 +212,7 @@ func Auth(ctx context.Context, method string, st argos.Stream, next argos.Handle
 
 - Filter 包在 `WithFilter` 链上；**短路时不调用 `next`** → 不会 `CloseSend`。
 - 客户端 Filter 可在 `next` 前写入 metadata（见 `example/echo/auth.go`）。
-- 状态码在 `onCall` 返回后由传输写回；业务只返回 `argos.Error(...)`。
+- 状态码在 `onCall` 返回后由传输写回；业务只返回 `errs.Error(...)`。
 
 ### 流式 RPC
 
@@ -221,7 +229,7 @@ func Auth(ctx context.Context, method string, st argos.Stream, next argos.Handle
 | 手写 method 路由在 impl | 只改 `*.argos.go` 生成物或重新 generate |
 | 忘记 `WithCodec` | `Run` / `Open` 返回 error |
 | Client 用 `WithTarget` 但未 blank import `selector/ip` | 加 `_ "github.com/argos-io/argos/selector/ip"` |
-| 用 gRPC status / codes | 用 `argos.Error` + `argos.CodeOf` |
+| 用 gRPC status / codes | 用 `errs.Error` + `errs.CodeOf` |
 | 新建 `docs/` 或设计 md 入库 | 真源：代码 + 测试 + 本文件 |
 
 ### 改完服务后怎么验
@@ -242,12 +250,12 @@ make verify           # 提交前全量（含协议验收）
 
 - 一个目录一个包；包名简短、小写、无下划线（`http2` 不是 `http_2`）
 - 导出 API 必须有文档注释；未导出符号仅在必要时注释
-- 错误用 `errs.Error(code, msg)` / `argos.Error`；**不**忽略 `error` 返回值
+- 错误用 `errs.Error(code, msg)` / `errs.CodeOf`；**不**忽略 `error` 返回值
 - `NewServer` / `NewClient` / `NewService` 不返回 `error`；缺 codec/transport、`WithTransport`/`WithCodec` 类型错误等组装问题在 `Run` / `Open`（或 `Resolve*`）返回 `error`
 
 ### 接口与实现
 
-- `Transport` / `Framer` / `Codec` / `Filter` 定义在各自包；根 `argos` 做 type alias
+- `Transport` / `Framer` / `Codec` / `Filter` 定义在各自包；按需直接 import
 - 派发**只允许**在 `server/binding.invoke`；传输实现里不得有第二份 method switch
 - Filter 短路时不调用 `next` → 不 `CloseSend`；status 由传输在 `onCall` 返回后写
 - **Client.Open 不调用 CloseSend**；半关闭由 transport 在 client 侧 `Open` 实现里处理；Server 在 `dispatchEnd` 里 CloseSend

@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos/server"
+
 	jsoncodec "github.com/argos-io/argos/codec/json"
 	"github.com/argos-io/argos/errs"
 	echov1 "github.com/argos-io/argos/example/echo"
@@ -38,11 +40,11 @@ func (*echoServer) Watch(
 func startEcho(t *testing.T, addr string) *channel {
 	t.Helper()
 	tr := New().(*channel)
-	server := argos.NewServer()
+	server := server.New()
 	service := server.NewService(
-		argos.WithTransport(tr),
-		argos.WithListenAddress("127.0.0.1:0"),
-		argos.WithCodec(jsoncodec.New()),
+		option.WithTransport(tr),
+		option.WithListenAddress("127.0.0.1:0"),
+		option.WithCodec(jsoncodec.New()),
 	)
 	echov1.RegisterEchoService(service, &echoServer{})
 
@@ -62,9 +64,9 @@ func startEcho(t *testing.T, addr string) *channel {
 func TestEchoRoundTrip(t *testing.T) {
 	tr := startEcho(t, "127.0.0.1:0")
 	client := echov1.NewEchoServiceClient(
-		argos.WithTransport(tr),
-		argos.WithListenAddress("127.0.0.1:0"),
-		argos.WithCodec(jsoncodec.New()),
+		option.WithTransport(tr),
+		option.WithListenAddress("127.0.0.1:0"),
+		option.WithCodec(jsoncodec.New()),
 	)
 	response, err := client.Echo(
 		context.Background(),

@@ -1,4 +1,4 @@
-// Package statusmap holds argos.Code ↔ wire status conversions for http1/http2.
+// Package statusmap holds errs.Code ↔ wire status conversions for http1/http2.
 package statusmap
 
 import (
@@ -7,7 +7,7 @@ import (
 	"github.com/argos-io/argos/errs"
 )
 
-// HTTPStatus maps argos.Code to an HTTP status code.
+// HTTPStatus maps errs.Code to an HTTP status code.
 func HTTPStatus(code errs.Code) int {
 	switch code {
 	case errs.OK:
@@ -27,7 +27,7 @@ func HTTPStatus(code errs.Code) int {
 	}
 }
 
-// GRPCStatus maps argos.Code to a grpc-status trailer value.
+// GRPCStatus maps errs.Code to a grpc-status trailer value.
 func GRPCStatus(code errs.Code) uint32 {
 	switch code {
 	case errs.OK:
@@ -49,7 +49,7 @@ func GRPCStatus(code errs.Code) uint32 {
 	}
 }
 
-// FromGRPCStatus maps a grpc-status trailer value back to argos.Code.
+// FromGRPCStatus maps a grpc-status trailer value back to errs.Code.
 func FromGRPCStatus(status uint32) errs.Code {
 	switch status {
 	case 0:

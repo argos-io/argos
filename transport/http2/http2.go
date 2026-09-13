@@ -8,15 +8,16 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/argos-io/argos/errs"
-	"github.com/argos-io/argos/internal/statusmap"
-	"github.com/argos-io/argos/metadata"
-	"github.com/argos-io/argos/transport"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/argos-io/argos/errs"
+	"github.com/argos-io/argos/internal/statusmap"
+	"github.com/argos-io/argos/metadata"
+	"github.com/argos-io/argos/transport"
 )
 
 const (

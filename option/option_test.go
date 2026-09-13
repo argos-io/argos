@@ -217,4 +217,3 @@ func TestResolveTransportMissingMessage(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
-

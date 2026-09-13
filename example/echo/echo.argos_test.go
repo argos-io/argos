@@ -7,7 +7,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos/server"
+	"github.com/argos-io/argos/transport"
+
 	"github.com/argos-io/argos/codec/protobuf"
 )
 
@@ -50,7 +53,7 @@ func (f *memoryFramer) CloseSend() error {
 type memoryCall struct {
 	ctx    context.Context
 	method string
-	framer argos.Framer
+	framer transport.Framer
 }
 
 type memoryTransport struct {
@@ -68,8 +71,8 @@ func newMemoryTransport() *memoryTransport {
 
 func (t *memoryTransport) ListenAndServe(
 	ctx context.Context,
-	onCall func(context.Context, string, argos.Framer) error,
-	_ ...argos.TransportServerOption,
+	onCall func(context.Context, string, transport.Framer) error,
+	_ ...transport.ServerOption,
 ) error {
 	t.once.Do(func() { close(t.ready) })
 	for {
@@ -85,8 +88,8 @@ func (t *memoryTransport) ListenAndServe(
 func (t *memoryTransport) Open(
 	ctx context.Context,
 	method string,
-	_ ...argos.TransportClientOption,
-) (argos.Framer, error) {
+	_ ...transport.ClientOption,
+) (transport.Framer, error) {
 	requests := make(chan []byte)
 	responses := make(chan []byte)
 	server := &memoryFramer{recv: requests, send: responses}
@@ -101,10 +104,10 @@ func (t *memoryTransport) Open(
 
 func TestEchoRoundTrip(t *testing.T) {
 	transport := newMemoryTransport()
-	server := argos.NewServer()
+	server := server.New()
 	service := server.NewService(
-		argos.WithTransport(transport),
-		argos.WithCodec(protobuf.New()),
+		option.WithTransport(transport),
+		option.WithCodec(protobuf.New()),
 	)
 	RegisterEchoService(service, &echoImpl{})
 
@@ -118,8 +121,8 @@ func TestEchoRoundTrip(t *testing.T) {
 	})
 
 	client := NewEchoServiceClient(
-		argos.WithTransport(transport),
-		argos.WithCodec(protobuf.New()),
+		option.WithTransport(transport),
+		option.WithCodec(protobuf.New()),
 	)
 	response, err := client.Echo(
 		context.Background(),

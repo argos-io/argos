@@ -4,7 +4,11 @@ import (
 	"context"
 	"io"
 
-	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/client"
+	"github.com/argos-io/argos/errs"
+	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos/server"
+	"github.com/argos-io/argos/stream"
 )
 
 const (
@@ -24,8 +28,8 @@ type EchoService_WatchServer interface {
 }
 
 // RegisterEchoService registers impl's method dispatcher with svc.
-func RegisterEchoService(svc *argos.Service, impl EchoServiceServer) {
-	svc.Register(func(ctx context.Context, method string, st argos.Stream) error {
+func RegisterEchoService(svc *server.Service, impl EchoServiceServer) {
+	svc.Register(func(ctx context.Context, method string, st stream.Stream) error {
 		switch method {
 		case echoEcho:
 			in := new(EchoRequest)
@@ -44,13 +48,13 @@ func RegisterEchoService(svc *argos.Service, impl EchoServiceServer) {
 			}
 			return impl.Watch(ctx, in, &watchServer{Stream: st})
 		default:
-			return argos.Error(argos.Unimplemented, "unknown method")
+			return errs.Error(errs.Unimplemented, "unknown method")
 		}
 	})
 }
 
 type watchServer struct {
-	argos.Stream
+	stream.Stream
 }
 
 func (s *watchServer) Send(event *Event) error {
@@ -69,17 +73,17 @@ type EchoService_WatchClient interface {
 }
 
 // NewEchoServiceClient creates an Echo service client.
-func NewEchoServiceClient(opts ...argos.Option) EchoServiceClient {
-	return &echoClient{c: argos.NewClient(opts...)}
+func NewEchoServiceClient(opts ...option.Option) EchoServiceClient {
+	return &echoClient{c: client.New(opts...)}
 }
 
 type echoClient struct {
-	c *argos.Client
+	c *client.Client
 }
 
 func (c *echoClient) Echo(ctx context.Context, req *EchoRequest) (*EchoResponse, error) {
 	var resp *EchoResponse
-	err := c.c.Open(ctx, echoEcho, func(st argos.Stream) error {
+	err := c.c.Open(ctx, echoEcho, func(st stream.Stream) error {
 		if err := st.Send(req); err != nil {
 			return err
 		}
@@ -96,7 +100,7 @@ func (c *echoClient) Watch(ctx context.Context, req *WatchRequest) EchoService_W
 	wc := &watchClient{ch: make(chan *Event)}
 	go func() {
 		defer close(wc.ch)
-		wc.err = c.c.Open(ctx, echoWatch, func(st argos.Stream) error {
+		wc.err = c.c.Open(ctx, echoWatch, func(st stream.Stream) error {
 			if err := st.Send(req); err != nil {
 				return err
 			}

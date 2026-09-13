@@ -9,7 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/filter"
+	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos/server"
+	"github.com/argos-io/argos/stream"
+
 	"github.com/argos-io/argos/codec/protobuf"
 	"github.com/argos-io/argos/errs"
 	echov1 "github.com/argos-io/argos/example/echo"
@@ -36,14 +40,14 @@ func (*echoServer) Watch(
 	return stream.Send(&echov1.Event{Msg: "hello " + request.GetMsg()})
 }
 
-func startEcho(t *testing.T, addr string, opts ...argos.Option) *channel {
+func startEcho(t *testing.T, addr string, opts ...option.Option) *channel {
 	t.Helper()
 	tr := New().(*channel)
-	server := argos.NewServer()
-	service := server.NewService(append([]argos.Option{
-		argos.WithTransport(tr),
-		argos.WithListenAddress("127.0.0.1:0"),
-		argos.WithCodec(protobuf.New()),
+	server := server.New()
+	service := server.NewService(append([]option.Option{
+		option.WithTransport(tr),
+		option.WithListenAddress("127.0.0.1:0"),
+		option.WithCodec(protobuf.New()),
 	}, opts...)...)
 	echov1.RegisterEchoService(service, &echoServer{})
 
@@ -63,9 +67,9 @@ func startEcho(t *testing.T, addr string, opts ...argos.Option) *channel {
 func TestEchoBinaryEnvelope(t *testing.T) {
 	tr := startEcho(t, ":0")
 	client := echov1.NewEchoServiceClient(
-		argos.WithTransport(tr),
-		argos.WithListenAddress("127.0.0.1:0"),
-		argos.WithCodec(protobuf.New()),
+		option.WithTransport(tr),
+		option.WithListenAddress("127.0.0.1:0"),
+		option.WithCodec(protobuf.New()),
 	)
 	response, err := client.Echo(
 		context.Background(),
@@ -87,7 +91,7 @@ func TestTextFrameReturnsError(t *testing.T) {
 		done <- tr.ListenAndServe(ctx, func(
 			_ context.Context,
 			_ string,
-			_ argos.Framer,
+			_ transport.Framer,
 		) error {
 			return nil
 		}, transport.WithListenAddress("127.0.0.1:0"))
@@ -152,9 +156,9 @@ func waitBound(tr *channel) {
 func TestWatchRoundTrip(t *testing.T) {
 	tr := startEcho(t, "127.0.0.1:0")
 	client := echov1.NewEchoServiceClient(
-		argos.WithTransport(tr),
-		argos.WithListenAddress("127.0.0.1:0"),
-		argos.WithCodec(protobuf.New()),
+		option.WithTransport(tr),
+		option.WithListenAddress("127.0.0.1:0"),
+		option.WithCodec(protobuf.New()),
 	)
 	stream := client.Watch(context.Background(), &echov1.WatchRequest{Msg: "ws"})
 	event, err := stream.Recv()
@@ -170,17 +174,17 @@ func TestWatchRoundTrip(t *testing.T) {
 }
 
 func TestFilterShortCircuitStatus(t *testing.T) {
-	deny := func(context.Context, string, argos.Stream, argos.Handler) error {
-		return argos.Error(argos.Unauthenticated, "no token")
+	deny := func(context.Context, string, stream.Stream, filter.Handler) error {
+		return errs.Error(errs.Unauthenticated, "no token")
 	}
-	tr := startEcho(t, "127.0.0.1:0", argos.WithFilter(deny))
+	tr := startEcho(t, "127.0.0.1:0", option.WithFilter(deny))
 	client := echov1.NewEchoServiceClient(
-		argos.WithTransport(tr),
-		argos.WithListenAddress("127.0.0.1:0"),
-		argos.WithCodec(protobuf.New()),
+		option.WithTransport(tr),
+		option.WithListenAddress("127.0.0.1:0"),
+		option.WithCodec(protobuf.New()),
 	)
 	_, err := client.Echo(context.Background(), &echov1.EchoRequest{Msg: "ws"})
-	if argos.CodeOf(err) != argos.Unauthenticated {
+	if errs.CodeOf(err) != errs.Unauthenticated {
 		t.Fatalf("code = %v, want Unauthenticated", err)
 	}
 }
@@ -249,8 +253,8 @@ func TestHandlerErrorReturnsStatus(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- tr.ListenAndServe(ctx, func(context.Context, string, argos.Framer) error {
-			return argos.Error(argos.NotFound, "missing")
+		done <- tr.ListenAndServe(ctx, func(context.Context, string, transport.Framer) error {
+			return errs.Error(errs.NotFound, "missing")
 		}, transport.WithListenAddress("127.0.0.1:0"))
 	}()
 	waitBound(tr)
@@ -304,11 +308,11 @@ func TestRawEnvelopeWS(t *testing.T) {
 	done := make(chan error, 1)
 	gotCall := make(chan struct{}, 1)
 	go func() {
-		done <- tr.ListenAndServe(ctx, func(ctx context.Context, method string, f argos.Framer) error {
+		done <- tr.ListenAndServe(ctx, func(ctx context.Context, method string, f transport.Framer) error {
 			if method != "raw/Echo" {
 				t.Errorf("method = %q", method)
 			}
-			if got := argos.MetadataFromContext(ctx)["token"]; len(got) != 1 || got[0] != "abc" {
+			if got := metadata.FromContext(ctx)["token"]; len(got) != 1 || got[0] != "abc" {
 				t.Errorf("metadata = %v", got)
 			}
 			reader, err := f.Recv()

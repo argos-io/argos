@@ -81,7 +81,7 @@ go run example/echo/main.go   # 六端口 Echo 服务
 
 ## 写服务时长什么样
 
-**业务 impl**——只依赖根包 `argos` 和 protobuf 类型，不出现传输名：
+**业务 impl**——只依赖 protobuf 类型，不出现传输名：
 
 ```go
 func (s *echoImpl) Echo(ctx context.Context, req *EchoRequest) (*EchoResponse, error) {
@@ -92,26 +92,33 @@ func (s *echoImpl) Echo(ctx context.Context, req *EchoRequest) (*EchoResponse, e
 **启动**——在 `main` 里选 Transport 和 Codec（可多端口、同一份 impl）：
 
 ```go
-server := argos.NewServer()
+import (
+    protobufcodec "github.com/argos-io/argos/codec/protobuf"
+    "github.com/argos-io/argos/option"
+    "github.com/argos-io/argos/server"
+    "github.com/argos-io/argos/transport/http2"
+)
+
+srv := server.New()
 impl := echov1.NewEchoImpl()
 
-svc := server.NewService(
-    argos.WithTransport(http2.New()),
-    argos.WithListenAddress(":9090"),
-    argos.WithCodec(protobufcodec.New()),
+svc := srv.NewService(
+    option.WithTransport(http2.New()),
+    option.WithListenAddress(":9090"),
+    option.WithCodec(protobufcodec.New()),
 )
 echov1.RegisterEchoService(svc, impl)
 
-server.Run(ctx)
+srv.Run(ctx)
 ```
 
 **客户端**——生成桩提供 `NewEchoServiceClient`；地址用 `WithTarget`（内置 `ip://` scheme）：
 
 ```go
 client := echov1.NewEchoServiceClient(
-    argos.WithTarget("ip://127.0.0.1:9090"),
-    argos.WithTransport(http2.New()),
-    argos.WithCodec(protobufcodec.New()),
+    option.WithTarget("ip://127.0.0.1:9090"),
+    option.WithTransport(http2.New()),
+    option.WithCodec(protobufcodec.New()),
 )
 resp, _ := client.Echo(ctx, &echov1.EchoRequest{Msg: "hi"})
 ```
@@ -142,7 +149,7 @@ Filter（鉴权、日志等）在 Transport 之上、业务之下，服务端与
 
 | 区域 | 说明 |
 |------|------|
-| [`argos.go`](argos.go) | 公开 API 门面；生成代码与业务只 import 此包 |
+| [`server/`](server/) [`client/`](client/) [`option/`](option/) 等 | 公开 API 在各子包；根 [`argos.go`](argos.go) 仅模块入口注释 |
 | [`example/echo/`](example/echo/) | 可运行的六传输示例 + 协议验收测试 |
 | [`transport/`](transport/) | 六种传输实现 |
 | [`codec/`](codec/) | protobuf、json 编解码 |

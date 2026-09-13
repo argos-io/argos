@@ -12,8 +12,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/filter"
+	"github.com/argos-io/argos/metadata"
+	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos/server"
+	"github.com/argos-io/argos/stream"
+
 	"github.com/argos-io/argos/codec/protobuf"
+	"github.com/argos-io/argos/errs"
 	echov1 "github.com/argos-io/argos/example/echo"
 	"github.com/argos-io/argos/internal/wire"
 	"github.com/argos-io/argos/transport"
@@ -36,14 +42,14 @@ func (*echoServer) Watch(
 	return stream.Send(&echov1.Event{Msg: "hello " + request.GetMsg()})
 }
 
-func startEcho(t *testing.T, addr string, opts ...argos.Option) *channel {
+func startEcho(t *testing.T, addr string, opts ...option.Option) *channel {
 	t.Helper()
 	tr := New().(*channel)
-	server := argos.NewServer()
-	service := server.NewService(append([]argos.Option{
-		argos.WithTransport(tr),
-		argos.WithListenAddress("127.0.0.1:0"),
-		argos.WithCodec(protobuf.New()),
+	server := server.New()
+	service := server.NewService(append([]option.Option{
+		option.WithTransport(tr),
+		option.WithListenAddress("127.0.0.1:0"),
+		option.WithCodec(protobuf.New()),
 	}, opts...)...)
 	echov1.RegisterEchoService(service, &echoServer{})
 
@@ -63,9 +69,9 @@ func startEcho(t *testing.T, addr string, opts ...argos.Option) *channel {
 func TestEchoRoundTrip(t *testing.T) {
 	tr := startEcho(t, ":0")
 	client := echov1.NewEchoServiceClient(
-		argos.WithTransport(tr),
-		argos.WithListenAddress("127.0.0.1:0"),
-		argos.WithCodec(protobuf.New()),
+		option.WithTransport(tr),
+		option.WithListenAddress("127.0.0.1:0"),
+		option.WithCodec(protobuf.New()),
 	)
 	response, err := client.Echo(
 		context.Background(),
@@ -82,9 +88,9 @@ func TestEchoRoundTrip(t *testing.T) {
 func TestWatchRoundTrip(t *testing.T) {
 	tr := startEcho(t, "127.0.0.1:0")
 	client := echov1.NewEchoServiceClient(
-		argos.WithTransport(tr),
-		argos.WithListenAddress("127.0.0.1:0"),
-		argos.WithCodec(protobuf.New()),
+		option.WithTransport(tr),
+		option.WithListenAddress("127.0.0.1:0"),
+		option.WithCodec(protobuf.New()),
 	)
 	stream := client.Watch(context.Background(), &echov1.WatchRequest{Msg: "tcp"})
 	event, err := stream.Recv()
@@ -106,20 +112,20 @@ func TestFilterShortCircuitStatus(t *testing.T) {
 	deny := func(
 		_ context.Context,
 		_ string,
-		_ argos.Stream,
-		_ argos.Handler,
+		_ stream.Stream,
+		_ filter.Handler,
 	) error {
-		return argos.Error(argos.Unauthenticated, "no token")
+		return errs.Error(errs.Unauthenticated, "no token")
 	}
-	tr := startEcho(t, "127.0.0.1:0", argos.WithFilter(deny))
+	tr := startEcho(t, "127.0.0.1:0", option.WithFilter(deny))
 
 	client := echov1.NewEchoServiceClient(
-		argos.WithTransport(tr),
-		argos.WithListenAddress("127.0.0.1:0"),
-		argos.WithCodec(protobuf.New()),
+		option.WithTransport(tr),
+		option.WithListenAddress("127.0.0.1:0"),
+		option.WithCodec(protobuf.New()),
 	)
 	_, err := client.Echo(context.Background(), &echov1.EchoRequest{Msg: "tcp"})
-	if got := argos.CodeOf(err); got != argos.Unauthenticated {
+	if got := errs.CodeOf(err); got != errs.Unauthenticated {
 		t.Fatalf("code = %d (err %v), want Unauthenticated", got, err)
 	}
 	if got, want := err.Error(), "no token"; got != want {
@@ -159,12 +165,12 @@ func TestRawEnvelope(t *testing.T) {
 		done <- tr.ListenAndServe(ctx, func(
 			ctx context.Context,
 			method string,
-			f argos.Framer,
+			f transport.Framer,
 		) error {
 			if method != "raw/Echo" {
 				t.Errorf("method = %q, want raw/Echo", method)
 			}
-			if got := argos.MetadataFromContext(ctx)["token"]; len(got) != 1 || got[0] != "abc" {
+			if got := metadata.FromContext(ctx)["token"]; len(got) != 1 || got[0] != "abc" {
 				t.Errorf("metadata token = %v, want [abc]", got)
 			}
 			reader, err := f.Recv()
@@ -253,7 +259,7 @@ func TestRawEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnmarshalStatus: %v", err)
 	}
-	if code != uint32(argos.OK) || description != "" {
+	if code != uint32(errs.OK) || description != "" {
 		t.Fatalf("status = (%d, %q), want (0, empty)", code, description)
 	}
 	<-gotCall

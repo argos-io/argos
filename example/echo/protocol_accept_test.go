@@ -8,7 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/codec"
+
 	jsoncodec "github.com/argos-io/argos/codec/json"
 	protobufcodec "github.com/argos-io/argos/codec/protobuf"
 	"github.com/argos-io/argos/transport/http1"
@@ -28,7 +29,7 @@ func TestProtocolAccept(t *testing.T) {
 	cases := []struct {
 		name   string
 		newTR  func() addrTransport
-		codec  argos.Codec
+		codec  codec.Codec
 		script string
 	}{
 		{
@@ -93,7 +94,7 @@ func TestProtocolAcceptWatch(t *testing.T) {
 	cases := []struct {
 		name   string
 		newTR  func() addrTransport
-		codec  argos.Codec
+		codec  codec.Codec
 		script string
 	}{
 		{
