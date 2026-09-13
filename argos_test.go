@@ -1,10 +1,16 @@
 package argos_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -363,5 +369,78 @@ func TestOptionsWireThrough(t *testing.T) {
 	)
 	if client == nil {
 		t.Fatal("nil client")
+	}
+}
+
+// TestAccept enforces repository invariants (impl 零传输痕迹、dispatch 唯一、binding.invoke).
+func TestAccept(t *testing.T) {
+	t.Run("impl_no_transport_references", testAcceptImplNoTransportReferences)
+	t.Run("dispatch_only_in_binding", testAcceptDispatchOnlyInBinding)
+	t.Run("binding_invoke_exists", testAcceptBindingInvokeExists)
+}
+
+func testAcceptImplNoTransportReferences(t *testing.T) {
+	t.Helper()
+	path := filepath.Join("example", "echo", "impl.go")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	bad := regexp.MustCompile(`http2|http1|websocket|telnet|grpc|transport/`)
+	if bad.Match(data) {
+		t.Fatalf("%s contains transport or protocol names", path)
+	}
+}
+
+func testAcceptDispatchOnlyInBinding(t *testing.T) {
+	t.Helper()
+	dispatchCall := regexp.MustCompile(`\bdispatch\s*\(`)
+	var matches []string
+	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "vendor":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			if dispatchCall.MatchString(sc.Text()) {
+				matches = append(matches, filepath.ToSlash(path))
+				break
+			}
+		}
+		return sc.Err()
+	})
+	if err != nil {
+		t.Fatalf("WalkDir: %v", err)
+	}
+	want := "server/binding.go"
+	if len(matches) != 1 || matches[0] != want {
+		t.Fatalf("dispatch call sites in %v, want only %s", matches, want)
+	}
+}
+
+func testAcceptBindingInvokeExists(t *testing.T) {
+	t.Helper()
+	path := filepath.Join("server", "binding.go")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	if !regexp.MustCompile(`func \(b \*binding\) invoke`).Match(data) {
+		t.Fatalf("%s missing binding.invoke", path)
 	}
 }

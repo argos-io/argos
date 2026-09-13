@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-race test-integration test-protocol test-generate build-argos lint accept all verify
+.PHONY: test test-unit test-race test-integration test-generate build-argos lint accept all verify
 
 # 默认：单元 + 集成（全仓库）
 test:
@@ -10,13 +10,9 @@ test-unit:
 		./client/... ./server/... ./codec/... \
 		./internal/codegen/... ./internal/wire/... ./internal/statusmap/...
 
-# 传输与 echo 跨包集成
-test-integration: test-protocol
+# 传输与 echo 跨包集成（loopback：go test 内 goroutine 起服）
+test-integration:
 	go test ./example/echo/... ./transport/...
-
-# 外部客户端协议验收（grpcurl / curl / python3 脚本）；缺工具则 fail
-test-protocol:
-	ARGOS_PROTOCOL_ACCEPT=1 go test -run TestProtocolAccept -count=1 ./example/echo/...
 
 test-race:
 	go test -race ./...
@@ -35,7 +31,7 @@ lint:
 		echo "staticcheck 未安装，跳过（go install honnef.co/go/tools/cmd/staticcheck@latest）"
 
 accept:
-	bash scripts/accept-all.sh
+	go test -run '^TestAccept$$' -count=1 .
 
 all: lint test test-race test-generate accept
 

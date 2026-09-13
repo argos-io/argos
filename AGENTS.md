@@ -268,18 +268,17 @@ make verify           # 提交前全量（含协议验收）
 ```bash
 make test              # 全量
 make test-unit         # 内核小包
-make test-integration  # test-protocol + transport + example/echo
-make test-protocol     # 外部客户端：grpcurl/curl/python3 脚本 × 六传输
+make test-integration  # transport + example/echo（go test 内 goroutine 起服）
 make test-race         # -race
 make lint              # go vet + staticcheck（若已安装）
-make accept            # 验收脚本（静态检查 + go test）
+make accept            # 仓库级不变量（argos_test.go TestAccept）
 make test-generate     # argos generate stub --check
 make build-argos       # 构建 cmd/argos
 make verify            # make all + make test-integration（提交前推荐）
 ```
 
 - **Lint**：以 `go vet` + `staticcheck` 为准（与 Go 1.27 工具链一致）。`golangci-lint` 需版本支持 `go.mod` 中的 Go 版本，否则 typecheck 会误报 embedded field。
-- **提交前**：`make verify` 通过（含协议验收 `test-protocol`）；Agent 流程见 `.agents/skills/argos-test-fix/`
+- **提交前**：`make verify` 通过（含 `test-integration`）；Agent 流程见 `.agents/skills/argos-test-fix/`
 
 ---
 
@@ -288,16 +287,15 @@ make verify            # make all + make test-integration（提交前推荐）
 | 层级 | 范围 | 命令 | 位置示例 |
 |---|---|---|---|
 | **单元** | 无网络、单包逻辑 | `make test-unit` | `filter/`, `stream/`, `errs/`, `internal/wire/` |
-| **集成** | 传输 + echo 端到端 | `make test-integration` | `transport/*_test.go`, `example/echo/*_test.go` |
-| **协议验收** | 外部客户端 ↔ 服务端 | `make test-protocol` | `example/echo/protocol_accept_test.go`, `scripts/accept-*.sh` |
+| **集成** | 传输 + echo 端到端 | `make test-integration` | `transport/*_test.go`, `example/echo/*_test.go`（goroutine 起服） |
 | **内核** | Server/Client/invoke 回路 | `go test .` | `argos_test.go`（loopback 假 Transport） |
 | **生成物** | 生成 = 手写 | `make test-generate` | `internal/codegen/gen/` |
-| **验收** | 仓库级不变量 | `make accept` | `scripts/accept-all.sh` |
+| **验收** | 仓库级不变量 | `make accept` | `argos_test.go`（`TestAccept`） |
 
 集成测试约定：
 
 - 监听地址用 `127.0.0.1:0`；客户端与服务端**共用同一** `Transport` 实例（port 0 自拨号）
-- 协议验收：`make test-protocol`（`ARGOS_PROTOCOL_ACCEPT=1`，缺 grpcurl/curl/python3 则 fail）；`ACCEPT_EXTERNAL=1 make accept` 对固定端口手起 `example/echo/main.go` 时跑全部 `scripts/accept-*.sh`
+- 六传输端到端：`example/echo/client_test.go` 的 `TestClientEchoSixTransports`；流式见 `watch_test.go`
 - 表驱动优先；子测试用 `t.Run`
 
 **不要**把 `transport/` 以外的包 import 进业务 `example/echo/impl.go`（验收 #4）。
@@ -335,7 +333,7 @@ IDL ──frontend──▶ internal/codegen/ir ──gen──▶ *.argos.go
 1. 改了导出类型/方法 → 跑 `make test-generate`（`internal/codegen/gen` 与 `echo.argos.go`）
 2. 改了 §8 码表 → 只改 `internal/statusmap`，http1/http2 引用它
 3. 改了 `Framer` 契约 → 六个 `transport/*` 与 `argos_test` loopback 一起跑
-4. 新增传输 → `New() transport.Transport` + 集成测试 +（若适用）`scripts/accept-*.sh`
+4. 新增传输 → `New() transport.Transport` + 集成测试 + 补 `example/echo` 表驱动用例
 
 ---
 

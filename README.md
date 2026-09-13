@@ -60,7 +60,7 @@ argos 反过来问：**如果协议只是三个正交维度的组合，会怎样
 ```bash
 git clone https://github.com/argos-io/argos.git
 cd argos
-make verify          # 全量测试 + 六协议外部客户端验收
+make verify          # 全量测试 + 六传输集成验收
 go run example/echo/main.go   # 六端口 Echo 服务
 ```
 
@@ -69,11 +69,8 @@ go run example/echo/main.go   # 六端口 Echo 服务
 | 对外形态 | 端口 | 怎么试 |
 |----------|------|--------|
 | gRPC (h2c) | `:9090` | `grpcurl -plaintext -proto example/echo/echo.proto -import-path example/echo -d '{"msg":"hi"}' localhost:9090 echo.v1.EchoService/Echo` |
-| REST/JSON | `:8080` | `scripts/accept-curl.sh 127.0.0.1:8080 hi` |
-| WebSocket | `:8081` | `scripts/accept-ws.sh 127.0.0.1:8081 hi` |
-| TCP 信封 | `:7000` | `scripts/accept-envelope.sh 127.0.0.1:7000 hi` |
-| UDP | `:7001` | `scripts/accept-udp.sh 127.0.0.1:7001 hi` |
-| Telnet | `:2323` | `scripts/accept-telnet.sh 127.0.0.1:2323 hi` |
+| REST/JSON | `:8080` | `curl -sS -X POST http://127.0.0.1:8080/echo.v1.EchoService/Echo -H 'Content-Type: application/json' -d '{"msg":"hi"}'` |
+| WebSocket / TCP / UDP / Telnet | 见 `main.go` 端口 | `go test -run TestClientEchoSixTransports ./example/echo/...` |
 
 完整示例与集成测试在 [`example/echo/`](example/echo/)。
 
@@ -149,7 +146,7 @@ Filter（鉴权、日志等）在 Transport 之上、业务之下，服务端与
 
 | 区域 | 说明 |
 |------|------|
-| [`server/`](server/) [`client/`](client/) [`option/`](option/) 等 | 公开 API 在各子包；根 [`argos.go`](argos.go) 仅模块入口注释 |
+| [`server/`](server/) [`client/`](client/) 等 | 根包 [`argos`](argos.go) 提供 `With*`；其余 API 在各子包 |
 | [`example/echo/`](example/echo/) | 可运行的六传输示例 + 协议验收测试 |
 | [`transport/`](transport/) | 六种传输实现 |
 | [`codec/`](codec/) | protobuf、json 编解码 |
