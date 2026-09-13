@@ -20,12 +20,15 @@ fi
 echo "ok"
 
 echo "== #6 派发只在 binding.invoke =="
-mapfile -t dispatch_files < <(rg -l '\bdispatch\s*\(' --glob '*.go' || true)
-if [[ ${#dispatch_files[@]} -ne 1 || ${dispatch_files[0]} != server/binding.go ]]; then
+mapfile -t dispatch_files < <(
+	find . -name '*.go' ! -path './.git/*' \
+		-exec grep -lE '\bdispatch[[:space:]]*\(' {} + 2>/dev/null || true
+)
+if [[ ${#dispatch_files[@]} -ne 1 || ${dispatch_files[0]} != ./server/binding.go ]]; then
 	printf 'accept-all: dispatch( 出现在: %s\n' "${dispatch_files[*]:-<none>}"
 	fail "want only server/binding.go"
 fi
-if ! rg -q 'func \(b \*binding\) invoke' server/binding.go; then
+if ! grep -qE 'func \(b \*binding\) invoke' server/binding.go; then
 	fail "binding.invoke missing"
 fi
 echo "ok"
