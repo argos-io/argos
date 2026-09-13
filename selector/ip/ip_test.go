@@ -1,6 +1,7 @@
 package ip_test
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -9,7 +10,7 @@ import (
 )
 
 func TestSelectHostname(t *testing.T) {
-	addr, err := selector.Parse("ip://example.com:443")
+	addr, err := selector.Parse(context.Background(), "ip://example.com:443")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -19,7 +20,7 @@ func TestSelectHostname(t *testing.T) {
 }
 
 func TestSelectList(t *testing.T) {
-	addr, err := selector.Parse("ip://127.0.0.1:1,127.0.0.2:2")
+	addr, err := selector.Parse(context.Background(), "ip://127.0.0.1:1,127.0.0.2:2")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}

@@ -2,6 +2,7 @@
 package ip
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/rand/v2"
@@ -18,7 +19,7 @@ func init() {
 // Selector parses ip://host:port (or a comma-separated list; one entry is chosen).
 type Selector struct{}
 
-func (Selector) Select(service string) (string, error) {
+func (Selector) Select(_ context.Context, service string) (string, error) {
 	service = strings.TrimSpace(strings.TrimPrefix(service, "//"))
 	if service == "" {
 		return "", errors.New("selector/ip: empty address")

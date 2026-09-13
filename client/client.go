@@ -35,7 +35,7 @@ func (c *Client) Open(
 		return err
 	}
 
-	tr, opts, err := c.resolveTransport()
+	tr, opts, err := c.resolveTransport(ctx)
 	if err != nil {
 		return err
 	}
@@ -54,10 +54,10 @@ func (c *Client) Open(
 	return filter.Chain(c.cfg.Filters, end)(ctx, method, st)
 }
 
-func (c *Client) resolveTransport() (transport.Transport, []transport.ClientOption, error) {
+func (c *Client) resolveTransport(ctx context.Context) (transport.Transport, []transport.ClientOption, error) {
 	opts := append([]transport.ClientOption(nil), c.cfg.ClientTransportOpts...)
 	if c.cfg.ClientTarget != "" {
-		addr, err := selector.Parse(c.cfg.ClientTarget)
+		addr, err := selector.Parse(ctx, c.cfg.ClientTarget)
 		if err != nil {
 			return nil, nil, err
 		}

@@ -61,9 +61,9 @@ argos_test.go            # 根包 loopback 集成测（测公开 API）
 **Server listen / Client dial**
 
 - **Server**：`WithListenAddress` + `WithTransport(http2.New())`。loopback 测试可共享同一 Transport 实例 + `WithListenAddress`。`Run` 时 `ListenAndServe(..., ServerOptions...)`。
-- **Client**：`WithTarget` + `WithTransport(http2.New())`；Open 时 `selector.Parse` → `transport.WithDialAddress` → `Open(..., ClientOptions...)`。
+- **Client**：`WithTarget` + `WithTransport(http2.New())`；Open 时 `selector.Parse(ctx, target)` → `transport.WithDialAddress` → `Open(..., ClientOptions...)`。
 - **Transport / Codec 注册表**（`transport` / `codec` 包，根 `argos` 不导出）：各子包 `init` 自动 `Register` 内置名（`http2`、`protobuf` 等）；`Get(name)` 取 factory；`WithTransport("http2")` / `WithCodec("protobuf")` 按名解析。插件可额外 `Register`。**无配置文件**——listen 与组合在代码里写。
-- **Selector**（`selector` 包，根 `argos` 不导出）：Target 格式 `scheme://service-identifier`（必填 scheme）；可插拔寻址/服务发现。内置 **ip** 在 `selector/ip` 注册。
+- **Selector**（`selector` 包，根 `argos` 不导出）：`Select(ctx, service)` / `Parse(ctx, target)`；Target 格式 `scheme://service-identifier`（必填 scheme）；可插拔寻址/服务发现。内置 **ip** 在 `selector/ip` 注册。
 
 ---
 

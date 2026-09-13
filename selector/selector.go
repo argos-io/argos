@@ -7,6 +7,7 @@
 package selector
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -14,7 +15,7 @@ import (
 
 // Selector resolves a target body (service-identifier) to a dial address.
 type Selector interface {
-	Select(service string) (string, error)
+	Select(ctx context.Context, service string) (string, error)
 }
 
 var (
@@ -38,7 +39,7 @@ func Get(name string) Selector {
 
 // Parse resolves target to a dial address. Target must be scheme://service-identifier
 // (for example ip://127.0.0.1:9090); bare host:port is rejected.
-func Parse(target string) (string, error) {
+func Parse(ctx context.Context, target string) (string, error) {
 	scheme, body := splitScheme(target)
 	if scheme == "" {
 		return "", fmt.Errorf("selector: target must be scheme://service-identifier")
@@ -50,7 +51,7 @@ func Parse(target string) (string, error) {
 	if s == nil {
 		return "", fmt.Errorf("selector: unknown scheme %q", scheme)
 	}
-	return s.Select(body)
+	return s.Select(ctx, body)
 }
 
 func splitScheme(target string) (scheme, body string) {
