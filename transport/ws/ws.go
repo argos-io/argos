@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/argos-io/argos/errs"
 	"github.com/argos-io/argos/internal/wire"
@@ -149,6 +150,9 @@ func (t *channel) serveConn(
 		pending: &first,
 	}
 	callErr := onCall(callCtx, first.Method, f)
+	if callErr == nil {
+		f.drainPeerEndFrames()
+	}
 
 	code := errs.OK
 	description := ""
@@ -188,6 +192,27 @@ type framer struct {
 
 	frames  chan wire.Envelope
 	readErr error
+}
+
+func (f *framer) drainPeerEndFrames() {
+	ctx, cancel := context.WithTimeout(f.ctx, 100*time.Millisecond)
+	defer cancel()
+	for {
+		msgType, blob, err := f.conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		if msgType != websocket.MessageBinary {
+			continue
+		}
+		env, err := wire.UnmarshalEnvelope(blob)
+		if err != nil {
+			return
+		}
+		if env.Flags&wire.FlagEnd != 0 && len(env.Payload) == 0 {
+			return
+		}
+	}
 }
 
 func (f *framer) readAhead() {

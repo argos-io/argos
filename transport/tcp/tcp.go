@@ -122,6 +122,9 @@ func (t *channel) serveConn(
 		pending: &first,
 	}
 	callErr := onCall(callCtx, first.Method, f)
+	if callErr == nil {
+		f.drainPeerEndFrames()
+	}
 
 	// The trailer is unconditional: a filter that short-circuits never closes the
 	// send side, so the trailer is the only frame that carries the outcome.
@@ -172,6 +175,23 @@ type framer struct {
 // readAhead drains the responder's frames until the status trailer, which is the
 // last thing any call carries. Abandoning a stream halfway leaves this blocked on
 // the handoff until the call context is cancelled.
+// drainPeerEndFrames reads the initiator's end-of-direction frame when it is
+// already on the wire. A short deadline avoids blocking forever when the client
+// has not half-closed yet (the post-status drain still waits for FIN).
+func (f *framer) drainPeerEndFrames() {
+	_ = f.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	defer func() { _ = f.conn.SetReadDeadline(time.Time{}) }()
+	for {
+		env, err := f.readEnvelope()
+		if err != nil {
+			return
+		}
+		if env.Flags&wire.FlagEnd != 0 && len(env.Payload) == 0 {
+			return
+		}
+	}
+}
+
 func (f *framer) readAhead() {
 	defer close(f.frames)
 	for {
