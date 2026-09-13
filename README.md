@@ -1,173 +1,157 @@
 # argos
 
-验证「**IDL × Transport × Codec → 协议**」：同一份 `.proto`、同一份业务实现，可同时对外提供 gRPC、REST、WebSocket、TCP/UDP 信封 RPC 与 Telnet 调试口——业务代码里不出现任何传输或协议名。
+**一份 IDL、一份业务实现，六种对外形态。**
 
-> 当前目标是**证明组合模型成立**，不是生产级 RPC 框架。
+argos 是一个 Go 实验项目，用来验证一种 RPC 组合模型：**协议不是框架里的枚举，而是 IDL、Transport、Codec 三者相乘的结果。**
 
-## 模型
+同一份 `echo.proto`、同一个 `impl.go`，可以同时对外提供 gRPC、REST/JSON、WebSocket、TCP/UDP 信封 RPC 和 Telnet 调试口。业务代码里不出现 `http`、`grpc`、`ws` 等传输名——选什么组合、监听哪个端口，只在启动服务的 `main` 里决定。
+
+> **定位**：证明「组合模型」能跑通，不是生产级 RPC 框架。真源是代码、测试与 [AGENTS.md](AGENTS.md)。
+
+---
+
+## 为什么做 argos
+
+常见做法是「选框架 = 选协议」：gRPC 一套生成物，REST 再写一套，自有二进制协议又是一套。换对外形态往往意味着换栈或大量适配层。
+
+argos 反过来问：**如果协议只是三个正交维度的组合，会怎样？**
+
+| 维度 | 职责 | 例子 |
+|------|------|------|
+| **IDL** | 服务与方法签名、消息类型 | protobuf（`.proto`） |
+| **Transport** | 网络通道：连接、路由、状态码写回 | `http2`、`http1`、`ws`、`tcp`、`udp`、`telnet` |
+| **Codec** | 消息与字节的互转 | `protobuf`、`json` |
+
+三者独立选配。例如 **gRPC** 并不是代码里的类型，而是 `http2` + `protobuf` 按 gRPC 线缆约定实现之后，**自然出现**的行为——`grpcurl` 能调通，就是验收。
 
 ```
-              ┌─ IDL ──────── protobuf（消息类型）
-组合出一个协议 ─┼─ Transport ── 网络通道（边界、路由、status）
-              └─ Codec ────── 消息 ↔ 字节
+         ┌─ IDL ─────────── 方法名、Request/Response 类型
+协议  =  ┼─ Transport ──── 怎么连、怎么路由、怎么收尾
+         └─ Codec ─────────  body 怎么编解码
 ```
 
-框架里没有 `Protocol` 类型。例如 **gRPC** 是 `transport/http2` + `codec/protobuf` 按 gRPC 线缆约定实现后自然出现的结果，`grpcurl` 能调通即为验收。
+---
 
-## 目录
+## 一张图看懂
 
-| 路径 | 说明 |
-|---|---|
-| `argos.go` | 公共 API 门面（生成代码 import 此包） |
-| `server/` `client/` | 服务注册与客户端 `Open` |
-| `transport/` | http2、http1、ws、tcp、udp、telnet |
-| `codec/` | protobuf、protojson |
-| `example/echo/` | Echo 示例与六传输集成测试 |
-| `cmd/argos/` | CLI 入口（`main` 仅几行） |
-| `internal/cmd/` | CLI 子命令：`generate stub`、`frontend list` |
-| `internal/codegen/` | IR、生成器、IDL 前端（proto / ir / 插件） |
-| `.agents/skills/argos-test-fix/` | Agent skill：跑测 → 定位 → 修复 |
+```
+  echo.proto          impl.go              main.go（你选组合）
+      │                  │                      │
+      ▼                  ▼                      ▼
+  消息 + 桩代码      纯业务逻辑          Transport + Codec + 端口
+      │                  │                      │
+      └────────── RegisterEchoService ──────────┘
+                              │
+          ┌───────────────────┼───────────────────┐
+          ▼                   ▼                   ▼
+      :9090 gRPC          :8080 REST          :7000 TCP 信封
+     (http2+protobuf)    (http1+json)       (tcp+protobuf)
+          ...              ws / udp / telnet ...
+```
 
-## 快速开始
+**一份 impl，注册多次 `NewService`**，每次绑定不同的 Transport + Codec + 端口即可。
 
-**要求**：Go 1.27+（`make verify` 仅此即可）。跑协议验收时另需 `grpcurl` / `curl` / `python3`（CI 会装）。
+---
+
+## 30 秒体验
+
+**环境**：Go 1.27+
 
 ```bash
 git clone https://github.com/argos-io/argos.git
 cd argos
-make verify    # 提交前推荐：lint + 全量测试 + 协议/传输集成
+make verify          # 全量测试 + 六协议外部客户端验收
+go run example/echo/main.go   # 六端口 Echo 服务
 ```
 
-### 跑 Echo 六端口服务
+起服务后，可用常见工具直接调用：
 
-```bash
-go run example/echo/main.go
-```
-
-| 传输 | 地址 | 客户端示例 |
-|---|---|---|
-| gRPC (h2c) | `:9090` | 见下方 grpcurl |
-| HTTP/JSON | `:8080` | `scripts/accept-curl.sh 127.0.0.1:8080 hi` |
+| 对外形态 | 端口 | 怎么试 |
+|----------|------|--------|
+| gRPC (h2c) | `:9090` | `grpcurl -plaintext -proto example/echo/echo.proto -import-path example/echo -d '{"msg":"hi"}' localhost:9090 echo.v1.EchoService/Echo` |
+| REST/JSON | `:8080` | `scripts/accept-curl.sh 127.0.0.1:8080 hi` |
 | WebSocket | `:8081` | `scripts/accept-ws.sh 127.0.0.1:8081 hi` |
-| TCP | `:7000` | `scripts/accept-envelope.sh 127.0.0.1:7000 hi` |
+| TCP 信封 | `:7000` | `scripts/accept-envelope.sh 127.0.0.1:7000 hi` |
 | UDP | `:7001` | `scripts/accept-udp.sh 127.0.0.1:7001 hi` |
-| Telnet | `:2323` | `scripts/accept-telnet.sh 127.0.0.1:2323 hi`（带 `ServerAuth` filter） |
+| Telnet | `:2323` | `scripts/accept-telnet.sh 127.0.0.1:2323 hi` |
 
-gRPC 示例（需 `-import-path`）：
+完整示例与集成测试在 [`example/echo/`](example/echo/)。
 
-```bash
-grpcurl -plaintext \
-  -proto example/echo/echo.proto \
-  -import-path example/echo \
-  -d '{"msg":"hi"}' \
-  localhost:9090 echo.v1.EchoService/Echo
-```
+---
 
-流式 Watch（http2 / tcp / ws）：
+## 写服务时长什么样
 
-```bash
-scripts/accept-grpcurl-watch.sh 127.0.0.1:9090 watch
-scripts/accept-envelope-watch.sh 127.0.0.1:7000 watch
-scripts/accept-ws-watch.sh 127.0.0.1:8081 watch
-```
-
-### 使用者代码（示意）
+**业务 impl**——只依赖根包 `argos` 和 protobuf 类型，不出现传输名：
 
 ```go
-// 服务端：一个 Service 绑定一个 Transport（实例或注册名 "http2"）
+func (s *echoImpl) Echo(ctx context.Context, req *EchoRequest) (*EchoResponse, error) {
+    return &EchoResponse{Msg: "hello " + req.GetMsg()}, nil
+}
+```
+
+**启动**——在 `main` 里选 Transport 和 Codec（可多端口、同一份 impl）：
+
+```go
+server := argos.NewServer()
+impl := echov1.NewEchoImpl()
+
 svc := server.NewService(
-    argos.WithTransport(http2.New()), // 或 argos.WithTransport("http2")
+    argos.WithTransport(http2.New()),
     argos.WithListenAddress(":9090"),
-    argos.WithCodec(protobufcodec.New()), // 或 argos.WithCodec("protobuf")
+    argos.WithCodec(protobufcodec.New()),
 )
 echov1.RegisterEchoService(svc, impl)
 
-// 客户端
-c := echov1.NewEchoServiceClient(
+server.Run(ctx)
+```
+
+**客户端**——生成桩提供 `NewEchoServiceClient`；地址用 `WithTarget`（内置 `ip://` scheme）：
+
+```go
+client := echov1.NewEchoServiceClient(
     argos.WithTarget("ip://127.0.0.1:9090"),
     argos.WithTransport(http2.New()),
     argos.WithCodec(protobufcodec.New()),
 )
-resp, err := c.Echo(ctx, &echov1.EchoRequest{Msg: "hi"})
+resp, _ := client.Echo(ctx, &echov1.EchoRequest{Msg: "hi"})
 ```
 
-业务 `impl` 只实现 `EchoServiceServer`，不 import 任何 `transport/*`。
-
-## 代码生成
-
-IDL → Go 走 **`argos generate stub` 一条路径**：内置 **protocompile** 解析 `.proto`，**无需安装 `protoc`**。一次产出 `*.pb.go`（message）+ `*.argos.go`（Register / Client 桩）。
+从 `.proto` 生成 message 与桩（内置 protocompile，**无需系统安装 protoc**）：
 
 ```bash
-# 从 .proto 生成 echo.pb.go + echo.argos.go
-go run ./cmd/argos generate stub \
-  --from proto --proto-path . example/echo/echo.proto
-
-# 校验金样（CI / make test-generate；自动检查同 base 的 pb + argos）
-go run ./cmd/argos generate stub --check example/echo/echo.argos.go \
-  --from proto --proto-path . example/echo/echo.proto
-
-# 手写 IR fallback（可仅 services，message 手写）
-go run ./cmd/argos generate stub --from ir service.ir.json
-
-# 外部 IDL 插件（emit-ir → IR v2 JSON，默认 *.msg.go + stub）
-go run ./cmd/argos generate stub --plugin ./argos-idl-foo -- input.thrift
+go run ./cmd/argos generate stub --from proto --proto-path . example/echo/echo.proto
 ```
 
-```bash
-make build-argos     # 构建 bin/argos
-make test-generate   # --check 与手写 diff 为空
-```
+---
 
-## 测试
+## 内置组合一览
 
-```bash
-make verify            # 提交前推荐（= make all + make test-integration）
-make all               # lint + test + race + test-generate + accept
-make test-integration  # test-protocol + transport + example/echo
-make test-protocol     # 外部客户端协议验收（grpcurl/curl/python3 脚本）
-make test-unit         # 内核小包
-make test-race         # 竞态
-make lint              # go vet + staticcheck
-make accept            # 仓库验收（impl 零痕迹、唯一 dispatch 路径等）
-```
+| Transport | 典型对外形态 | 流式 | 常见 Codec |
+|-----------|-------------|------|------------|
+| `http2` | gRPC（h2c） | ✅ | protobuf |
+| `http1` | REST | unary | json |
+| `ws` | WebSocket 信封 | ✅ | protobuf |
+| `tcp` / `udp` | 自有二进制信封 | tcp ✅ / udp unary | protobuf |
+| `telnet` | 行协议调试口 | unary | json |
 
-| 层级 | 说明 |
-|---|---|
-| 单元 | `filter`、`stream`、`errs`、`internal/wire` 等 |
-| 集成 | 各 `transport/*_test.go`、`example/echo/*_test.go` |
-| 协议验收 | `example/echo/protocol_accept_test.go` + `scripts/accept-*.sh`（unary + Watch 流式） |
-| 验收 | `scripts/accept-all.sh`（#4 业务零传输痕迹、#6 派发仅在 `binding.invoke`） |
+Filter（鉴权、日志等）在 Transport 之上、业务之下，服务端与客户端共用同一套类型。
 
-### `test-protocol` vs `ACCEPT_EXTERNAL`
+---
 
-| | `make test-protocol` | `ACCEPT_EXTERNAL=1 make accept` |
-|---|---|---|
-| 何时跑 | `make test-integration` / `make verify` 自动跑 | 手动，需先起服务 |
-| 端口 | 动态 `127.0.0.1:0`（测试内起服） | 固定端口（`example/echo/main.go` 默认） |
-| 工具 | grpcurl、curl、python3 **必须**（缺则 fail） | 同上 |
-| 覆盖 | unary Echo × 六传输 + Watch × http2/tcp/ws | 同上 + Watch 流式 smoke（http2/tcp/ws） |
+## 仓库里有什么
 
-```bash
-# 对手动六端口服务的 smoke（非 CI 默认）
-go run example/echo/main.go   # 另开终端
-ACCEPT_EXTERNAL=1 make accept
-```
+| 区域 | 说明 |
+|------|------|
+| [`argos.go`](argos.go) | 公开 API 门面；生成代码与业务只 import 此包 |
+| [`example/echo/`](example/echo/) | 可运行的六传输示例 + 协议验收测试 |
+| [`transport/`](transport/) | 六种传输实现 |
+| [`codec/`](codec/) | protobuf、json 编解码 |
+| [`cmd/argos/`](cmd/argos/) | CLI：`generate stub`、`frontend list` |
+| [`internal/codegen/`](internal/codegen/) | IR、生成器、proto 前端 |
 
-Agent 修复流程见 [`.agents/skills/argos-test-fix/SKILL.md`](.agents/skills/argos-test-fix/SKILL.md)（`/argos-test-fix`）。
+架构约束、开发流程、测试分层见 **[AGENTS.md](AGENTS.md)**。提交前推荐 `make verify`。
 
-## 内置传输一览
-
-| Transport | 方法路由 | 流式 | 典型组合 |
-|---|---|---|---|
-| `http2` | `:path` | ✅ | gRPC + protobuf |
-| `http1` | `POST /{service}/{method}` | ❌ unary | REST + json |
-| `ws` | 信封字段 | ✅ | 自有 RPC + protobuf |
-| `tcp` / `udp` | 信封字段 | tcp ✅ / udp ❌ | 自有 RPC + protobuf |
-| `telnet` | 首行方法名 | ❌ | 调试 + json |
-
-## 开发
-
-- 代理/贡献者约定见 [AGENTS.md](AGENTS.md)
+---
 
 ## License
 

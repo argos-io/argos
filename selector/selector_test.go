@@ -7,13 +7,10 @@ import (
 	_ "github.com/argos-io/argos/selector/ip"
 )
 
-func TestParseIPBareHostPort(t *testing.T) {
-	addr, err := selector.Parse("127.0.0.1:9090")
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	if got, want := addr, "127.0.0.1:9090"; got != want {
-		t.Fatalf("address = %q, want %q", got, want)
+func TestParseRejectsBareHostPort(t *testing.T) {
+	_, err := selector.Parse("127.0.0.1:9090")
+	if err == nil {
+		t.Fatal("Parse: want error for target without scheme")
 	}
 }
 

@@ -12,8 +12,6 @@ import (
 	"sync"
 )
 
-const defaultScheme = "ip"
-
 // Selector resolves a target body (service-identifier) to a dial address.
 type Selector interface {
 	Select(service string) (string, error)
@@ -38,12 +36,15 @@ func Get(name string) Selector {
 	return registry[name]
 }
 
-// Parse resolves target to a dial address using the scheme in target, or ip when omitted.
+// Parse resolves target to a dial address. Target must be scheme://service-identifier
+// (for example ip://127.0.0.1:9090); bare host:port is rejected.
 func Parse(target string) (string, error) {
 	scheme, body := splitScheme(target)
 	if scheme == "" {
-		scheme = defaultScheme
-		body = target
+		return "", fmt.Errorf("selector: target must be scheme://service-identifier")
+	}
+	if body == "" {
+		return "", fmt.Errorf("selector: missing service identifier after %q://", scheme)
 	}
 	s := Get(scheme)
 	if s == nil {

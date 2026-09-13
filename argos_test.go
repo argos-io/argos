@@ -351,7 +351,7 @@ func TestFacadeOptionsWireThrough(t *testing.T) {
 	client := argos.NewClient(
 		argos.WithTransportNamed("missing"), // resolved at Open
 		argos.WithCodecNamed("missing"),
-		argos.WithTarget("127.0.0.1:9090"),
+		argos.WithTarget("ip://127.0.0.1:9090"),
 		argos.WithClientTransportOption(transport.WithDialAddress("127.0.0.1:9090")),
 	)
 	if client == nil {

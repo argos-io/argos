@@ -178,7 +178,7 @@ func WithServerTransportOption(opts ...transport.ServerOption) Option {
 	}
 }
 
-// WithTarget sets a client dial target (scheme://body, or bare host:port for ip).
+// WithTarget sets a client dial target (scheme://service-identifier, e.g. ip://127.0.0.1:9090).
 func WithTarget(target string) Option {
 	return func(c *Config) { c.ClientTarget = target }
 }

@@ -48,21 +48,17 @@ func TestClientTargetIPScheme(t *testing.T) {
 	}
 }
 
-func TestClientTargetBareHostPort(t *testing.T) {
-	var gotAddr string
+func TestClientTargetRejectsBareHostPort(t *testing.T) {
 	c := client.New(
 		option.WithTarget("127.0.0.1:7000"),
-		option.WithTransport(&captureTransport{gotAddr: &gotAddr}),
+		option.WithTransport(&captureTransport{}),
 		option.WithCodec(nopCodec{}),
 	)
-
-	if err := c.Open(context.Background(), "svc/Method", func(_ stream.Stream) error {
+	err := c.Open(context.Background(), "svc/Method", func(_ stream.Stream) error {
 		return nil
-	}); err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if got, want := gotAddr, "127.0.0.1:7000"; got != want {
-		t.Fatalf("dial address = %q, want %q", got, want)
+	})
+	if err == nil {
+		t.Fatal("expected error for target without scheme")
 	}
 }
 
