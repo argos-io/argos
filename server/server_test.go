@@ -6,7 +6,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/transport"
 )
 
@@ -26,7 +26,7 @@ func (noopTransport) Open(_ context.Context, _ string, _ ...transport.ClientOpti
 
 func TestRunErrorsWithoutCodec(t *testing.T) {
 	s := New()
-	s.NewService(option.WithTransport(noopTransport{}))
+	s.NewService(argos.WithTransport(noopTransport{}))
 	if err := s.Run(context.Background()); err == nil {
 		t.Fatal("expected error without codec")
 	}
@@ -41,7 +41,7 @@ func TestRunEmptyServer(t *testing.T) {
 
 func TestRunErrorsWithoutTransport(t *testing.T) {
 	s := New()
-	s.NewService(option.WithCodec(nopCodec{}))
+	s.NewService(argos.WithCodec(nopCodec{}))
 	if err := s.Run(context.Background()); err == nil {
 		t.Fatal("expected error without transport")
 	}
@@ -82,8 +82,8 @@ func TestRunMultiServiceAllStart(t *testing.T) {
 	block1 := &blockingTransport{started: make(chan struct{})}
 	block2 := &blockingTransport{started: make(chan struct{})}
 	s := New()
-	s.NewService(option.WithTransport(block1), option.WithCodec(nopCodec{}))
-	s.NewService(option.WithTransport(block2), option.WithCodec(nopCodec{}))
+	s.NewService(argos.WithTransport(block1), argos.WithCodec(nopCodec{}))
+	s.NewService(argos.WithTransport(block2), argos.WithCodec(nopCodec{}))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -101,8 +101,8 @@ func TestRunFirstListenerErrorCancelsOthers(t *testing.T) {
 	listenErr := errors.New("listen failed")
 	block := &blockingTransport{started: make(chan struct{})}
 	s := New()
-	s.NewService(option.WithTransport(errTransport{err: listenErr}), option.WithCodec(nopCodec{}))
-	s.NewService(option.WithTransport(block), option.WithCodec(nopCodec{}))
+	s.NewService(argos.WithTransport(errTransport{err: listenErr}), argos.WithCodec(nopCodec{}))
+	s.NewService(argos.WithTransport(block), argos.WithCodec(nopCodec{}))
 
 	ctx := context.Background()
 	done := make(chan error, 1)
@@ -118,8 +118,8 @@ func TestRunJoinsMultipleListenerErrors(t *testing.T) {
 	err1 := errors.New("listen failed one")
 	err2 := errors.New("listen failed two")
 	s := New()
-	s.NewService(option.WithTransport(errTransport{err: err1}), option.WithCodec(nopCodec{}))
-	s.NewService(option.WithTransport(errTransport{err: err2}), option.WithCodec(nopCodec{}))
+	s.NewService(argos.WithTransport(errTransport{err: err1}), argos.WithCodec(nopCodec{}))
+	s.NewService(argos.WithTransport(errTransport{err: err2}), argos.WithCodec(nopCodec{}))
 
 	err := s.Run(context.Background())
 	if err == nil {

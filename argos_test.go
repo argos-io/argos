@@ -12,7 +12,7 @@ import (
 	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/metadata"
-	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/stream"
 
@@ -141,7 +141,7 @@ func runTestServer(t *testing.T, srv *server.Server, transport *loopbackTranspor
 func TestServerInvokeUnaryAndClosesSendAfterDispatch(t *testing.T) {
 	transport := newLoopbackTransport()
 	srv := server.New()
-	service := srv.NewService(option.WithTransport(transport), option.WithCodec(jsonCodec{}))
+	service := srv.NewService(argos.WithTransport(transport), argos.WithCodec(jsonCodec{}))
 
 	var dispatchDone atomic.Bool
 	service.Register(func(_ context.Context, method string, st stream.Stream) error {
@@ -184,9 +184,9 @@ func TestServerFilterShortCircuitSkipsDispatchAndCloseSend(t *testing.T) {
 	transport := newLoopbackTransport()
 	srv := server.New()
 	service := srv.NewService(
-		option.WithTransport(transport),
-		option.WithCodec(jsonCodec{}),
-		option.WithFilter(func(context.Context, string, stream.Stream, filter.Handler) error {
+		argos.WithTransport(transport),
+		argos.WithCodec(jsonCodec{}),
+		argos.WithFilter(func(context.Context, string, stream.Stream, filter.Handler) error {
 			return errs.Error(errs.Unauthenticated, "missing token")
 		}),
 	)
@@ -228,9 +228,9 @@ func TestClientOpenPreparesMetadataThenRunsFiltersWithoutClosing(t *testing.T) {
 		},
 	}
 	client := client.New(
-		option.WithTransport(transport),
-		option.WithCodec(jsonCodec{}),
-		option.WithFilter(func(ctx context.Context, method string, st stream.Stream, next filter.Handler) error {
+		argos.WithTransport(transport),
+		argos.WithCodec(jsonCodec{}),
+		argos.WithFilter(func(ctx context.Context, method string, st stream.Stream, next filter.Handler) error {
 			order = append(order, "filter")
 			if metadata.FromContext(ctx)["from-open"][0] != "yes" {
 				t.Fatal("filter did not receive the context passed to Transport.Open")
@@ -257,7 +257,7 @@ func TestClientOpenPreparesMetadataThenRunsFiltersWithoutClosing(t *testing.T) {
 func TestInvokeWithoutRegisterReturnsUnimplemented(t *testing.T) {
 	transport := newLoopbackTransport()
 	srv := server.New()
-	srv.NewService(option.WithTransport(transport), option.WithCodec(jsonCodec{}))
+	srv.NewService(argos.WithTransport(transport), argos.WithCodec(jsonCodec{}))
 	runTestServer(t, srv, transport)
 
 	framer := &testFramer{}
@@ -273,20 +273,20 @@ func TestInvokeWithoutRegisterReturnsUnimplemented(t *testing.T) {
 func TestAssemblyMistakesReturnErrorAtRunOrOpen(t *testing.T) {
 	t.Run("server missing codec", func(t *testing.T) {
 		srv := server.New()
-		srv.NewService(option.WithTransport(newLoopbackTransport()))
+		srv.NewService(argos.WithTransport(newLoopbackTransport()))
 		if err := srv.Run(context.Background()); err == nil {
 			t.Fatal("expected error")
 		}
 	})
 	t.Run("server missing transport", func(t *testing.T) {
 		srv := server.New()
-		srv.NewService(option.WithCodec(jsonCodec{}))
+		srv.NewService(argos.WithCodec(jsonCodec{}))
 		if err := srv.Run(context.Background()); err == nil {
 			t.Fatal("expected error")
 		}
 	})
 	t.Run("client missing codec", func(t *testing.T) {
-		client := client.New(option.WithTransport(newLoopbackTransport()))
+		client := client.New(argos.WithTransport(newLoopbackTransport()))
 		err := client.Open(context.Background(), "/echo.Echo/Say", func(stream.Stream) error {
 			return nil
 		})
@@ -295,7 +295,7 @@ func TestAssemblyMistakesReturnErrorAtRunOrOpen(t *testing.T) {
 		}
 	})
 	t.Run("client missing transport", func(t *testing.T) {
-		client := client.New(option.WithCodec(jsonCodec{}))
+		client := client.New(argos.WithCodec(jsonCodec{}))
 		err := client.Open(context.Background(), "/echo.Echo/Say", func(stream.Stream) error {
 			return nil
 		})
@@ -315,7 +315,7 @@ func TestWithMetadata(t *testing.T) {
 
 func TestWithTransportNamedRequiresRegistration(t *testing.T) {
 	srv := server.New()
-	srv.NewService(option.WithTransportNamed("no-such-transport"), option.WithCodec(jsonCodec{}))
+	srv.NewService(argos.WithTransportNamed("no-such-transport"), argos.WithCodec(jsonCodec{}))
 	if err := srv.Run(context.Background()); err == nil {
 		t.Fatal("expected error for unknown transport name")
 	}
@@ -323,14 +323,14 @@ func TestWithTransportNamedRequiresRegistration(t *testing.T) {
 
 func TestWithTransportInvalidTypeReturnsError(t *testing.T) {
 	srv := server.New()
-	srv.NewService(option.WithTransport(123), option.WithCodec(jsonCodec{}))
+	srv.NewService(argos.WithTransport(123), argos.WithCodec(jsonCodec{}))
 	if err := srv.Run(context.Background()); err == nil {
 		t.Fatal("expected error for invalid WithTransport type")
 	}
 }
 
 func TestWithCodecInvalidTypeReturnsError(t *testing.T) {
-	client := client.New(option.WithCodec(123), option.WithTransport(newLoopbackTransport()))
+	client := client.New(argos.WithCodec(123), argos.WithTransport(newLoopbackTransport()))
 	err := client.Open(context.Background(), "/echo.Echo/Say", func(stream.Stream) error {
 		return nil
 	})
@@ -343,12 +343,12 @@ func TestOptionsWireThrough(t *testing.T) {
 	tr := newLoopbackTransport()
 	srv := server.New()
 	svc := srv.NewService(
-		option.WithTransport(tr),
-		option.WithTransportInstance(tr),
-		option.WithCodec(jsonCodec{}),
-		option.WithCodecInstance(jsonCodec{}),
-		option.WithListenAddress(":8080"),
-		option.WithFilter(func(_ context.Context, _ string, _ stream.Stream, next filter.Handler) error {
+		argos.WithTransport(tr),
+		argos.WithTransportInstance(tr),
+		argos.WithCodec(jsonCodec{}),
+		argos.WithCodecInstance(jsonCodec{}),
+		argos.WithListenAddress(":8080"),
+		argos.WithFilter(func(_ context.Context, _ string, _ stream.Stream, next filter.Handler) error {
 			return next(context.Background(), "/m", nil)
 		}),
 	)
@@ -356,10 +356,10 @@ func TestOptionsWireThrough(t *testing.T) {
 		t.Fatal("nil service")
 	}
 	client := client.New(
-		option.WithTransportNamed("missing"), // resolved at Open
-		option.WithCodecNamed("missing"),
-		option.WithTarget("ip://127.0.0.1:9090"),
-		option.WithClientTransportOption(transport.WithDialAddress("127.0.0.1:9090")),
+		argos.WithTransportNamed("missing"), // resolved at Open
+		argos.WithCodecNamed("missing"),
+		argos.WithTarget("ip://127.0.0.1:9090"),
+		argos.WithClientTransportOption(transport.WithDialAddress("127.0.0.1:9090")),
 	)
 	if client == nil {
 		t.Fatal("nil client")

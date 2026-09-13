@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/stream"
 
@@ -40,14 +40,14 @@ func (*echoServer) Watch(
 	return stream.Send(&echov1.Event{Msg: "hello " + request.GetMsg()})
 }
 
-func startEcho(t *testing.T, addr string, opts ...option.Option) *channel {
+func startEcho(t *testing.T, addr string, opts ...argos.Option) *channel {
 	t.Helper()
 	tr := New().(*channel)
 	server := server.New()
-	service := server.NewService(append([]option.Option{
-		option.WithTransport(tr),
-		option.WithListenAddress("127.0.0.1:0"),
-		option.WithCodec(protobuf.New()),
+	service := server.NewService(append([]argos.Option{
+		argos.WithTransport(tr),
+		argos.WithListenAddress("127.0.0.1:0"),
+		argos.WithCodec(protobuf.New()),
 	}, opts...)...)
 	echov1.RegisterEchoService(service, &echoServer{})
 
@@ -67,9 +67,9 @@ func startEcho(t *testing.T, addr string, opts ...option.Option) *channel {
 func TestEchoBinaryEnvelope(t *testing.T) {
 	tr := startEcho(t, ":0")
 	client := echov1.NewEchoServiceClient(
-		option.WithTransport(tr),
-		option.WithListenAddress("127.0.0.1:0"),
-		option.WithCodec(protobuf.New()),
+		argos.WithTransport(tr),
+		argos.WithListenAddress("127.0.0.1:0"),
+		argos.WithCodec(protobuf.New()),
 	)
 	response, err := client.Echo(
 		context.Background(),
@@ -156,9 +156,9 @@ func waitBound(tr *channel) {
 func TestWatchRoundTrip(t *testing.T) {
 	tr := startEcho(t, "127.0.0.1:0")
 	client := echov1.NewEchoServiceClient(
-		option.WithTransport(tr),
-		option.WithListenAddress("127.0.0.1:0"),
-		option.WithCodec(protobuf.New()),
+		argos.WithTransport(tr),
+		argos.WithListenAddress("127.0.0.1:0"),
+		argos.WithCodec(protobuf.New()),
 	)
 	stream := client.Watch(context.Background(), &echov1.WatchRequest{Msg: "ws"})
 	event, err := stream.Recv()
@@ -177,11 +177,11 @@ func TestFilterShortCircuitStatus(t *testing.T) {
 	deny := func(context.Context, string, stream.Stream, filter.Handler) error {
 		return errs.Error(errs.Unauthenticated, "no token")
 	}
-	tr := startEcho(t, "127.0.0.1:0", option.WithFilter(deny))
+	tr := startEcho(t, "127.0.0.1:0", argos.WithFilter(deny))
 	client := echov1.NewEchoServiceClient(
-		option.WithTransport(tr),
-		option.WithListenAddress("127.0.0.1:0"),
-		option.WithCodec(protobuf.New()),
+		argos.WithTransport(tr),
+		argos.WithListenAddress("127.0.0.1:0"),
+		argos.WithCodec(protobuf.New()),
 	)
 	_, err := client.Echo(context.Background(), &echov1.EchoRequest{Msg: "ws"})
 	if errs.CodeOf(err) != errs.Unauthenticated {

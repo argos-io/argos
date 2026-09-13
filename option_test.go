@@ -1,4 +1,4 @@
-package option
+package argos
 
 import (
 	"context"

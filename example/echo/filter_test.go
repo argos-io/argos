@@ -11,7 +11,7 @@ import (
 	jsoncodec "github.com/argos-io/argos/codec/json"
 	protobufcodec "github.com/argos-io/argos/codec/protobuf"
 	"github.com/argos-io/argos/errs"
-	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/transport"
 	"github.com/argos-io/argos/transport/http1"
@@ -49,8 +49,8 @@ func startFilteredServer(t *testing.T, tc transportCase) addrTransport {
 	tr := tc.newTR()
 	srv := server.New()
 	service := srv.NewService(append(withLoopbackTransport(tr),
-		option.WithCodec(tc.codec),
-		option.WithFilter(ServerAuth),
+		argos.WithCodec(tc.codec),
+		argos.WithFilter(ServerAuth),
 	)...)
 	RegisterEchoService(service, NewEchoImpl())
 
@@ -105,8 +105,8 @@ func TestFilterRejectsWithoutToken(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tr := startFilteredServer(t, tc)
 			client := NewEchoServiceClient(
-				option.WithTransport(tr),
-				option.WithCodec(tc.codec),
+				argos.WithTransport(tr),
+				argos.WithCodec(tc.codec),
 			)
 			_, err := client.Echo(context.Background(), &EchoRequest{Msg: tc.name})
 			if err == nil {

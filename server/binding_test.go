@@ -11,7 +11,7 @@ import (
 
 	"github.com/argos-io/argos/errs"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/stream"
 )
 
@@ -58,7 +58,7 @@ func (nopWriteCloser) Close() error { return nil }
 
 func TestBindingInvokeUnaryAndClosesSendAfterDispatch(t *testing.T) {
 	svc := &Service{binding: binding{
-		Config: option.NewConfig(option.WithCodec(jsonCodec{})),
+		Config: argos.NewConfig(argos.WithCodec(jsonCodec{})),
 	}}
 	var dispatchDone atomic.Bool
 	svc.Register(func(_ context.Context, method string, st stream.Stream) error {
@@ -98,9 +98,9 @@ func TestBindingInvokeUnaryAndClosesSendAfterDispatch(t *testing.T) {
 
 func TestBindingFilterShortCircuitSkipsDispatchAndCloseSend(t *testing.T) {
 	svc := &Service{binding: binding{
-		Config: option.NewConfig(
-			option.WithCodec(jsonCodec{}),
-			option.WithFilter(func(context.Context, string, stream.Stream, filter.Handler) error {
+		Config: argos.NewConfig(
+			argos.WithCodec(jsonCodec{}),
+			argos.WithFilter(func(context.Context, string, stream.Stream, filter.Handler) error {
 				return errs.Error(errs.Unauthenticated, "missing token")
 			}),
 		),
@@ -126,7 +126,7 @@ func TestBindingFilterShortCircuitSkipsDispatchAndCloseSend(t *testing.T) {
 
 func TestBindingUnregisteredMethodReturnsUnimplemented(t *testing.T) {
 	svc := &Service{binding: binding{
-		Config: option.NewConfig(option.WithCodec(jsonCodec{})),
+		Config: argos.NewConfig(argos.WithCodec(jsonCodec{})),
 	}}
 
 	framer := &testFramer{}
@@ -142,7 +142,7 @@ func TestBindingUnregisteredMethodReturnsUnimplemented(t *testing.T) {
 func TestBindingCloseSendErrorAfterSuccessfulDispatch(t *testing.T) {
 	closeErr := errors.New("close send failed")
 	svc := &Service{binding: binding{
-		Config: option.NewConfig(option.WithCodec(jsonCodec{})),
+		Config: argos.NewConfig(argos.WithCodec(jsonCodec{})),
 	}}
 	svc.Register(func(context.Context, string, stream.Stream) error {
 		return nil
@@ -158,7 +158,7 @@ func TestBindingDispatchErrorWinsOverCloseSendError(t *testing.T) {
 	dispatchErr := errs.Error(errs.Internal, "dispatch failed")
 	closeErr := errors.New("close send failed")
 	svc := &Service{binding: binding{
-		Config: option.NewConfig(option.WithCodec(jsonCodec{})),
+		Config: argos.NewConfig(argos.WithCodec(jsonCodec{})),
 	}}
 	svc.Register(func(context.Context, string, stream.Stream) error {
 		return dispatchErr

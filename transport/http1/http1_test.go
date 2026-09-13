@@ -12,7 +12,7 @@ import (
 
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/metadata"
-	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/stream"
 
@@ -52,16 +52,16 @@ func (s *echoServer) Watch(
 
 func startEcho(
 	t *testing.T,
-	opts ...option.Option,
+	opts ...argos.Option,
 ) (*channel, *echoServer) {
 	t.Helper()
 	tr := New().(*channel)
 	impl := &echoServer{watchSecondSend: make(chan error, 1)}
 	server := server.New()
-	service := server.NewService(append([]option.Option{
-		option.WithTransport(tr),
-		option.WithListenAddress("127.0.0.1:0"),
-		option.WithCodec(jsoncodec.New()),
+	service := server.NewService(append([]argos.Option{
+		argos.WithTransport(tr),
+		argos.WithListenAddress("127.0.0.1:0"),
+		argos.WithCodec(jsoncodec.New()),
 	}, opts...)...)
 	echov1.RegisterEchoService(service, impl)
 
@@ -81,9 +81,9 @@ func startEcho(
 func TestEchoRoundTripWithMetadata(t *testing.T) {
 	tr, _ := startEcho(t)
 	client := echov1.NewEchoServiceClient(
-		option.WithTransport(tr),
-		option.WithListenAddress("127.0.0.1:0"),
-		option.WithCodec(jsoncodec.New()),
+		argos.WithTransport(tr),
+		argos.WithListenAddress("127.0.0.1:0"),
+		argos.WithCodec(jsoncodec.New()),
 	)
 	ctx := metadata.With(context.Background(), metadata.Metadata{
 		"authorization": {"Bearer token"},
@@ -100,9 +100,9 @@ func TestEchoRoundTripWithMetadata(t *testing.T) {
 func TestWatchSecondSendFails(t *testing.T) {
 	tr, impl := startEcho(t)
 	client := echov1.NewEchoServiceClient(
-		option.WithTransport(tr),
-		option.WithListenAddress("127.0.0.1:0"),
-		option.WithCodec(jsoncodec.New()),
+		argos.WithTransport(tr),
+		argos.WithListenAddress("127.0.0.1:0"),
+		argos.WithCodec(jsoncodec.New()),
 	)
 	stream := client.Watch(context.Background(), &echov1.WatchRequest{Msg: "http"})
 	event, err := stream.Recv()
@@ -170,7 +170,7 @@ func TestFilterUnauthenticated(t *testing.T) {
 	) error {
 		return errs.Error(errs.Unauthenticated, "no token")
 	}
-	tr, _ := startEcho(t, option.WithFilter(deny))
+	tr, _ := startEcho(t, argos.WithFilter(deny))
 
 	response, err := http.Post(
 		"http://"+transport.DialableAddress(tr.Addr())+"/echo.v1.EchoService/Echo",
@@ -193,9 +193,9 @@ func TestFilterUnauthenticated(t *testing.T) {
 	}
 
 	client := echov1.NewEchoServiceClient(
-		option.WithTransport(tr),
-		option.WithListenAddress("127.0.0.1:0"),
-		option.WithCodec(jsoncodec.New()),
+		argos.WithTransport(tr),
+		argos.WithListenAddress("127.0.0.1:0"),
+		argos.WithCodec(jsoncodec.New()),
 	)
 	_, err = client.Echo(context.Background(), &echov1.EchoRequest{Msg: "http"})
 	if got := errs.CodeOf(err); got != errs.Unauthenticated {

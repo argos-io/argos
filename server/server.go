@@ -6,7 +6,7 @@ import (
 	"errors"
 
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos"
 )
 
 // Server owns the services served together.
@@ -25,8 +25,8 @@ func New() *Server {
 }
 
 // NewService adds a Service to the Server.
-func (s *Server) NewService(opts ...option.Option) *Service {
-	service := &Service{binding: binding{Config: option.NewConfig(opts...)}}
+func (s *Server) NewService(opts ...argos.Option) *Service {
+	service := &Service{binding: binding{Config: argos.NewConfig(opts...)}}
 	s.services = append(s.services, service)
 	return service
 }

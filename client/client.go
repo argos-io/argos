@@ -6,7 +6,7 @@ import (
 
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/metadata"
-	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/selector"
 	"github.com/argos-io/argos/stream"
 	"github.com/argos-io/argos/transport"
@@ -16,12 +16,12 @@ import (
 
 // Client opens calls through one Transport and Codec.
 type Client struct {
-	cfg option.Config
+	cfg argos.Config
 }
 
 // New creates a Client configured by opts.
-func New(opts ...option.Option) *Client {
-	return &Client{cfg: option.NewConfig(opts...)}
+func New(opts ...argos.Option) *Client {
+	return &Client{cfg: argos.NewConfig(opts...)}
 }
 
 // Open opens method and runs call through the configured filters.

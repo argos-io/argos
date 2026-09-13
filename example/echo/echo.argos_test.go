@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/transport"
 
@@ -106,8 +106,8 @@ func TestEchoRoundTrip(t *testing.T) {
 	transport := newMemoryTransport()
 	server := server.New()
 	service := server.NewService(
-		option.WithTransport(transport),
-		option.WithCodec(protobuf.New()),
+		argos.WithTransport(transport),
+		argos.WithCodec(protobuf.New()),
 	)
 	RegisterEchoService(service, &echoImpl{})
 
@@ -121,8 +121,8 @@ func TestEchoRoundTrip(t *testing.T) {
 	})
 
 	client := NewEchoServiceClient(
-		option.WithTransport(transport),
-		option.WithCodec(protobuf.New()),
+		argos.WithTransport(transport),
+		argos.WithCodec(protobuf.New()),
 	)
 	response, err := client.Echo(
 		context.Background(),

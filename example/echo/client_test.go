@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/argos-io/argos/codec"
-	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/server"
 
 	jsoncodec "github.com/argos-io/argos/codec/json"
@@ -23,7 +23,7 @@ func startEchoServer(t *testing.T, tr addrTransport, codec codec.Codec) {
 	t.Helper()
 	server := server.New()
 	service := server.NewService(append(withLoopbackTransport(tr),
-		option.WithCodec(codec),
+		argos.WithCodec(codec),
 	)...)
 	RegisterEchoService(service, NewEchoImpl())
 
@@ -82,8 +82,8 @@ func TestClientEchoSixTransports(t *testing.T) {
 			tr := tc.newTR()
 			startEchoServer(t, tr, tc.codec)
 			client := NewEchoServiceClient(
-				option.WithTransport(tr),
-				option.WithCodec(tc.codec),
+				argos.WithTransport(tr),
+				argos.WithCodec(tc.codec),
 			)
 			resp, err := client.Echo(context.Background(), &EchoRequest{Msg: tc.name})
 			if err != nil {
@@ -119,8 +119,8 @@ func TestClientMetadataPassesAuthFilter(t *testing.T) {
 			tr := tc.newTR()
 			server := server.New()
 			service := server.NewService(append(withLoopbackTransport(tr),
-				option.WithCodec(tc.codec),
-				option.WithFilter(ServerAuth),
+				argos.WithCodec(tc.codec),
+				argos.WithFilter(ServerAuth),
 			)...)
 			RegisterEchoService(service, NewEchoImpl())
 
@@ -136,9 +136,9 @@ func TestClientMetadataPassesAuthFilter(t *testing.T) {
 			})
 
 			client := NewEchoServiceClient(
-				option.WithTransport(tr),
-				option.WithCodec(tc.codec),
-				option.WithFilter(ClientAuth),
+				argos.WithTransport(tr),
+				argos.WithCodec(tc.codec),
+				argos.WithFilter(ClientAuth),
 			)
 			resp, err := client.Echo(context.Background(), &EchoRequest{Msg: tc.name})
 			if err != nil {

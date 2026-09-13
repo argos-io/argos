@@ -5,13 +5,13 @@ import (
 
 	"github.com/argos-io/argos/errs"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/stream"
 	"github.com/argos-io/argos/transport"
 )
 
 type binding struct {
-	option.Config
+	argos.Config
 	dispatch filter.Handler
 }
 

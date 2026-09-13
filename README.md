@@ -93,8 +93,8 @@ func (s *echoImpl) Echo(ctx context.Context, req *EchoRequest) (*EchoResponse, e
 
 ```go
 import (
+    "github.com/argos-io/argos"
     protobufcodec "github.com/argos-io/argos/codec/protobuf"
-    "github.com/argos-io/argos/option"
     "github.com/argos-io/argos/server"
     "github.com/argos-io/argos/transport/http2"
 )
@@ -103,9 +103,9 @@ srv := server.New()
 impl := echov1.NewEchoImpl()
 
 svc := srv.NewService(
-    option.WithTransport(http2.New()),
-    option.WithListenAddress(":9090"),
-    option.WithCodec(protobufcodec.New()),
+    argos.WithTransport(http2.New()),
+    argos.WithListenAddress(":9090"),
+    argos.WithCodec(protobufcodec.New()),
 )
 echov1.RegisterEchoService(svc, impl)
 
@@ -116,9 +116,9 @@ srv.Run(ctx)
 
 ```go
 client := echov1.NewEchoServiceClient(
-    option.WithTarget("ip://127.0.0.1:9090"),
-    option.WithTransport(http2.New()),
-    option.WithCodec(protobufcodec.New()),
+    argos.WithTarget("ip://127.0.0.1:9090"),
+    argos.WithTransport(http2.New()),
+    argos.WithCodec(protobufcodec.New()),
 )
 resp, _ := client.Echo(ctx, &echov1.EchoRequest{Msg: "hi"})
 ```

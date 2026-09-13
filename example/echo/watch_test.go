@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/codec"
-	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos"
 
 	jsoncodec "github.com/argos-io/argos/codec/json"
 	protobufcodec "github.com/argos-io/argos/codec/protobuf"
@@ -48,8 +48,8 @@ func TestWatchStreaming(t *testing.T) {
 			tr := tc.newTR()
 			startEchoServer(t, tr, tc.codec)
 			client := NewEchoServiceClient(
-				option.WithTransport(tr),
-				option.WithCodec(tc.codec),
+				argos.WithTransport(tr),
+				argos.WithCodec(tc.codec),
 			)
 			stream := client.Watch(context.Background(), &WatchRequest{Msg: tc.name})
 			want := []string{tc.name + " one", tc.name + " two", tc.name + " three"}
@@ -97,8 +97,8 @@ func TestWatchFailsOnUnaryTransports(t *testing.T) {
 			tr := tc.newTR()
 			startEchoServer(t, tr, tc.codec)
 			client := NewEchoServiceClient(
-				option.WithTransport(tr),
-				option.WithCodec(tc.codec),
+				argos.WithTransport(tr),
+				argos.WithCodec(tc.codec),
 			)
 			stream := client.Watch(context.Background(), &WatchRequest{Msg: tc.name})
 			event, err := stream.Recv()

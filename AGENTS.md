@@ -11,7 +11,7 @@
 | | |
 |---|---|
 | 定位 | **验证模型**，不是生产 RPC 框架 |
-| 入口 | 子包组合：`server`、`client`、`option`、`stream`、`filter`、`errs`、`metadata` 等 |
+| 入口 | 根包 `With*` + 子包：`server`、`client`、`stream`、`filter`、`errs`、`metadata` 等 |
 | 传输 | `transport/{http2,http1,ws,tcp,udp,telnet}/` |
 | 真源 | 代码 + 测试 + 本文件；计划/设计文档不入库（勿建 `docs/`） |
 
@@ -20,11 +20,10 @@
 ## 目录与依赖
 
 ```
-argos.go                 # 模块根（仅包注释；API 在各子包）
+argos.go option.go       # 根包：WithTransport/WithCodec 等共用配置
 errs/ metadata/          # 运行时基础类型
 filter/ stream/          # 调用链与消息层
 server/ client/          # 服务端绑定与客户端 Open
-option/                  # Service/Client 共用配置与 With*
 selector/                # 客户端 target 寻址：scheme 选实现，body 解析为 dial 地址（可含服务发现）
 codec/                   # Codec 接口；codec/{protobuf,json} 实现
 transport/               # Transport/Framer 接口；transport/{http2,...} 实现
@@ -43,17 +42,17 @@ argos_test.go            # 根包 loopback 集成测（测公开 API）
 
 | 层 | 结论 |
 |---|---|
-| 子包直 import | ✅ 生成代码与业务按需 import 子包，根包不做 type alias |
+| 根包 `With*` | ✅ 配置在根 `argos`；`server`/`client` import 根包取 `Option`/`Config` |
 | `errs`/`metadata` 独立 | ✅ 传输实现不必 import 根包 |
-| `server`/`client`/`option` 分设 | ✅ 职责清晰；配置在 `option` |
+| `server`/`client` 分设 | ✅ 职责清晰；共用配置在根包 |
 | `stream` 与 `transport.Framer` 并存 | ✅ 字节层 vs 消息层，见 stream 包注释 |
 | `internal/codegen` 与 `internal/cmd` 分离 | ✅ 生成逻辑可测、CLI 只做 flag 接线 |
 | `codec/codec.go` 仅接口 | ✅ 与 `transport/transport.go` 对称 |
-| 暂不动 | `argos_test.go` 留根目录（测 server/client/option 回路）；`example/echo` 兼示例与集成测 |
+| 暂不动 | `argos_test.go` 留根目录（测 server/client/With* 回路）；`example/echo` 兼示例与集成测 |
 
 **依赖方向（硬约束）**
 
-- 生成代码与业务：按需 import 子包（常见 `server`、`client`、`option`、`stream`、`errs`）；业务 impl **不得** import `transport/*`、`codec/*`
+- 生成代码与业务：按需 import 根 `argos`（With*）与子包（常见 `server`、`client`、`stream`、`errs`）；业务 impl **不得** import `transport/*`、`codec/*`
 - `transport/*`：import `transport`、`errs`、`metadata`；自有族加 `internal/wire`；http1/http2 加 `internal/statusmap`
 - 根 `argos` **不得** import 任何 `transport/*`
 
@@ -76,7 +75,7 @@ argos_test.go            # 根包 loopback 集成测（测公开 API）
 
 | 规则 | 说明 |
 |------|------|
-| 业务 / 生成桩 | 按需 import 子包（如 `server`、`client`、`option`、`stream`、`filter`、`errs`、`metadata`） |
+| 业务 / 生成桩 | 按需 import 根 `argos` + 子包（如 `server`、`client`、`stream`、`filter`、`errs`、`metadata`） |
 | 业务 impl | **不得** import `transport/*`、`codec/*`（grep 不到 http/grpc/ws 等） |
 | 一个 Service | 恰好绑定 **一个 Transport + 一个 Codec** |
 | 多协议对外 | 同一份 `impl` 注册到 **多个** `Service`（各配不同 Transport/Codec/端口） |
@@ -132,18 +131,18 @@ go run github.com/argos-io/argos/cmd/argos generate stub \
 
 ```go
 import (
+    "github.com/argos-io/argos"
     protobufcodec "github.com/argos-io/argos/codec/protobuf"
-    "github.com/argos-io/argos/option"
     "github.com/argos-io/argos/server"
     "github.com/argos-io/argos/transport/http2"
 )
 
 srv := server.New()
 impl := mysvc.NewXxxImpl()
-for _, opts := range [][]option.Option{{
-    option.WithTransport(http2.New()),
-    option.WithListenAddress(":9090"),
-    option.WithCodec(protobufcodec.New()),
+for _, opts := range [][]argos.Option{{
+    argos.WithTransport(http2.New()),
+    argos.WithListenAddress(":9090"),
+    argos.WithCodec(protobufcodec.New()),
 }} {
     svc := srv.NewService(opts...)
     mysvc.RegisterXxxService(svc, impl)
@@ -155,15 +154,15 @@ srv.Run(ctx)
 
 **4. 客户端**
 
-生成桩提供 `NewXxxServiceClient(opts ...option.Option)`。
+生成桩提供 `NewXxxServiceClient(opts ...argos.Option)`。
 
 **Loopback 测试**（同进程、共享 Transport 实例）：
 
 ```go
 tr := http2.New()
 client := mysvc.NewXxxServiceClient(
-    option.WithTransport(tr),
-    option.WithCodec(protobufcodec.New()),
+    argos.WithTransport(tr),
+    argos.WithCodec(protobufcodec.New()),
 )
 ```
 
@@ -173,9 +172,9 @@ client := mysvc.NewXxxServiceClient(
 import _ "github.com/argos-io/argos/selector/ip" // 注册 ip scheme
 
 client := mysvc.NewXxxServiceClient(
-    option.WithTarget("ip://127.0.0.1:9090"),
-    option.WithTransport(http2.New()),
-    option.WithCodec(protobufcodec.New()),
+    argos.WithTarget("ip://127.0.0.1:9090"),
+    argos.WithTransport(http2.New()),
+    argos.WithCodec(protobufcodec.New()),
 )
 ```
 

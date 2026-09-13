@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/argos-io/argos/client"
-	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/stream"
 	"github.com/argos-io/argos/transport"
 )
@@ -32,9 +32,9 @@ func (t *captureTransport) Open(_ context.Context, _ string, opts ...transport.C
 func TestClientTargetIPScheme(t *testing.T) {
 	var gotAddr string
 	c := client.New(
-		option.WithTarget("ip://127.0.0.1:9090"),
-		option.WithTransport(&captureTransport{gotAddr: &gotAddr}),
-		option.WithCodec(nopCodec{}),
+		argos.WithTarget("ip://127.0.0.1:9090"),
+		argos.WithTransport(&captureTransport{gotAddr: &gotAddr}),
+		argos.WithCodec(nopCodec{}),
 	)
 
 	err := c.Open(context.Background(), "svc/Method", func(_ stream.Stream) error {
@@ -50,9 +50,9 @@ func TestClientTargetIPScheme(t *testing.T) {
 
 func TestClientTargetRejectsBareHostPort(t *testing.T) {
 	c := client.New(
-		option.WithTarget("127.0.0.1:7000"),
-		option.WithTransport(&captureTransport{}),
-		option.WithCodec(nopCodec{}),
+		argos.WithTarget("127.0.0.1:7000"),
+		argos.WithTransport(&captureTransport{}),
+		argos.WithCodec(nopCodec{}),
 	)
 	err := c.Open(context.Background(), "svc/Method", func(_ stream.Stream) error {
 		return nil
@@ -68,7 +68,7 @@ func (nopCodec) Marshal(_ io.Writer, _ any) error   { return nil }
 func (nopCodec) Unmarshal(_ io.Reader, _ any) error { return nil }
 
 func TestOpenErrorsWithoutTransport(t *testing.T) {
-	c := client.New(option.WithCodec(nopCodec{}))
+	c := client.New(argos.WithCodec(nopCodec{}))
 	err := c.Open(context.Background(), "svc/Method", func(_ stream.Stream) error {
 		return nil
 	})
@@ -78,7 +78,7 @@ func TestOpenErrorsWithoutTransport(t *testing.T) {
 }
 
 func TestOpenErrorsWithoutCodec(t *testing.T) {
-	c := client.New(option.WithTransport(&captureTransport{}))
+	c := client.New(argos.WithTransport(&captureTransport{}))
 	err := c.Open(context.Background(), "svc/Method", func(_ stream.Stream) error {
 		return nil
 	})
@@ -89,9 +89,9 @@ func TestOpenErrorsWithoutCodec(t *testing.T) {
 
 func TestOpenInvalidTargetReturnsError(t *testing.T) {
 	c := client.New(
-		option.WithTarget("bad://no-such-scheme"),
-		option.WithTransport(&captureTransport{}),
-		option.WithCodec(nopCodec{}),
+		argos.WithTarget("bad://no-such-scheme"),
+		argos.WithTransport(&captureTransport{}),
+		argos.WithCodec(nopCodec{}),
 	)
 	err := c.Open(context.Background(), "svc/Method", func(_ stream.Stream) error {
 		return nil

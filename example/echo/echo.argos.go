@@ -6,7 +6,7 @@ import (
 
 	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/errs"
-	"github.com/argos-io/argos/option"
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/stream"
 )
@@ -73,7 +73,7 @@ type EchoService_WatchClient interface {
 }
 
 // NewEchoServiceClient creates an Echo service client.
-func NewEchoServiceClient(opts ...option.Option) EchoServiceClient {
+func NewEchoServiceClient(opts ...argos.Option) EchoServiceClient {
 	return &echoClient{c: client.New(opts...)}
 }
 

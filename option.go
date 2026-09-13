@@ -1,5 +1,4 @@
-// Package option holds shared Service and Client configuration.
-package option
+package argos
 
 import (
 	"fmt"
