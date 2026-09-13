@@ -141,10 +141,9 @@ func (t *channel) serveConn(
 	// so wait for its FIN instead. The deadline bounds an initiator that never
 	// hangs up; a well-behaved one hangs up as soon as it has the status.
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		if err := tcpConn.CloseWrite(); err == nil {
-			_ = tcpConn.SetReadDeadline(time.Now().Add(drainTimeout))
-			_, _ = io.Copy(io.Discard, tcpConn)
-		}
+		_ = tcpConn.CloseWrite()
+		_ = tcpConn.SetReadDeadline(time.Now().Add(drainTimeout))
+		_, _ = io.Copy(io.Discard, tcpConn)
 	}
 }
 
@@ -198,12 +197,10 @@ func (f *framer) readAhead() {
 		env, err := f.readEnvelope()
 		if err != nil {
 			f.readErr = err
-			f.closeConn()
 			return
 		}
 		if env.Flags&wire.FlagStatus != 0 {
 			f.readErr = statusError(env.Payload)
-			f.closeConn()
 			return
 		}
 		// A bare end-of-direction frame tells the initiator nothing the trailer
@@ -215,7 +212,6 @@ func (f *framer) readAhead() {
 		case f.frames <- env:
 		case <-f.ctx.Done():
 			f.readErr = f.ctx.Err()
-			f.closeConn()
 			return
 		}
 	}

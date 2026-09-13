@@ -221,12 +221,10 @@ func (f *framer) readAhead() {
 		env, err := f.readEnvelope()
 		if err != nil {
 			f.readErr = err
-			f.closeConn()
 			return
 		}
 		if env.Flags&wire.FlagStatus != 0 {
 			f.readErr = statusError(env.Payload)
-			f.closeConn()
 			return
 		}
 		if env.Flags&wire.FlagEnd != 0 && len(env.Payload) == 0 {
@@ -236,7 +234,6 @@ func (f *framer) readAhead() {
 		case f.frames <- env:
 		case <-f.ctx.Done():
 			f.readErr = f.ctx.Err()
-			f.closeConn()
 			return
 		}
 	}
