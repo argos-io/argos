@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -218,14 +219,18 @@ func outputPath(opts Options, inputs []string, file ir.File, name string) (strin
 }
 
 func safeOutputPath(dir, name string) (string, error) {
-	if filepath.IsAbs(name) {
+	// IR can come from a different host than the generator. Treat both slash
+	// styles as path separators while validating so a Windows traversal cannot
+	// become a literal filename on Unix (or vice versa).
+	normalized := strings.ReplaceAll(name, `\`, "/")
+	if filepath.IsAbs(name) || path.IsAbs(normalized) || hasWindowsVolume(normalized) {
 		return "", fmt.Errorf("stub: output path %q must be relative", name)
 	}
 	base, err := filepath.Abs(dir)
 	if err != nil {
 		return "", fmt.Errorf("stub: resolve output directory %q: %w", dir, err)
 	}
-	candidate := filepath.Join(base, filepath.Clean(name))
+	candidate := filepath.Join(base, filepath.FromSlash(path.Clean(normalized)))
 	rel, err := filepath.Rel(base, candidate)
 	if err != nil {
 		return "", fmt.Errorf("stub: resolve output path %q: %w", name, err)
@@ -234,6 +239,10 @@ func safeOutputPath(dir, name string) (string, error) {
 		return "", fmt.Errorf("stub: output path %q escapes output directory %q", name, dir)
 	}
 	return candidate, nil
+}
+
+func hasWindowsVolume(name string) bool {
+	return len(name) >= 2 && name[1] == ':'
 }
 
 func checkFiles(path string, files []ir.File) error {
