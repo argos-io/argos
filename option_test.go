@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/argos-io/argos/codec"
@@ -30,6 +31,28 @@ type stubCodec struct{}
 
 func (stubCodec) Marshal(io.Writer, any) error   { return nil }
 func (stubCodec) Unmarshal(io.Reader, any) error { return nil }
+
+type namedTransport struct{ name string }
+
+func (t namedTransport) TransportName() string { return t.name }
+
+func (namedTransport) ListenAndServe(
+	context.Context,
+	func(context.Context, string, transport.Framer) error,
+	...transport.ServerOption,
+) error {
+	return nil
+}
+
+func (namedTransport) Open(context.Context, string, ...transport.ClientOption) (transport.Framer, error) {
+	return nil, nil
+}
+
+type namedCodec struct{ name string }
+
+func (c namedCodec) CodecName() string            { return c.name }
+func (namedCodec) Marshal(io.Writer, any) error   { return nil }
+func (namedCodec) Unmarshal(io.Reader, any) error { return nil }
 
 func TestNewConfigMergesOptions(t *testing.T) {
 	tr := stubTransport{}
@@ -159,6 +182,44 @@ func TestWithCodecByName(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsNilInstancesAndFactories(t *testing.T) {
+	var tr *stubTransport
+	cfg := NewConfig(WithTransport(tr))
+	if _, err := cfg.ResolveTransport(); err == nil {
+		t.Fatal("ResolveTransport accepted a typed-nil instance")
+	}
+
+	var cd *stubCodec
+	cfg = NewConfig(WithCodec(cd))
+	if _, err := cfg.ResolveCodec(); err == nil {
+		t.Fatal("ResolveCodec accepted a typed-nil instance")
+	}
+
+	transport.Register("test-nil-transport", func() transport.Transport { return nil })
+	cfg = NewConfig(WithTransportNamed("test-nil-transport"))
+	if _, err := cfg.ResolveTransport(); err == nil {
+		t.Fatal("ResolveTransport accepted a nil factory result")
+	}
+
+	codec.Register("test-nil-codec", func() codec.Codec { return nil })
+	cfg = NewConfig(WithCodecNamed("test-nil-codec"))
+	if _, err := cfg.ResolveCodec(); err == nil {
+		t.Fatal("ResolveCodec accepted a nil factory result")
+	}
+}
+
+func TestNewConfigRejectsNilOptionAndFilter(t *testing.T) {
+	cfg := NewConfig(nil)
+	if _, err := cfg.ResolveTransport(); err == nil || !strings.Contains(err.Error(), "nil option") {
+		t.Fatalf("nil option error = %v", err)
+	}
+
+	cfg = NewConfig(WithFilter(nil))
+	if _, err := cfg.ResolveCodec(); err == nil || !strings.Contains(err.Error(), "nil filter") {
+		t.Fatalf("nil filter error = %v", err)
+	}
+}
+
 func TestWithTransportInvalidTypeReturnsError(t *testing.T) {
 	cfg := NewConfig(WithTransport(123))
 	_, err := cfg.ResolveTransport()
@@ -210,10 +271,69 @@ func TestCodecForCallUsesCachedCodec(t *testing.T) {
 	}
 }
 
+func TestValidateCompatibility(t *testing.T) {
+	tests := []struct {
+		name       string
+		transport  string
+		codec      string
+		namedCodec bool
+		wantError  bool
+		errorText  string
+	}{
+		{name: "http1 json", transport: "http1", codec: "json", namedCodec: true},
+		{name: "http1 protobuf", transport: "http1", codec: "protobuf", namedCodec: true, wantError: true, errorText: "requires codec \"json\""},
+		{name: "http1 unnamed", transport: "http1", wantError: true, errorText: "requires a named \"json\" codec"},
+		{name: "http1 empty codec identity", transport: "http1", codec: "", namedCodec: true, wantError: true, errorText: "requires a named \"json\" codec"},
+		{name: "http2 protobuf", transport: "http2", codec: "protobuf", namedCodec: true},
+		{name: "http2 json", transport: "http2", codec: "json", namedCodec: true, wantError: true, errorText: "requires codec \"protobuf\""},
+		{name: "telnet json", transport: "telnet", codec: "json", namedCodec: true},
+		{name: "telnet protobuf", transport: "telnet", codec: "protobuf", namedCodec: true, wantError: true, errorText: "requires codec \"json\""},
+		{name: "tcp unnamed", transport: "tcp"},
+		{name: "tcp custom", transport: "tcp", codec: "custom", namedCodec: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cd codec.Codec = stubCodec{}
+			if tt.namedCodec {
+				cd = namedCodec{name: tt.codec}
+			}
+			cfg := NewConfig(WithTransport(namedTransport{name: tt.transport}), WithCodec(cd))
+			err := cfg.ValidateCompatibility()
+			if tt.wantError {
+				if err == nil || !strings.Contains(err.Error(), tt.errorText) {
+					t.Fatalf("error = %v, want substring %q", err, tt.errorText)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateCompatibility: %v", err)
+			}
+		})
+	}
+}
+
 func TestResolveTransportMissingMessage(t *testing.T) {
 	cfg := NewConfig()
 	_, err := cfg.ResolveTransport()
 	if err == nil || !strings.Contains(err.Error(), "binding needs WithTransport") {
 		t.Fatalf("error = %v", err)
 	}
+}
+
+func TestZeroConfigConcurrentResolution(t *testing.T) {
+	name := "test-zero-config-transport"
+	transport.Register(name, func() transport.Transport { return stubTransport{} })
+	cfg := Config{transportName: name}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := cfg.ResolveTransport(); err != nil {
+				t.Errorf("ResolveTransport: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
 }

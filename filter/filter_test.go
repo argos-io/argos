@@ -46,3 +46,12 @@ func TestChainShortCircuit(t *testing.T) {
 		t.Fatal("end handler ran after short-circuit")
 	}
 }
+
+func TestChainRejectsNilHandlers(t *testing.T) {
+	if err := Chain(nil, nil)(context.Background(), "m", stubStream{}); err == nil {
+		t.Fatal("nil terminal handler did not return an error")
+	}
+	if err := Chain([]Filter{nil}, func(context.Context, string, stream.Stream) error { return nil })(context.Background(), "m", stubStream{}); err == nil {
+		t.Fatal("nil filter did not return an error")
+	}
+}

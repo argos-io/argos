@@ -23,3 +23,20 @@ func TestMetadataFromContextWritable(t *testing.T) {
 		t.Fatal("map must be writable through context")
 	}
 }
+
+func TestWithDoesNotAliasParentOrInput(t *testing.T) {
+	parentValues := []string{"parent"}
+	parent := With(context.Background(), Metadata{"k": parentValues})
+	inputValues := []string{"input"}
+	child := With(parent, Metadata{"k": inputValues})
+
+	inputValues[0] = "changed input"
+	FromContext(child)["k"][0] = "changed child"
+
+	if got := FromContext(parent)["k"][0]; got != "parent" {
+		t.Fatalf("parent metadata changed to %q", got)
+	}
+	if got := FromContext(child)["k"][0]; got != "changed child" {
+		t.Fatalf("child metadata = %q, want changed child", got)
+	}
+}

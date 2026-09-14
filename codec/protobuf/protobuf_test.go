@@ -2,6 +2,7 @@ package protobuf
 
 import (
 	"bytes"
+	"io"
 	"testing"
 
 	"github.com/argos-io/argos/errs"
@@ -42,4 +43,20 @@ func TestRejectNonProto(t *testing.T) {
 	if errs.CodeOf(err) != errs.Internal {
 		t.Fatalf("Unmarshal: want Internal, got %v (%v)", errs.CodeOf(err), err)
 	}
+}
+
+func TestMarshalRejectsShortWrite(t *testing.T) {
+	err := New().Marshal(shortWriter{}, &testdata.Num{N: 1, S: "x"})
+	if err != io.ErrShortWrite {
+		t.Fatalf("Marshal error = %v, want %v", err, io.ErrShortWrite)
+	}
+}
+
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
 }

@@ -8,7 +8,9 @@ package selector
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 )
@@ -25,6 +27,12 @@ var (
 
 // Register adds a Selector for scheme name. Intended for subpackage init and plugins.
 func Register(name string, s Selector) {
+	if name == "" {
+		panic("selector: empty name")
+	}
+	if isNilSelector(s) {
+		panic("selector: nil selector")
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	registry[name] = s
@@ -40,6 +48,12 @@ func Get(name string) Selector {
 // Parse resolves target to a dial address. Target must be scheme://service-identifier
 // (for example ip://127.0.0.1:9090); bare host:port is rejected.
 func Parse(ctx context.Context, target string) (string, error) {
+	if ctx == nil {
+		return "", errors.New("selector: nil context")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	scheme, body := splitScheme(target)
 	if scheme == "" {
 		return "", fmt.Errorf("selector: target must be scheme://service-identifier")
@@ -52,6 +66,19 @@ func Parse(ctx context.Context, target string) (string, error) {
 		return "", fmt.Errorf("selector: unknown scheme %q", scheme)
 	}
 	return s.Select(ctx, body)
+}
+
+func isNilSelector(s Selector) bool {
+	if s == nil {
+		return true
+	}
+	v := reflect.ValueOf(s)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 func splitScheme(target string) (scheme, body string) {

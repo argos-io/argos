@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"testing"
+
+	"github.com/argos-io/argos/internal/limits"
 )
 
 type bytesCodec struct{}
@@ -24,6 +26,15 @@ func (bytesCodec) Unmarshal(r io.Reader, v any) error {
 	return nil
 }
 
+type partialCodec struct{}
+
+func (partialCodec) Marshal(io.Writer, any) error { return nil }
+func (partialCodec) Unmarshal(io.Reader, any) error {
+	// Deliberately leave the message unread to verify that the stream wrapper
+	// enforces the limit independently of codec behavior.
+	return nil
+}
+
 type memoryFramer struct {
 	recv   []byte
 	sent   bytes.Buffer
@@ -39,6 +50,11 @@ func (f *memoryFramer) Send() (io.WriteCloser, error) {
 }
 
 func (f *memoryFramer) CloseSend() error {
+	f.closed = true
+	return nil
+}
+
+func (f *memoryFramer) Close() error {
 	f.closed = true
 	return nil
 }
@@ -110,6 +126,29 @@ func (f *failRecvFramer) Send() (io.WriteCloser, error) {
 }
 
 func (f *failRecvFramer) CloseSend() error { return nil }
+func (f *failRecvFramer) Close() error     { return nil }
+
+type nilResultFramer struct {
+	nilReader bool
+	nilWriter bool
+}
+
+func (f *nilResultFramer) Recv() (io.Reader, error) {
+	if f.nilReader {
+		return nil, nil
+	}
+	return bytes.NewReader(nil), nil
+}
+
+func (f *nilResultFramer) Send() (io.WriteCloser, error) {
+	if f.nilWriter {
+		return nil, nil
+	}
+	return &bufferWriteCloser{buf: &bytes.Buffer{}}, nil
+}
+
+func (f *nilResultFramer) CloseSend() error { return nil }
+func (f *nilResultFramer) Close() error     { return nil }
 
 func TestSendMarshalFailureClosesWriter(t *testing.T) {
 	framer := &memoryFramer{}
@@ -125,5 +164,53 @@ func TestRecvPropagatesFramerError(t *testing.T) {
 	var out []byte
 	if err := st.Recv(&out); !errors.Is(err, want) {
 		t.Fatalf("Recv error = %v", err)
+	}
+}
+
+func TestWrapRejectsNilFramerResults(t *testing.T) {
+	var out []byte
+	if err := Wrap(&nilResultFramer{nilReader: true}, bytesCodec{}).Recv(&out); err == nil {
+		t.Fatal("Recv accepted a nil reader")
+	}
+	if err := Wrap(&nilResultFramer{nilWriter: true}, bytesCodec{}).Send([]byte("x")); err == nil {
+		t.Fatal("Send accepted a nil writer")
+	}
+}
+
+func TestWrapRejectsTypedNilDependencies(t *testing.T) {
+	var framer *memoryFramer
+	var codec *bytesCodec
+	var out []byte
+	if err := Wrap(framer, bytesCodec{}).Recv(&out); err == nil {
+		t.Fatal("Wrap accepted a typed-nil framer")
+	}
+	if err := Wrap(&memoryFramer{}, codec).Recv(&out); err == nil {
+		t.Fatal("Wrap accepted a typed-nil codec")
+	}
+}
+
+func TestWrapWithLimitBoundsSendAndRecv(t *testing.T) {
+	framer := &memoryFramer{recv: []byte("abc")}
+	st := WrapWithLimit(framer, bytesCodec{}, 2)
+
+	if err := st.Send([]byte("abc")); !errors.Is(err, limits.ErrTooLarge) {
+		t.Fatalf("Send error = %v, want message-size error", err)
+	}
+	if framer.sent.Len() != 0 {
+		t.Fatalf("transport received %d bytes after oversized encode", framer.sent.Len())
+	}
+
+	var out []byte
+	if err := st.Recv(&out); !errors.Is(err, limits.ErrTooLarge) {
+		t.Fatalf("Recv error = %v, want message-size error", err)
+	}
+}
+
+func TestWrapWithLimitRejectsOversizePartialCodec(t *testing.T) {
+	framer := &memoryFramer{recv: []byte("abc")}
+	st := WrapWithLimit(framer, partialCodec{}, 2)
+
+	if err := st.Recv(new(struct{})); !errors.Is(err, limits.ErrTooLarge) {
+		t.Fatalf("Recv error = %v, want message-size error", err)
 	}
 }

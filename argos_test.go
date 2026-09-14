@@ -15,10 +15,10 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/metadata"
-	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/stream"
 
@@ -65,6 +65,8 @@ func (f *testFramer) CloseSend() error {
 	}
 	return nil
 }
+
+func (f *testFramer) Close() error { return nil }
 
 type loopbackCall struct {
 	ctx    context.Context
@@ -216,7 +218,7 @@ func TestServerFilterShortCircuitSkipsDispatchAndCloseSend(t *testing.T) {
 	}
 }
 
-func TestClientOpenPreparesMetadataThenRunsFiltersWithoutClosing(t *testing.T) {
+func TestClientFiltersRunBeforeTransportOpen(t *testing.T) {
 	var order []string
 	framer := &testFramer{}
 	transport := &openTransport{
@@ -226,8 +228,8 @@ func TestClientOpenPreparesMetadataThenRunsFiltersWithoutClosing(t *testing.T) {
 				t.Fatalf("method = %q", method)
 			}
 			md := metadata.FromContext(ctx)
-			if md == nil {
-				t.Fatal("Open context has no writable Metadata")
+			if got := md["from-filter"]; len(got) != 1 || got[0] != "yes" {
+				t.Fatalf("Open metadata = %v, want from-filter=yes", md)
 			}
 			md["from-open"] = []string{"yes"}
 			return framer, nil
@@ -238,9 +240,7 @@ func TestClientOpenPreparesMetadataThenRunsFiltersWithoutClosing(t *testing.T) {
 		argos.WithCodec(jsonCodec{}),
 		argos.WithFilter(func(ctx context.Context, method string, st stream.Stream, next filter.Handler) error {
 			order = append(order, "filter")
-			if metadata.FromContext(ctx)["from-open"][0] != "yes" {
-				t.Fatal("filter did not receive the context passed to Transport.Open")
-			}
+			ctx = metadata.With(ctx, metadata.Metadata{"from-filter": {"yes"}})
 			return next(ctx, method, st)
 		}),
 	)
@@ -252,11 +252,37 @@ func TestClientOpenPreparesMetadataThenRunsFiltersWithoutClosing(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	if got := len(order); got != 3 ||
-		order[0] != "open" || order[1] != "filter" || order[2] != "call" {
+		order[0] != "filter" || order[1] != "open" || order[2] != "call" {
 		t.Fatalf("order = %v", order)
 	}
 	if framer.closeSendCount.Load() != 0 {
 		t.Fatal("Client.Open must not call CloseSend")
+	}
+}
+
+func TestClientFilterShortCircuitDoesNotOpenTransport(t *testing.T) {
+	var opens atomic.Int32
+	transport := &openTransport{
+		open: func(context.Context, string) (transport.Framer, error) {
+			opens.Add(1)
+			return &testFramer{}, nil
+		},
+	}
+	client := client.New(
+		argos.WithTransport(transport),
+		argos.WithCodec(jsonCodec{}),
+		argos.WithFilter(func(context.Context, string, stream.Stream, filter.Handler) error {
+			return errs.Error(errs.Unauthenticated, "denied")
+		}),
+	)
+	if err := client.Open(context.Background(), "/echo.Echo/Say", func(stream.Stream) error {
+		t.Fatal("call must not run after filter short-circuit")
+		return nil
+	}); errs.CodeOf(err) != errs.Unauthenticated {
+		t.Fatalf("error = %v, want Unauthenticated", err)
+	}
+	if got := opens.Load(); got != 0 {
+		t.Fatalf("Transport.Open calls = %d, want 0", got)
 	}
 }
 

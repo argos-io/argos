@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
-	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/server"
 
 	jsoncodec "github.com/argos-io/argos/codec/json"
@@ -85,7 +86,9 @@ func TestClientEchoSixTransports(t *testing.T) {
 				argos.WithTransport(tr),
 				argos.WithCodec(tc.codec),
 			)
-			resp, err := client.Echo(context.Background(), &EchoRequest{Msg: tc.name})
+			callCtx, callCancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer callCancel()
+			resp, err := client.Echo(callCtx, &EchoRequest{Msg: tc.name})
 			if err != nil {
 				t.Fatalf("Echo: %v", err)
 			}

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/stream"
 
@@ -66,13 +66,15 @@ func startEcho(t *testing.T, addr string, opts ...argos.Option) *channel {
 
 func TestEchoRoundTrip(t *testing.T) {
 	tr := startEcho(t, ":0")
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
 	client := echov1.NewEchoServiceClient(
 		argos.WithTransport(tr),
 		argos.WithListenAddress("127.0.0.1:0"),
 		argos.WithCodec(protobuf.New()),
 	)
 	response, err := client.Echo(
-		context.Background(),
+		ctx,
 		&echov1.EchoRequest{Msg: "udp"},
 	)
 	if err != nil {
@@ -85,7 +87,9 @@ func TestEchoRoundTrip(t *testing.T) {
 
 func TestSecondSendFails(t *testing.T) {
 	tr := startEcho(t, "127.0.0.1:0")
-	f, err := tr.Open(context.Background(), "echo.v1.EchoService/Echo")
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	f, err := tr.Open(ctx, "echo.v1.EchoService/Echo")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -114,6 +118,172 @@ func TestSecondSendFails(t *testing.T) {
 	}
 }
 
+type writeOnlyPacketConn struct {
+	closed chan struct{}
+	writes [][]byte
+}
+
+func (c *writeOnlyPacketConn) ReadFrom([]byte) (int, net.Addr, error) {
+	<-c.closed
+	return 0, nil, net.ErrClosed
+}
+
+func (c *writeOnlyPacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
+	c.writes = append(c.writes, append([]byte(nil), p...))
+	return len(p), nil
+}
+
+func (*writeOnlyPacketConn) LocalAddr() net.Addr { return &net.UDPAddr{} }
+
+func (c *writeOnlyPacketConn) Close() error {
+	select {
+	case <-c.closed:
+	default:
+		close(c.closed)
+	}
+	return nil
+}
+
+func (*writeOnlyPacketConn) SetDeadline(_ time.Time) error      { return nil }
+func (*writeOnlyPacketConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (*writeOnlyPacketConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+type shortWritePacketConn struct {
+	*writeOnlyPacketConn
+}
+
+func (c *shortWritePacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return len(p) - 1, nil
+}
+
+func TestCloseSendDoesNotWaitForResponse(t *testing.T) {
+	conn := &writeOnlyPacketConn{closed: make(chan struct{})}
+	f := &framer{
+		conn:           conn,
+		remoteAddr:     &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9},
+		ctx:            context.Background(),
+		method:         "svc/Method",
+		initiator:      true,
+		streamID:       1,
+		maxMessageSize: transport.DefaultMaxMessageSize,
+		done:           make(chan struct{}),
+	}
+	defer f.Close()
+
+	writer, err := f.Send()
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if _, err := writer.Write([]byte("request")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("writer.Close: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- f.CloseSend() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("CloseSend: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("CloseSend waited for a response")
+	}
+}
+
+func TestAbandonedResponseWriterDoesNotEmitEmptyMessage(t *testing.T) {
+	conn := &writeOnlyPacketConn{closed: make(chan struct{})}
+	f := &framer{
+		conn:           conn,
+		remoteAddr:     &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9},
+		ctx:            context.Background(),
+		initiator:      false,
+		streamID:       7,
+		maxMessageSize: transport.DefaultMaxMessageSize,
+	}
+	if _, err := f.Send(); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := f.writeResponse(errs.OK, ""); err != nil {
+		t.Fatalf("writeResponse: %v", err)
+	}
+	if len(conn.writes) != 1 {
+		t.Fatalf("WriteTo calls = %d, want 1", len(conn.writes))
+	}
+	frames, err := readDatagram(conn.writes[0], int64(len(conn.writes[0])))
+	if err != nil {
+		t.Fatalf("readDatagram: %v", err)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("response frames = %d, want end + status", len(frames))
+	}
+	end, err := wire.UnmarshalEnvelope(frames[0])
+	if err != nil {
+		t.Fatalf("unmarshal end: %v", err)
+	}
+	if end.Flags != wire.FlagEnd || len(end.Payload) != 0 {
+		t.Fatalf("first response frame = %+v, want empty end", end)
+	}
+}
+
+func TestContextCancellationClosesDirectFramer(t *testing.T) {
+	conn := &writeOnlyPacketConn{closed: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &framer{conn: conn, ctx: ctx, initiator: true, done: make(chan struct{})}
+	f.watchContext()
+	cancel()
+	select {
+	case <-conn.closed:
+	case <-time.After(time.Second):
+		t.Fatal("context cancellation did not close UDP framer")
+	}
+}
+
+func TestServerFramerContextCancellationStopsWrites(t *testing.T) {
+	conn := &writeOnlyPacketConn{closed: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	f := &framer{
+		conn:           conn,
+		remoteAddr:     &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9},
+		ctx:            ctx,
+		streamID:       1,
+		maxMessageSize: transport.DefaultMaxMessageSize,
+		done:           make(chan struct{}),
+	}
+	f.watchContext()
+	cancel()
+	deadline := time.Now().Add(time.Second)
+	for !f.isClosed() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !f.isClosed() {
+		t.Fatal("server framer did not close after context cancellation")
+	}
+	if _, err := f.Send(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Send after cancellation = %v, want context.Canceled", err)
+	}
+}
+
+func TestCloseSendRejectsPacketShortWrite(t *testing.T) {
+	f := &framer{
+		conn:           &shortWritePacketConn{writeOnlyPacketConn: &writeOnlyPacketConn{closed: make(chan struct{})}},
+		remoteAddr:     &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9},
+		ctx:            context.Background(),
+		method:         "svc/Method",
+		initiator:      true,
+		streamID:       1,
+		maxMessageSize: transport.DefaultMaxMessageSize,
+	}
+	if err := f.CloseSend(); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("CloseSend error = %v, want short write", err)
+	}
+}
+
 func waitBound(tr *channel) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -130,12 +300,14 @@ func TestFilterShortCircuitStatus(t *testing.T) {
 		return errs.Error(errs.Unauthenticated, "no token")
 	}
 	tr := startEcho(t, "127.0.0.1:0", argos.WithFilter(deny))
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
 	client := echov1.NewEchoServiceClient(
 		argos.WithTransport(tr),
 		argos.WithListenAddress("127.0.0.1:0"),
 		argos.WithCodec(protobuf.New()),
 	)
-	_, err := client.Echo(context.Background(), &echov1.EchoRequest{Msg: "udp"})
+	_, err := client.Echo(ctx, &echov1.EchoRequest{Msg: "udp"})
 	if errs.CodeOf(err) != errs.Unauthenticated {
 		t.Fatalf("code = %v, want Unauthenticated", err)
 	}
@@ -168,6 +340,10 @@ func TestEncodeMetadataTooLarge(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected metadata size error")
 	}
+	value := strings.Repeat("v", 32768)
+	if _, err := encodeMetadata(metadata.Metadata{"k": {value, value}}); err == nil {
+		t.Fatal("expected aggregate metadata size error")
+	}
 }
 
 func TestStatusErrorOKIsEOF(t *testing.T) {
@@ -196,9 +372,142 @@ func TestParseResponseMissingStatus(t *testing.T) {
 	}
 }
 
+func TestParseResponsePreservesPayloadBeforeStatusError(t *testing.T) {
+	message, err := wire.MarshalEnvelope(wire.Envelope{
+		StreamID: 7,
+		Payload:  []byte("first"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	end, err := wire.MarshalEnvelope(wire.Envelope{StreamID: 7, Flags: wire.FlagEnd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := wire.MarshalEnvelope(wire.Envelope{
+		StreamID: 7,
+		Flags:    wire.FlagStatus,
+		Payload:  wire.MarshalStatus(uint32(errs.InvalidArgument), "later error"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	datagram, err := marshalDatagram(message, end, status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &framer{
+		initiator:      true,
+		streamID:       7,
+		maxMessageSize: transport.DefaultMaxMessageSize,
+		sentEnd:        true,
+	}
+	if err := f.parseResponse(datagram); err != nil {
+		t.Fatalf("parseResponse: %v", err)
+	}
+	reader, err := f.Recv()
+	if err != nil {
+		t.Fatalf("first Recv: %v", err)
+	}
+	payload, err := io.ReadAll(reader)
+	if err != nil || string(payload) != "first" {
+		t.Fatalf("first payload = %q, err %v", payload, err)
+	}
+	if err := func() error { _, err := f.Recv(); return err }(); errs.CodeOf(err) != errs.InvalidArgument {
+		t.Fatalf("second Recv error = %v, want InvalidArgument", err)
+	}
+}
+
+func TestParseResponseRequiresStatusAfterEnd(t *testing.T) {
+	status, err := wire.MarshalEnvelope(wire.Envelope{
+		StreamID: 7,
+		Flags:    wire.FlagStatus,
+		Payload:  wire.MarshalStatus(uint32(errs.OK), ""),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	end, err := wire.MarshalEnvelope(wire.Envelope{StreamID: 7, Flags: wire.FlagEnd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	datagram, err := marshalDatagram(status, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &framer{initiator: true, streamID: 7, maxMessageSize: transport.DefaultMaxMessageSize, sentEnd: true}
+	if err := f.parseResponse(datagram); err == nil {
+		t.Fatal("parseResponse accepted status before end")
+	}
+}
+
+func TestParseResponseRejectsControlFrameMetadata(t *testing.T) {
+	end, err := wire.MarshalEnvelope(wire.Envelope{StreamID: 7, Flags: wire.FlagEnd, Metadata: []byte{1}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := wire.MarshalEnvelope(wire.Envelope{
+		StreamID: 7,
+		Flags:    wire.FlagStatus,
+		Payload:  wire.MarshalStatus(uint32(errs.OK), ""),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	datagram, err := marshalDatagram(end, status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &framer{initiator: true, streamID: 7, maxMessageSize: transport.DefaultMaxMessageSize, sentEnd: true}
+	if err := f.parseResponse(datagram); err == nil {
+		t.Fatal("parseResponse accepted metadata on end frame")
+	}
+
+	end, err = wire.MarshalEnvelope(wire.Envelope{StreamID: 7, Flags: wire.FlagEnd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err = wire.MarshalEnvelope(wire.Envelope{
+		StreamID: 7,
+		Flags:    wire.FlagStatus,
+		Metadata: []byte{1},
+		Payload:  wire.MarshalStatus(uint32(errs.OK), ""),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	datagram, err = marshalDatagram(end, status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f = &framer{initiator: true, streamID: 7, maxMessageSize: transport.DefaultMaxMessageSize, sentEnd: true}
+	if err := f.parseResponse(datagram); err == nil {
+		t.Fatal("parseResponse accepted metadata on status frame")
+	}
+
+	message, err := wire.MarshalEnvelope(wire.Envelope{
+		StreamID: 7,
+		Metadata: []byte{1},
+		Payload:  []byte("x"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	datagram, err = marshalDatagram(message, end, status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f = &framer{initiator: true, streamID: 7, maxMessageSize: transport.DefaultMaxMessageSize, sentEnd: true}
+	if err := f.parseResponse(datagram); err == nil {
+		t.Fatal("parseResponse accepted metadata on a response message")
+	}
+}
+
 func TestRecvBeforeRequest(t *testing.T) {
 	tr := startEcho(t, "127.0.0.1:0")
-	f, err := tr.Open(context.Background(), "echo.v1.EchoService/Echo")
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	f, err := tr.Open(ctx, "echo.v1.EchoService/Echo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,11 +543,11 @@ func TestHandlerErrorReturnsStatus(t *testing.T) {
 	}
 	defer conn.Close()
 
-	req, err := wire.MarshalEnvelope(wire.Envelope{Method: "svc/M", Payload: []byte("x")})
+	req, err := wire.MarshalEnvelope(wire.Envelope{Method: "svc/M", StreamID: 1, Payload: []byte("x")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	end, err := wire.MarshalEnvelope(wire.Envelope{Flags: wire.FlagEnd})
+	end, err := wire.MarshalEnvelope(wire.Envelope{StreamID: 1, Flags: wire.FlagEnd})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +555,8 @@ func TestHandlerErrorReturnsStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conn.Write(dg); err != nil {
+	_, err = conn.Write(dg)
+	if err != nil {
 		t.Fatal(err)
 	}
 
@@ -335,11 +645,11 @@ func TestRawEnvelopeUDP(t *testing.T) {
 	defer conn.Close()
 
 	md := []byte{0, 5, 't', 'o', 'k', 'e', 'n', 0, 3, 'a', 'b', 'c'}
-	req, err := wire.MarshalEnvelope(wire.Envelope{Method: "raw/Echo", Metadata: md, Payload: []byte("ping")})
+	req, err := wire.MarshalEnvelope(wire.Envelope{Method: "raw/Echo", StreamID: 1, Metadata: md, Payload: []byte("ping")})
 	if err != nil {
 		t.Fatal(err)
 	}
-	end, err := wire.MarshalEnvelope(wire.Envelope{Flags: wire.FlagEnd})
+	end, err := wire.MarshalEnvelope(wire.Envelope{StreamID: 1, Flags: wire.FlagEnd})
 	if err != nil {
 		t.Fatal(err)
 	}

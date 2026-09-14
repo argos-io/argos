@@ -44,3 +44,14 @@ func TestStatusRoundTrip(t *testing.T) {
 		t.Fatalf("status = (%d, %q), want (5, %q)", code, description, "broken")
 	}
 }
+
+func TestValidateStatusAllowsCodeBelowMessageLimit(t *testing.T) {
+	status := Envelope{Flags: FlagStatus, Payload: MarshalStatus(0, "")}
+	if err := ValidateEnvelope(status, 1, 64); err != nil {
+		t.Fatalf("ValidateEnvelope(status): %v", err)
+	}
+	status.Payload = MarshalStatus(0, "x")
+	if err := ValidateEnvelope(status, 1, 64); err == nil {
+		t.Fatal("ValidateEnvelope accepted status text above the four-byte control limit")
+	}
+}

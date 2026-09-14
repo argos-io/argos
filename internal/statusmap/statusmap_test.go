@@ -7,6 +7,24 @@ import (
 	"github.com/argos-io/argos/errs"
 )
 
+func TestLimitStatusMessage(t *testing.T) {
+	if got := LimitStatusMessage("short", 100); got != "short" {
+		t.Fatalf("short message = %q", got)
+	}
+	if got := LimitStatusMessage("abcdef", 3); got != "abc" {
+		t.Fatalf("ASCII message = %q, want abc", got)
+	}
+	if got := LimitStatusMessage("你好", 4); got != "你" {
+		t.Fatalf("UTF-8 message = %q, want first rune", got)
+	}
+	if got := LimitStatusMessage("text", 0); got != "" {
+		t.Fatalf("zero limit = %q, want empty", got)
+	}
+	if got := LimitStatusMessage("ok\xfftail", 100); got != "ok" {
+		t.Fatalf("invalid UTF-8 message = %q, want valid prefix", got)
+	}
+}
+
 func TestGRPCStatus(t *testing.T) {
 	tests := []struct {
 		code errs.Code

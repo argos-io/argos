@@ -96,6 +96,24 @@ func UnmarshalEnvelope(data []byte) (Envelope, error) {
 	}, nil
 }
 
+// ValidateEnvelope checks untrusted envelope sections against caller limits.
+func ValidateEnvelope(env Envelope, maxPayload, maxMetadata int64) error {
+	payloadLimit := maxPayload
+	if env.Flags == FlagStatus && payloadLimit > 0 && payloadLimit < 4 {
+		// Status always carries a four-byte code. It is control metadata, not a
+		// user message, so a small application payload limit must not make the
+		// transport unable to report completion or failure.
+		payloadLimit = 4
+	}
+	if payloadLimit > 0 && int64(len(env.Payload)) > payloadLimit {
+		return fmt.Errorf("wire: payload is %d bytes; maximum is %d", len(env.Payload), payloadLimit)
+	}
+	if maxMetadata > 0 && int64(len(env.Metadata)) > maxMetadata {
+		return fmt.Errorf("wire: metadata is %d bytes; maximum is %d", len(env.Metadata), maxMetadata)
+	}
+	return nil
+}
+
 // MarshalStatus encodes the terminal status payload.
 func MarshalStatus(code uint32, description string) []byte {
 	payload := make([]byte, 4+len(description))

@@ -7,10 +7,10 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/argos-io/argos"
 	jsoncodec "github.com/argos-io/argos/codec/json"
 	protobufcodec "github.com/argos-io/argos/codec/protobuf"
 	echov1 "github.com/argos-io/argos/example/echo"
-	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/transport/http1"
 	"github.com/argos-io/argos/transport/http2"

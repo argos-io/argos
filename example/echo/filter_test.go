@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/codec"
 	jsoncodec "github.com/argos-io/argos/codec/json"
 	protobufcodec "github.com/argos-io/argos/codec/protobuf"
 	"github.com/argos-io/argos/errs"
-	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/transport"
 	"github.com/argos-io/argos/transport/http1"
@@ -108,7 +108,9 @@ func TestFilterRejectsWithoutToken(t *testing.T) {
 				argos.WithTransport(tr),
 				argos.WithCodec(tc.codec),
 			)
-			_, err := client.Echo(context.Background(), &EchoRequest{Msg: tc.name})
+			callCtx, callCancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer callCancel()
+			_, err := client.Echo(callCtx, &EchoRequest{Msg: tc.name})
 			if err == nil {
 				t.Fatal("Echo succeeded, want Unauthenticated")
 			}

@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/codec/protobuf"
 	"github.com/argos-io/argos/transport"
+	"github.com/argos-io/argos/transport/http1"
 )
 
 type noopTransport struct{}
@@ -39,11 +43,35 @@ func TestRunEmptyServer(t *testing.T) {
 	}
 }
 
+func TestRunRejectsNilContext(t *testing.T) {
+	var ctx context.Context
+	if err := New().Run(ctx); err == nil {
+		t.Fatal("Run accepted nil context")
+	}
+}
+
+func TestRunRejectsPreCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := New().Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run error = %v, want context.Canceled", err)
+	}
+}
+
 func TestRunErrorsWithoutTransport(t *testing.T) {
 	s := New()
 	s.NewService(argos.WithCodec(nopCodec{}))
 	if err := s.Run(context.Background()); err == nil {
 		t.Fatal("expected error without transport")
+	}
+}
+
+func TestRunRejectsIncompatibleTransportCodec(t *testing.T) {
+	s := New()
+	s.NewService(argos.WithTransport(http1.New()), argos.WithCodec(protobuf.New()))
+	err := s.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), `transport "http1" is incompatible`) {
+		t.Fatalf("error = %v, want http1/codec incompatibility", err)
 	}
 }
 
@@ -111,6 +139,66 @@ func TestRunFirstListenerErrorCancelsOthers(t *testing.T) {
 	<-block.started
 	if err := <-done; !errors.Is(err, listenErr) {
 		t.Fatalf("Run error = %v, want %v", err, listenErr)
+	}
+}
+
+func TestRunFirstListenerErrorOmitsInternalCancellation(t *testing.T) {
+	listenErr := errors.New("listen failed")
+	block := &blockingTransport{started: make(chan struct{})}
+	s := New()
+	s.NewService(argos.WithTransport(errTransport{err: listenErr}), argos.WithCodec(nopCodec{}))
+	s.NewService(argos.WithTransport(block), argos.WithCodec(nopCodec{}))
+
+	done := make(chan error, 1)
+	go func() { done <- s.Run(context.Background()) }()
+
+	<-block.started
+	err := <-done
+	if !errors.Is(err, listenErr) {
+		t.Fatalf("Run error = %v, want %v", err, listenErr)
+	}
+	if strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Fatalf("Run error contains internal cancellation: %v", err)
+	}
+}
+
+func TestRunNormalListenerStopCancelsOthers(t *testing.T) {
+	block := &blockingTransport{started: make(chan struct{})}
+	s := New()
+	s.NewService(argos.WithTransport(noopTransport{}), argos.WithCodec(nopCodec{}))
+	s.NewService(argos.WithTransport(block), argos.WithCodec(nopCodec{}))
+
+	done := make(chan error, 1)
+	go func() { done <- s.Run(context.Background()) }()
+
+	select {
+	case <-block.started:
+	case <-time.After(time.Second):
+		t.Fatal("blocking listener did not start")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after a listener returned normally")
+	}
+}
+
+func TestRunResolvesAllServicesBeforeStartingListeners(t *testing.T) {
+	first := &blockingTransport{started: make(chan struct{})}
+	s := New()
+	s.NewService(argos.WithTransport(first), argos.WithCodec(nopCodec{}))
+	s.NewService(argos.WithTransportNamed("test-missing-late-transport"), argos.WithCodec(nopCodec{}))
+
+	if err := s.Run(context.Background()); err == nil {
+		t.Fatal("Run succeeded with an unresolved later service")
+	}
+	select {
+	case <-first.started:
+		t.Fatal("an earlier listener started before all services were resolved")
+	default:
 	}
 }
 

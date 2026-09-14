@@ -27,6 +27,18 @@ func TestDialAddressRequiresConfiguredOrExplicit(t *testing.T) {
 	}
 }
 
+func TestDialAddressUsesInjectedListenerAddress(t *testing.T) {
+	s := NewListenState()
+	s.MarkListen("", &net.TCPAddr{IP: net.IPv4zero, Port: 9091}, nil)
+	addr, err := s.DialAddress(context.Background(), ClientOptions{})
+	if err != nil {
+		t.Fatalf("DialAddress: %v", err)
+	}
+	if addr != "127.0.0.1:9091" {
+		t.Fatalf("addr = %q, want 127.0.0.1:9091", addr)
+	}
+}
+
 func TestDialAddressFixedListenAddress(t *testing.T) {
 	s := NewListenState()
 	s.MarkListen("127.0.0.1:9090", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9090}, nil)
@@ -36,6 +48,42 @@ func TestDialAddressFixedListenAddress(t *testing.T) {
 	}
 	if addr != "127.0.0.1:9090" {
 		t.Fatalf("addr = %q", addr)
+	}
+}
+
+func TestDialAddressFixedEmptyHostUsesLoopback(t *testing.T) {
+	s := NewListenState()
+	s.MarkListen(":9090", &net.TCPAddr{IP: net.IPv4zero, Port: 9090}, nil)
+	addr, err := s.DialAddress(context.Background(), ClientOptions{})
+	if err != nil {
+		t.Fatalf("DialAddress: %v", err)
+	}
+	if addr != "127.0.0.1:9090" {
+		t.Fatalf("addr = %q, want 127.0.0.1:9090", addr)
+	}
+}
+
+func TestDialAddressFixedWildcardUsesMatchingLoopback(t *testing.T) {
+	s := NewListenState()
+	s.MarkListen("[::]:9090", &net.TCPAddr{IP: net.IPv6unspecified, Port: 9090}, nil)
+	addr, err := s.DialAddress(context.Background(), ClientOptions{})
+	if err != nil {
+		t.Fatalf("DialAddress: %v", err)
+	}
+	if addr != "[::1]:9090" {
+		t.Fatalf("addr = %q, want [::1]:9090", addr)
+	}
+}
+
+func TestDialAddressEmptyHostUsesBoundAddressFamily(t *testing.T) {
+	s := NewListenState()
+	s.MarkListen(":9090", &net.UDPAddr{IP: net.IPv6unspecified, Port: 9090}, nil)
+	addr, err := s.DialAddress(context.Background(), ClientOptions{})
+	if err != nil {
+		t.Fatalf("DialAddress: %v", err)
+	}
+	if addr != "[::1]:9090" {
+		t.Fatalf("addr = %q, want [::1]:9090", addr)
 	}
 }
 
@@ -95,7 +143,7 @@ func TestDialableAddress(t *testing.T) {
 		{
 			name: "unspecified udp",
 			addr: &net.UDPAddr{IP: net.IPv6unspecified, Port: 7000},
-			want: "127.0.0.1:7000",
+			want: "[::1]:7000",
 		},
 	}
 	for _, tc := range tests {
@@ -136,6 +184,13 @@ func TestListenTCPWithInjectedListener(t *testing.T) {
 	}
 	if got != ln {
 		t.Fatal("expected injected listener")
+	}
+}
+
+func TestListenTCPRejectsTypedNilListener(t *testing.T) {
+	var listener *net.TCPListener
+	if _, err := ListenTCP(ServerOptions{Listener: listener}); err == nil {
+		t.Fatal("ListenTCP accepted a typed-nil listener")
 	}
 }
 

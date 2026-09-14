@@ -3,11 +3,14 @@ package http2
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/stream"
 
@@ -15,6 +18,8 @@ import (
 	"github.com/argos-io/argos/errs"
 	echov1 "github.com/argos-io/argos/example/echo"
 	"github.com/argos-io/argos/internal/statusmap"
+	"github.com/argos-io/argos/metadata"
+	"github.com/argos-io/argos/transport"
 )
 
 type echoServer struct{}
@@ -50,6 +55,82 @@ func TestGRPCStatusMapping(t *testing.T) {
 	}
 	if statusmap.FromGRPCStatus(99) != errs.Unknown {
 		t.Fatal("unknown grpc status must map to Unknown")
+	}
+}
+
+func TestTrailerErrorUnescapesMessage(t *testing.T) {
+	err := trailerError(&http.Response{
+		Trailer: http.Header{
+			trailerStatus:  []string{"3"},
+			trailerMessage: []string{"bad%20line%0A%22quote%22"},
+		},
+	})
+	if got, want := errs.CodeOf(err), errs.InvalidArgument; got != want {
+		t.Fatalf("code = %d, want %d", got, want)
+	}
+	if got, want := err.Error(), "bad line\n\"quote\""; got != want {
+		t.Fatalf("message = %q, want %q", got, want)
+	}
+}
+
+func TestTrailerErrorRequiresStatus(t *testing.T) {
+	for _, resp := range []*http.Response{
+		nil,
+		{},
+	} {
+		err := trailerError(resp)
+		if err == nil || err.Error() != "http2: missing grpc-status trailer" {
+			t.Fatalf("trailerError(%v) = %v, want missing-status error", resp, err)
+		}
+	}
+}
+
+func TestMetadataLimit(t *testing.T) {
+	if err := validateMetadata(metadata.Metadata{"x": {strings.Repeat("v", int(transport.DefaultMaxMetadataSize))}}); err == nil {
+		t.Fatal("validateMetadata accepted oversized metadata")
+	}
+	values := make([]string, 2)
+	for i := range values {
+		values[i] = strings.Repeat("v", int(transport.DefaultMaxMetadataSize/2))
+	}
+	if err := validateMetadata(metadata.Metadata{"repeated": values}); err == nil {
+		t.Fatal("validateMetadata accepted oversized repeated metadata")
+	}
+}
+
+func TestOversizedMetadataDoesNotBlockSend(t *testing.T) {
+	ctx := metadata.With(context.Background(), metadata.Metadata{
+		"x": {strings.Repeat("v", int(transport.DefaultMaxMetadataSize))},
+	})
+	f := &clientFramer{
+		ctx:            ctx,
+		endpoint:       "http://127.0.0.1:1/unused",
+		metadata:       metadata.FromContext(ctx),
+		client:         &http.Client{},
+		ready:          make(chan struct{}),
+		maxMessageSize: transport.DefaultMaxMessageSize,
+	}
+	t.Cleanup(func() { _ = f.Close() })
+
+	writer, err := f.Send()
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	writeDone := make(chan error, 1)
+	go func() {
+		if _, writeErr := writer.Write([]byte("payload")); writeErr != nil {
+			writeDone <- writeErr
+			return
+		}
+		writeDone <- writer.Close()
+	}()
+	select {
+	case writeErr := <-writeDone:
+		if writeErr == nil {
+			t.Fatal("Write succeeded despite oversized metadata")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Write blocked after the request failed")
 	}
 }
 
@@ -93,6 +174,37 @@ func TestEchoRoundTrip(t *testing.T) {
 	}
 	if got, want := response.GetMsg(), "hello http2"; got != want {
 		t.Fatalf("response = %q, want %q", got, want)
+	}
+}
+
+func TestClientTransportIsReusedAcrossCalls(t *testing.T) {
+	tr := New().(*channel)
+	first, err := tr.Open(context.Background(), "svc/First", transport.WithDialAddress("127.0.0.1:1"))
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	defer first.Close()
+	second, err := tr.Open(context.Background(), "svc/Second", transport.WithDialAddress("127.0.0.1:1"))
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	defer second.Close()
+	if first.(*clientFramer).client != second.(*clientFramer).client {
+		t.Fatal("Open created separate HTTP clients; connection pooling is disabled")
+	}
+}
+
+func TestRecvAfterCloseBeforeSendReturnsClosed(t *testing.T) {
+	f := &clientFramer{
+		ctx:            context.Background(),
+		ready:          make(chan struct{}),
+		maxMessageSize: transport.DefaultMaxMessageSize,
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := f.Recv(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Recv after Close = %v, want net.ErrClosed", err)
 	}
 }
 

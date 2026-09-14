@@ -1,8 +1,9 @@
-// Package stub renders ir.File into *.argos.go source.
+// Package stubgen renders ir.File into *.argos.go source.
 package stubgen
 
 import (
 	"fmt"
+	"go/format"
 	"strings"
 	"unicode"
 
@@ -11,8 +12,12 @@ import (
 
 // Generate returns Go source for one IR file.
 func Generate(file ir.File) ([]byte, error) {
-	if file.GoPackage == "" {
-		return nil, fmt.Errorf("codegen: go_package is required")
+	packageName, err := ir.PackageName(file.GoPackage)
+	if err != nil {
+		return nil, fmt.Errorf("codegen: %w", err)
+	}
+	if err := ir.ValidateNames(&file); err != nil {
+		return nil, fmt.Errorf("codegen: %w", err)
 	}
 	if file.StubName() == "" {
 		return nil, fmt.Errorf("codegen: stub output name is required")
@@ -23,15 +28,10 @@ func Generate(file ir.File) ([]byte, error) {
 
 	var b strings.Builder
 	b.WriteString("package ")
-	b.WriteString(file.GoPackage)
+	b.WriteString(packageName)
 	b.WriteString("\n\n")
-
-	needsIO := false
 	for _, svc := range file.Services {
 		for _, method := range svc.Methods {
-			if method.ServerStream {
-				needsIO = true
-			}
 			if err := validateMethod(svc, method); err != nil {
 				return nil, err
 			}
@@ -39,14 +39,10 @@ func Generate(file ir.File) ([]byte, error) {
 	}
 
 	b.WriteString("import (\n")
-	b.WriteString("\t\"context\"\n")
-	if needsIO {
-		b.WriteString("\t\"io\"\n")
-	}
-	b.WriteString("\n")
+	b.WriteString("\t\"context\"\n\n")
+	b.WriteString("\t\"github.com/argos-io/argos\"\n")
 	b.WriteString("\t\"github.com/argos-io/argos/client\"\n")
 	b.WriteString("\t\"github.com/argos-io/argos/errs\"\n")
-	b.WriteString("\t\"github.com/argos-io/argos\"\n")
 	b.WriteString("\t\"github.com/argos-io/argos/server\"\n")
 	b.WriteString("\t\"github.com/argos-io/argos/stream\"\n")
 	b.WriteString(")\n\n")
@@ -54,27 +50,18 @@ func Generate(file ir.File) ([]byte, error) {
 	for _, svc := range file.Services {
 		writeService(&b, file, svc)
 	}
-	return []byte(strings.TrimRight(b.String(), "\n") + "\n"), nil
+	source := []byte(strings.TrimRight(b.String(), "\n") + "\n")
+	formatted, err := format.Source(source)
+	if err != nil {
+		return nil, fmt.Errorf("codegen: format stub: %w", err)
+	}
+	return formatted, nil
 }
 
-func validateMethod(svc ir.Service, method ir.Method) error {
-	switch {
-	case !method.ClientStream && !method.ServerStream:
-		return nil
-	case method.ServerStream && !method.ClientStream:
-		return nil
-	default:
-		return fmt.Errorf("codegen: unsupported streaming on %s/%s", svc.GoName, method.GoName)
-	}
-}
+func validateMethod(_ ir.Service, _ ir.Method) error { return nil }
 
 func writeService(b *strings.Builder, file ir.File, svc ir.Service) {
 	prefix := servicePrefix(svc.GoName)
-	for _, method := range svc.Methods {
-		if method.FullName == "" && file.ProtoPackage != "" {
-			method.FullName = fmt.Sprintf("%s.%s/%s", file.ProtoPackage, svc.GoName, method.GoName)
-		}
-	}
 
 	constNames := make([]string, len(svc.Methods))
 	maxLen := 0
@@ -87,10 +74,7 @@ func writeService(b *strings.Builder, file ir.File, svc ir.Service) {
 	}
 	b.WriteString("const (\n")
 	for i, method := range svc.Methods {
-		fullName := method.FullName
-		if fullName == "" {
-			fullName = fmt.Sprintf("%s/%s", svc.GoName, method.GoName)
-		}
+		fullName := methodFullName(file, svc, method)
 		b.WriteString("\t")
 		b.WriteString(constNames[i])
 		if pad := maxLen - len(constNames[i]); pad > 0 {
@@ -110,6 +94,16 @@ func writeService(b *strings.Builder, file ir.File, svc ir.Service) {
 	writeStreamClients(b, svc)
 }
 
+func methodFullName(file ir.File, svc ir.Service, method ir.Method) string {
+	if method.FullName != "" {
+		return method.FullName
+	}
+	if file.ProtoPackage != "" {
+		return fmt.Sprintf("%s.%s/%s", file.ProtoPackage, svc.GoName, method.GoName)
+	}
+	return fmt.Sprintf("%s/%s", svc.GoName, method.GoName)
+}
+
 func writeServerInterface(b *strings.Builder, svc ir.Service) {
 	short := serviceShortName(svc.GoName)
 	b.WriteString("// ")
@@ -126,21 +120,28 @@ func writeServerInterface(b *strings.Builder, svc ir.Service) {
 	b.WriteString("}\n\n")
 
 	for _, method := range svc.Methods {
-		if !method.ServerStream {
+		if !method.ClientStream && !method.ServerStream {
 			continue
 		}
 		streamType := streamServerType(svc.GoName, method.GoName)
 		b.WriteString("// ")
 		b.WriteString(streamType)
-		b.WriteString(" sends events from a ")
+		b.WriteString(" sends and receives messages for a ")
 		b.WriteString(method.GoName)
 		b.WriteString(" call.\n")
 		b.WriteString("type ")
 		b.WriteString(streamType)
 		b.WriteString(" interface {\n")
-		b.WriteString("\tSend(*")
-		b.WriteString(method.OutputType)
-		b.WriteString(") error\n")
+		if method.ClientStream {
+			b.WriteString("\tRecv() (*")
+			b.WriteString(method.InputType)
+			b.WriteString(", error)\n")
+		}
+		if method.ClientStream || method.ServerStream {
+			b.WriteString("\tSend(*")
+			b.WriteString(method.OutputType)
+			b.WriteString(") error\n")
+		}
 		b.WriteString("}\n\n")
 	}
 }
@@ -155,13 +156,20 @@ func writeServerMethod(b *strings.Builder, svc ir.Service, method ir.Method) {
 		b.WriteString(") (*")
 		b.WriteString(method.OutputType)
 		b.WriteString(", error)\n")
-	case method.ServerStream && !method.ClientStream:
+	case !method.ClientStream && method.ServerStream:
 		streamType := streamServerType(svc.GoName, method.GoName)
 		b.WriteString("\t")
 		b.WriteString(method.GoName)
 		b.WriteString("(context.Context, *")
 		b.WriteString(method.InputType)
 		b.WriteString(", ")
+		b.WriteString(streamType)
+		b.WriteString(") error\n")
+	case method.ClientStream:
+		streamType := streamServerType(svc.GoName, method.GoName)
+		b.WriteString("\t")
+		b.WriteString(method.GoName)
+		b.WriteString("(context.Context, ")
 		b.WriteString(streamType)
 		b.WriteString(") error\n")
 	}
@@ -177,42 +185,64 @@ func writeRegister(b *strings.Builder, svc ir.Service, prefix string) {
 	b.WriteString("(svc *server.Service, impl ")
 	b.WriteString(svc.GoName)
 	b.WriteString("Server) {\n")
-	b.WriteString("\tsvc.Register(func(ctx context.Context, method string, st stream.Stream) error {\n")
-	b.WriteString("\t\tswitch method {\n")
+	b.WriteString("\tsvc.RegisterWithMethods(\n")
+	b.WriteString("\t\tfunc(ctx context.Context, method string, st stream.Stream) error {\n")
+	b.WriteString("\t\t\tswitch method {\n")
 	for _, method := range svc.Methods {
-		b.WriteString("\t\tcase ")
+		b.WriteString("\t\t\tcase ")
 		b.WriteString(prefix + method.GoName)
 		b.WriteString(":\n")
 		writeRegisterCase(b, svc, method)
 	}
-	b.WriteString("\t\tdefault:\n")
-	b.WriteString("\t\t\treturn errs.Error(errs.Unimplemented, \"unknown method\")\n")
-	b.WriteString("\t\t}\n")
-	b.WriteString("\t})\n")
+	b.WriteString("\t\t\tdefault:\n")
+	b.WriteString("\t\t\t\treturn errs.Error(errs.Unimplemented, \"unknown method\")\n")
+	b.WriteString("\t\t\t}\n")
+	b.WriteString("\t\t},\n")
+	for _, method := range svc.Methods {
+		b.WriteString("\t\tserver.MethodInfo{Method: ")
+		b.WriteString(prefix + method.GoName)
+		b.WriteString(", Kind: ")
+		b.WriteString(callKind(method))
+		b.WriteString("},\n")
+	}
+	b.WriteString("\t)\n")
 	b.WriteString("}\n\n")
 }
 
 func writeRegisterCase(b *strings.Builder, svc ir.Service, method ir.Method) {
-	b.WriteString("\t\t\tin := new(")
-	b.WriteString(method.InputType)
-	b.WriteString(")\n")
-	b.WriteString("\t\t\tif err := st.Recv(in); err != nil {\n")
-	b.WriteString("\t\t\t\treturn err\n")
-	b.WriteString("\t\t\t}\n")
 	switch {
 	case !method.ClientStream && !method.ServerStream:
-		b.WriteString("\t\t\tresp, err := impl.")
+		b.WriteString("\t\t\t\tin := new(")
+		b.WriteString(method.InputType)
+		b.WriteString(")\n")
+		b.WriteString("\t\t\t\tif err := st.Recv(in); err != nil {\n")
+		b.WriteString("\t\t\t\t\treturn err\n")
+		b.WriteString("\t\t\t\t}\n")
+		b.WriteString("\t\t\t\tresp, err := impl.")
 		b.WriteString(method.GoName)
 		b.WriteString("(ctx, in)\n")
-		b.WriteString("\t\t\tif err != nil {\n")
-		b.WriteString("\t\t\t\treturn err\n")
-		b.WriteString("\t\t\t}\n")
-		b.WriteString("\t\t\treturn st.Send(resp)\n")
-	case method.ServerStream && !method.ClientStream:
-		wrapper := streamServerStruct(method.GoName)
-		b.WriteString("\t\t\treturn impl.")
+		b.WriteString("\t\t\t\tif err != nil {\n")
+		b.WriteString("\t\t\t\t\treturn err\n")
+		b.WriteString("\t\t\t\t}\n")
+		b.WriteString("\t\t\t\treturn st.Send(resp)\n")
+	case !method.ClientStream && method.ServerStream:
+		b.WriteString("\t\t\t\tin := new(")
+		b.WriteString(method.InputType)
+		b.WriteString(")\n")
+		b.WriteString("\t\t\t\tif err := st.Recv(in); err != nil {\n")
+		b.WriteString("\t\t\t\t\treturn err\n")
+		b.WriteString("\t\t\t\t}\n")
+		wrapper := streamServerStruct(svc.GoName, method.GoName)
+		b.WriteString("\t\t\t\treturn impl.")
 		b.WriteString(method.GoName)
 		b.WriteString("(ctx, in, &")
+		b.WriteString(wrapper)
+		b.WriteString("{Stream: st})\n")
+	case method.ClientStream:
+		wrapper := streamServerStruct(svc.GoName, method.GoName)
+		b.WriteString("\t\t\t\treturn impl.")
+		b.WriteString(method.GoName)
+		b.WriteString("(ctx, &")
 		b.WriteString(wrapper)
 		b.WriteString("{Stream: st})\n")
 	}
@@ -220,22 +250,39 @@ func writeRegisterCase(b *strings.Builder, svc ir.Service, method ir.Method) {
 
 func writeStreamServers(b *strings.Builder, svc ir.Service) {
 	for _, method := range svc.Methods {
-		if !method.ServerStream {
+		if !method.ClientStream && !method.ServerStream {
 			continue
 		}
-		wrapper := streamServerStruct(method.GoName)
+		wrapper := streamServerStruct(svc.GoName, method.GoName)
 		b.WriteString("type ")
 		b.WriteString(wrapper)
 		b.WriteString(" struct {\n")
 		b.WriteString("\tstream.Stream\n")
 		b.WriteString("}\n\n")
-		b.WriteString("func (s *")
-		b.WriteString(wrapper)
-		b.WriteString(") Send(event *")
-		b.WriteString(method.OutputType)
-		b.WriteString(") error {\n")
-		b.WriteString("\treturn s.Stream.Send(event)\n")
-		b.WriteString("}\n\n")
+		if method.ClientStream {
+			b.WriteString("func (s *")
+			b.WriteString(wrapper)
+			b.WriteString(") Recv() (*")
+			b.WriteString(method.InputType)
+			b.WriteString(", error) {\n")
+			b.WriteString("\tin := new(")
+			b.WriteString(method.InputType)
+			b.WriteString(")\n")
+			b.WriteString("\tif err := s.Stream.Recv(in); err != nil {\n")
+			b.WriteString("\t\treturn nil, err\n")
+			b.WriteString("\t}\n")
+			b.WriteString("\treturn in, nil\n")
+			b.WriteString("}\n\n")
+		}
+		if method.ClientStream || method.ServerStream {
+			b.WriteString("func (s *")
+			b.WriteString(wrapper)
+			b.WriteString(") Send(event *")
+			b.WriteString(method.OutputType)
+			b.WriteString(") error {\n")
+			b.WriteString("\treturn s.Stream.Send(event)\n")
+			b.WriteString("}\n\n")
+		}
 	}
 }
 
@@ -255,21 +302,30 @@ func writeClientInterface(b *strings.Builder, svc ir.Service) {
 	b.WriteString("}\n\n")
 
 	for _, method := range svc.Methods {
-		if !method.ServerStream {
+		if !method.ClientStream && !method.ServerStream {
 			continue
 		}
 		streamType := streamClientType(svc.GoName, method.GoName)
 		b.WriteString("// ")
 		b.WriteString(streamType)
-		b.WriteString(" receives events from a ")
+		b.WriteString(" sends and receives messages for a ")
 		b.WriteString(method.GoName)
 		b.WriteString(" call.\n")
 		b.WriteString("type ")
 		b.WriteString(streamType)
 		b.WriteString(" interface {\n")
-		b.WriteString("\tRecv() (*")
-		b.WriteString(method.OutputType)
-		b.WriteString(", error)\n")
+		if method.ClientStream {
+			b.WriteString("\tSend(*")
+			b.WriteString(method.InputType)
+			b.WriteString(") error\n")
+			b.WriteString("\tCloseSend() error\n")
+		}
+		if method.ClientStream || method.ServerStream {
+			b.WriteString("\tRecv() (*")
+			b.WriteString(method.OutputType)
+			b.WriteString(", error)\n")
+			b.WriteString("\tClose() error\n")
+		}
 		b.WriteString("}\n\n")
 	}
 }
@@ -284,13 +340,20 @@ func writeClientMethod(b *strings.Builder, svc ir.Service, method ir.Method) {
 		b.WriteString(") (*")
 		b.WriteString(method.OutputType)
 		b.WriteString(", error)\n")
-	case method.ServerStream && !method.ClientStream:
+	case !method.ClientStream && method.ServerStream:
 		streamType := streamClientType(svc.GoName, method.GoName)
 		b.WriteString("\t")
 		b.WriteString(method.GoName)
 		b.WriteString("(context.Context, *")
 		b.WriteString(method.InputType)
 		b.WriteString(") ")
+		b.WriteString(streamType)
+		b.WriteString("\n")
+	case method.ClientStream:
+		streamType := streamClientType(svc.GoName, method.GoName)
+		b.WriteString("\t")
+		b.WriteString(method.GoName)
+		b.WriteString("(context.Context) ")
 		b.WriteString(streamType)
 		b.WriteString("\n")
 	}
@@ -357,9 +420,9 @@ func writeClientMethodImpl(b *strings.Builder, svc ir.Service, method ir.Method,
 		b.WriteString("\t})\n")
 		b.WriteString("\treturn resp, err\n")
 		b.WriteString("}\n\n")
-	case method.ServerStream && !method.ClientStream:
+	case !method.ClientStream && method.ServerStream:
 		streamType := streamClientType(svc.GoName, method.GoName)
-		wrapper := streamClientStruct(method.GoName)
+		wrapper := streamClientStruct(svc.GoName, method.GoName)
 		b.WriteString("func (c *")
 		b.WriteString(clientType)
 		b.WriteString(") ")
@@ -371,68 +434,112 @@ func writeClientMethodImpl(b *strings.Builder, svc ir.Service, method ir.Method,
 		b.WriteString(" {\n")
 		b.WriteString("\twc := &")
 		b.WriteString(wrapper)
-		b.WriteString("{ch: make(chan *")
-		b.WriteString(method.OutputType)
-		b.WriteString(")}\n")
-		b.WriteString("\tgo func() {\n")
-		b.WriteString("\t\tdefer close(wc.ch)\n")
-		b.WriteString("\t\twc.err = c.c.Open(ctx, ")
+		b.WriteString("{call: c.c.OpenStream(ctx, ")
 		b.WriteString(constName)
-		b.WriteString(", func(st stream.Stream) error {\n")
-		b.WriteString("\t\t\tif err := st.Send(req); err != nil {\n")
-		b.WriteString("\t\t\t\treturn err\n")
-		b.WriteString("\t\t\t}\n")
-		b.WriteString("\t\t\tif err := st.CloseSend(); err != nil {\n")
-		b.WriteString("\t\t\t\treturn err\n")
-		b.WriteString("\t\t\t}\n")
-		b.WriteString("\t\t\tfor {\n")
-		b.WriteString("\t\t\t\tevent := new(")
-		b.WriteString(method.OutputType)
-		b.WriteString(")\n")
-		b.WriteString("\t\t\t\tswitch err := st.Recv(event); err {\n")
-		b.WriteString("\t\t\t\tcase nil:\n")
-		b.WriteString("\t\t\t\t\twc.ch <- event\n")
-		b.WriteString("\t\t\t\tcase io.EOF:\n")
-		b.WriteString("\t\t\t\t\treturn nil\n")
-		b.WriteString("\t\t\t\tdefault:\n")
-		b.WriteString("\t\t\t\t\treturn err\n")
-		b.WriteString("\t\t\t\t}\n")
-		b.WriteString("\t\t\t}\n")
-		b.WriteString("\t\t})\n")
+		b.WriteString(", stream.CallServerStreaming), initialDone: make(chan struct{})}\n")
+		b.WriteString("\tgo func() {\n")
+		b.WriteString("\t\terr := wc.call.Send(req)\n")
+		b.WriteString("\t\tif err == nil {\n")
+		b.WriteString("\t\t\terr = wc.call.CloseSend()\n")
+		b.WriteString("\t\t}\n")
+		b.WriteString("\t\twc.initialErr = err\n")
+		b.WriteString("\t\tclose(wc.initialDone)\n")
 		b.WriteString("\t}()\n")
 		b.WriteString("\treturn wc\n")
+		b.WriteString("}\n\n")
+	case method.ClientStream:
+		streamType := streamClientType(svc.GoName, method.GoName)
+		wrapper := streamClientStruct(svc.GoName, method.GoName)
+		b.WriteString("func (c *")
+		b.WriteString(clientType)
+		b.WriteString(") ")
+		b.WriteString(method.GoName)
+		b.WriteString("(ctx context.Context) ")
+		b.WriteString(streamType)
+		b.WriteString(" {\n")
+		b.WriteString("\treturn &")
+		b.WriteString(wrapper)
+		b.WriteString("{call: c.c.OpenStream(ctx, ")
+		b.WriteString(constName)
+		b.WriteString(", ")
+		b.WriteString(callKind(method))
+		b.WriteString(")}\n")
 		b.WriteString("}\n\n")
 	}
 }
 
 func writeStreamClients(b *strings.Builder, svc ir.Service) {
 	for _, method := range svc.Methods {
-		if !method.ServerStream {
+		if !method.ClientStream && !method.ServerStream {
 			continue
 		}
-		wrapper := streamClientStruct(method.GoName)
+		wrapper := streamClientStruct(svc.GoName, method.GoName)
 		b.WriteString("type ")
 		b.WriteString(wrapper)
 		b.WriteString(" struct {\n")
-		b.WriteString("\tch  chan *")
-		b.WriteString(method.OutputType)
-		b.WriteString("\n")
-		b.WriteString("\terr error\n")
+		b.WriteString("\tcall *client.CallStream\n")
+		if !method.ClientStream && method.ServerStream {
+			b.WriteString("\tinitialDone chan struct{}\n")
+			b.WriteString("\tinitialErr  error\n")
+		}
 		b.WriteString("}\n\n")
+
+		if method.ClientStream {
+			b.WriteString("func (c *")
+			b.WriteString(wrapper)
+			b.WriteString(") Send(msg *")
+			b.WriteString(method.InputType)
+			b.WriteString(") error {\n")
+			b.WriteString("\treturn c.call.Send(msg)\n")
+			b.WriteString("}\n\n")
+			b.WriteString("func (c *")
+			b.WriteString(wrapper)
+			b.WriteString(") CloseSend() error {\n")
+			b.WriteString("\treturn c.call.CloseSend()\n")
+			b.WriteString("}\n\n")
+		}
+		if method.ClientStream || method.ServerStream {
+			b.WriteString("func (c *")
+			b.WriteString(wrapper)
+			b.WriteString(") Recv() (*")
+			b.WriteString(method.OutputType)
+			b.WriteString(", error) {\n")
+			if !method.ClientStream {
+				b.WriteString("\t<-c.initialDone\n")
+				b.WriteString("\tif c.initialErr != nil {\n")
+				b.WriteString("\t\treturn nil, c.initialErr\n")
+				b.WriteString("\t}\n")
+			}
+			b.WriteString("\tevent := new(")
+			b.WriteString(method.OutputType)
+			b.WriteString(")\n")
+			b.WriteString("\tif err := c.call.Recv(event); err != nil {\n")
+			b.WriteString("\t\treturn nil, err\n")
+			b.WriteString("\t}\n")
+			if !method.ServerStream {
+				b.WriteString("\t_ = c.call.Close()\n")
+			}
+			b.WriteString("\treturn event, nil\n")
+			b.WriteString("}\n\n")
+		}
 		b.WriteString("func (c *")
 		b.WriteString(wrapper)
-		b.WriteString(") Recv() (*")
-		b.WriteString(method.OutputType)
-		b.WriteString(", error) {\n")
-		b.WriteString("\tevent, ok := <-c.ch\n")
-		b.WriteString("\tif !ok {\n")
-		b.WriteString("\t\tif c.err != nil {\n")
-		b.WriteString("\t\t\treturn nil, c.err\n")
-		b.WriteString("\t\t}\n")
-		b.WriteString("\t\treturn nil, io.EOF\n")
-		b.WriteString("\t}\n")
-		b.WriteString("\treturn event, nil\n")
+		b.WriteString(") Close() error {\n")
+		b.WriteString("\treturn c.call.Close()\n")
 		b.WriteString("}\n\n")
+	}
+}
+
+func callKind(method ir.Method) string {
+	switch {
+	case method.ClientStream && method.ServerStream:
+		return "stream.CallBidiStreaming"
+	case method.ClientStream:
+		return "stream.CallClientStreaming"
+	case method.ServerStream:
+		return "stream.CallServerStreaming"
+	default:
+		return "stream.CallUnary"
 	}
 }
 
@@ -458,16 +565,20 @@ func streamClientType(serviceGoName, methodGoName string) string {
 	return serviceGoName + "_" + methodGoName + "Client"
 }
 
-func streamServerStruct(methodGoName string) string {
-	runes := []rune(methodGoName)
-	runes[0] = unicode.ToLower(runes[0])
-	return string(runes) + "Server"
+func streamServerStruct(serviceGoName, methodGoName string) string {
+	return lowerFirst(serviceGoName) + methodGoName + "Server"
 }
 
-func streamClientStruct(methodGoName string) string {
-	runes := []rune(methodGoName)
-	runes[0] = unicode.ToLower(runes[0])
-	return string(runes) + "Client"
+func streamClientStruct(serviceGoName, methodGoName string) string {
+	return lowerFirst(serviceGoName) + methodGoName + "Client"
+}
+
+func lowerFirst(name string) string {
+	runes := []rune(name)
+	if len(runes) != 0 {
+		runes[0] = unicode.ToLower(runes[0])
+	}
+	return string(runes)
 }
 
 func strconvQuote(s string) string {

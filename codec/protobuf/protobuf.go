@@ -13,6 +13,8 @@ type codecImpl struct{}
 // New returns a Codec that uses binary protobuf.
 func New() codec.Codec { return codecImpl{} }
 
+func (codecImpl) CodecName() string { return "protobuf" }
+
 func init() {
 	codec.Register("protobuf", New)
 }
@@ -26,8 +28,14 @@ func (codecImpl) Marshal(w io.Writer, v any) error {
 	if err != nil {
 		return err
 	}
-	_, err = w.Write(b)
-	return err
+	n, err := w.Write(b)
+	if err != nil {
+		return err
+	}
+	if n != len(b) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 func (codecImpl) Unmarshal(r io.Reader, v any) error {

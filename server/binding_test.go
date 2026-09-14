@@ -9,10 +9,11 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/errs"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/stream"
+	"github.com/argos-io/argos/transport/http1"
 )
 
 type jsonCodec struct{}
@@ -49,6 +50,8 @@ func (f *testFramer) CloseSend() error {
 	}
 	return f.closeSendErr
 }
+
+func (f *testFramer) Close() error { return nil }
 
 type nopWriteCloser struct {
 	*bytes.Buffer
@@ -171,5 +174,31 @@ func TestBindingDispatchErrorWinsOverCloseSendError(t *testing.T) {
 	}
 	if errors.Is(err, closeErr) {
 		t.Fatal("CloseSend error must not replace dispatch error")
+	}
+}
+
+func TestBindingRejectsStreamingOnUnaryTransport(t *testing.T) {
+	svc := &Service{binding: binding{
+		Config: argos.NewConfig(
+			argos.WithTransport(http1.New()),
+			argos.WithCodec(jsonCodec{}),
+		),
+	}}
+	dispatchCalled := false
+	svc.RegisterWithMethods(func(context.Context, string, stream.Stream) error {
+		dispatchCalled = true
+		return nil
+	}, MethodInfo{Method: "/echo.Echo/Watch", Kind: stream.CallServerStreaming})
+
+	framer := &testFramer{}
+	err := svc.binding.invoke(context.Background(), "/echo.Echo/Watch", framer)
+	if errs.CodeOf(err) != errs.Unimplemented {
+		t.Fatalf("error = %v, want Unimplemented", err)
+	}
+	if dispatchCalled {
+		t.Fatal("streaming dispatch ran on a unary transport")
+	}
+	if framer.closeSendCount.Load() != 1 {
+		t.Fatalf("CloseSend calls = %d, want 1", framer.closeSendCount.Load())
 	}
 }

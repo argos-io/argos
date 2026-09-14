@@ -6,11 +6,12 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/stream"
 
@@ -87,12 +88,14 @@ func TestTextFrameReturnsError(t *testing.T) {
 	tr := New().(*channel)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
+	var called atomic.Bool
 	go func() {
 		done <- tr.ListenAndServe(ctx, func(
 			_ context.Context,
 			_ string,
 			_ transport.Framer,
 		) error {
+			called.Store(true)
 			return nil
 		}, transport.WithListenAddress("127.0.0.1:0"))
 	}()
@@ -140,6 +143,9 @@ func TestTextFrameReturnsError(t *testing.T) {
 	if description == "" {
 		t.Fatal("expected non-empty Unimplemented description")
 	}
+	if called.Load() {
+		t.Fatal("text frame must be rejected before onCall")
+	}
 }
 
 func waitBound(tr *channel) {
@@ -186,19 +192,6 @@ func TestFilterShortCircuitStatus(t *testing.T) {
 	_, err := client.Echo(context.Background(), &echov1.EchoRequest{Msg: "ws"})
 	if errs.CodeOf(err) != errs.Unauthenticated {
 		t.Fatalf("code = %v, want Unauthenticated", err)
-	}
-}
-
-func TestTextFramerMethods(t *testing.T) {
-	var tf textFramer
-	if _, err := tf.Recv(); errs.CodeOf(err) != errs.Unimplemented {
-		t.Fatalf("Recv = %v", err)
-	}
-	if _, err := tf.Send(); errs.CodeOf(err) != errs.Unimplemented {
-		t.Fatalf("Send = %v", err)
-	}
-	if err := tf.CloseSend(); err != nil {
-		t.Fatalf("CloseSend: %v", err)
 	}
 }
 
@@ -397,4 +390,69 @@ func TestRawEnvelopeWS(t *testing.T) {
 		}
 	}
 	<-gotCall
+}
+
+func TestAcceptsMetadataOnFirstEndFrame(t *testing.T) {
+	tr := New().(*channel)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	called := make(chan struct{}, 1)
+	go func() {
+		done <- tr.ListenAndServe(ctx, func(callCtx context.Context, _ string, f transport.Framer) error {
+			if got := metadata.FromContext(callCtx)["token"]; len(got) != 1 || got[0] != "abc" {
+				t.Errorf("metadata token = %v, want [abc]", got)
+			}
+			if _, err := f.Recv(); !errors.Is(err, io.EOF) {
+				t.Errorf("Recv = %v, want io.EOF", err)
+			}
+			called <- struct{}{}
+			return nil
+		}, transport.WithListenAddress("127.0.0.1:0"))
+	}()
+	waitBound(tr)
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("ListenAndServe: %v", err)
+		}
+	})
+
+	callCtx, callCancel := context.WithTimeout(context.Background(), time.Second)
+	defer callCancel()
+	conn, _, err := websocket.Dial(callCtx, "ws://"+transport.DialableAddress(tr.Addr())+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+
+	first, err := wire.MarshalEnvelope(wire.Envelope{
+		Method:   "raw/Method",
+		Flags:    wire.FlagEnd,
+		Metadata: []byte{0, 5, 't', 'o', 'k', 'e', 'n', 0, 3, 'a', 'b', 'c'},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Write(callCtx, websocket.MessageBinary, first); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-called:
+		return
+	case <-time.After(time.Second):
+		t.Fatal("server did not invoke onCall for the empty request")
+	}
+}
+
+func TestRecvRejectsMetadataAfterFirstRequest(t *testing.T) {
+	f := &framer{
+		frames:         make(chan wire.Envelope, 1),
+		done:           make(chan struct{}),
+		maxMessageSize: transport.DefaultMaxMessageSize,
+	}
+	f.frames <- wire.Envelope{Metadata: []byte{1}, Payload: []byte("late")}
+	if _, err := f.Recv(); err == nil {
+		t.Fatal("Recv accepted metadata after the first request")
+	}
 }

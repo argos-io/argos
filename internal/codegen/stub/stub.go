@@ -4,9 +4,13 @@ package stub
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/argos-io/argos/internal/codegen/check"
@@ -26,11 +30,18 @@ type Options struct {
 	ImportPaths []string // proto import paths
 	OutDir      string   // default: directory of each input
 	Check       string   // existing file to diff against (handwritten fallback)
-	Write       bool     // write files (default true unless Check set)
+}
+
+type generatedOutput struct {
+	path   string
+	source []byte
 }
 
 // Run parses inputs and generates or checks output files.
 func Run(ctx context.Context, opts Options, inputs []string) error {
+	if ctx == nil {
+		return fmt.Errorf("stub: nil context")
+	}
 	if len(inputs) == 0 && opts.Check == "" {
 		return fmt.Errorf("stub: no input files")
 	}
@@ -55,11 +66,21 @@ func Run(ctx context.Context, opts Options, inputs []string) error {
 	if opts.Check != "" {
 		return checkFiles(opts.Check, files)
 	}
-	for i, file := range files {
-		if err := writeFileOutputs(opts, inputs, file); err != nil {
+	var outputs []generatedOutput
+	for _, file := range files {
+		fileOutputs, err := generateFileOutputs(opts, inputs, file)
+		if err != nil {
 			return err
 		}
-		_ = i
+		outputs = append(outputs, fileOutputs...)
+	}
+	if err := validateOutputPaths(outputs); err != nil {
+		return err
+	}
+	for _, output := range outputs {
+		if err := writeFile(output.path, output.source); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -78,36 +99,101 @@ func resolveFrontend(opts Options) (frontend.Frontend, error) {
 }
 
 func writeFileOutputs(opts Options, inputs []string, file ir.File) error {
+	outputs, err := generateFileOutputs(opts, inputs, file)
+	if err != nil {
+		return err
+	}
+	if err := validateOutputPaths(outputs); err != nil {
+		return err
+	}
+	for _, output := range outputs {
+		if err := writeFile(output.path, output.source); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func generateFileOutputs(opts Options, inputs []string, file ir.File) ([]generatedOutput, error) {
+	var outputs []generatedOutput
 	if file.GenerateMessages() {
 		msgSrc, err := message.Generate(file)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		msgPath, err := outputPath(opts, inputs, file, file.MessagesName())
 		if err != nil {
-			return err
+			return nil, err
 		}
-		if err := writeFile(msgPath, msgSrc); err != nil {
-			return err
-		}
+		outputs = append(outputs, generatedOutput{path: msgPath, source: msgSrc})
 	}
 	stubSrc, err := stubgen.Generate(file)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	stubPath, err := outputPath(opts, inputs, file, file.StubName())
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return writeFile(stubPath, stubSrc)
+	outputs = append(outputs, generatedOutput{path: stubPath, source: stubSrc})
+	return outputs, nil
+}
+
+func validateOutputPaths(outputs []generatedOutput) error {
+	seen := make(map[string]string, len(outputs))
+	for _, output := range outputs {
+		key := filepath.Clean(output.path)
+		if runtime.GOOS == "windows" {
+			key = strings.ToLower(key)
+		}
+		if previous, exists := seen[key]; exists {
+			return fmt.Errorf("stub: output path %q is generated more than once (same as %q)", output.path, previous)
+		}
+		seen[key] = output.path
+	}
+	return nil
 }
 
 func writeFile(path string, source []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("stub: mkdir %s: %w", filepath.Dir(path), err)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("stub: mkdir %s: %w", dir, err)
 	}
-	if err := os.WriteFile(path, source, 0o644); err != nil {
-		return fmt.Errorf("stub: write %s: %w", path, err)
+	tmp, err := os.CreateTemp(dir, ".argos-*"+filepath.Ext(path)+".tmp")
+	if err != nil {
+		return fmt.Errorf("stub: create temporary output for %s: %w", path, err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	n, err := tmp.Write(source)
+	if err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("stub: write temporary output for %s: %w", path, err)
+	}
+	if n != len(source) {
+		_ = tmp.Close()
+		return fmt.Errorf("stub: write temporary output for %s: %w", path, io.ErrShortWrite)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("stub: chmod temporary output for %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("stub: close temporary output for %s: %w", path, err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		// Windows does not replace an existing destination with Rename. The
+		// temporary file is complete and closed at this point, so only the
+		// final replacement remains. POSIX platforms keep the atomic rename.
+		if !errors.Is(err, fs.ErrExist) && !os.IsExist(err) {
+			return fmt.Errorf("stub: rename temporary output to %s: %w", path, err)
+		}
+		if removeErr := os.Remove(path); removeErr != nil {
+			return fmt.Errorf("stub: replace %s: %w (remove existing: %v)", path, err, removeErr)
+		}
+		if renameErr := os.Rename(tmpName, path); renameErr != nil {
+			return fmt.Errorf("stub: rename temporary output to %s: %w", path, renameErr)
+		}
 	}
 	return nil
 }
@@ -117,18 +203,37 @@ func outputPath(opts Options, inputs []string, file ir.File, name string) (strin
 		return "", fmt.Errorf("stub: missing output name")
 	}
 	if opts.OutDir != "" {
-		return filepath.Join(opts.OutDir, name), nil
+		return safeOutputPath(opts.OutDir, name)
 	}
 	for _, input := range inputs {
 		base := strings.TrimSuffix(filepath.Base(input), filepath.Ext(input))
 		if strings.HasPrefix(name, base+".") {
-			return filepath.Join(filepath.Dir(input), name), nil
+			return safeOutputPath(filepath.Dir(input), name)
 		}
 	}
 	if len(inputs) == 1 {
-		return filepath.Join(filepath.Dir(inputs[0]), name), nil
+		return safeOutputPath(filepath.Dir(inputs[0]), name)
 	}
-	return name, nil
+	return safeOutputPath(".", name)
+}
+
+func safeOutputPath(dir, name string) (string, error) {
+	if filepath.IsAbs(name) {
+		return "", fmt.Errorf("stub: output path %q must be relative", name)
+	}
+	base, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("stub: resolve output directory %q: %w", dir, err)
+	}
+	candidate := filepath.Join(base, filepath.Clean(name))
+	rel, err := filepath.Rel(base, candidate)
+	if err != nil {
+		return "", fmt.Errorf("stub: resolve output path %q: %w", name, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("stub: output path %q escapes output directory %q", name, dir)
+	}
+	return candidate, nil
 }
 
 func checkFiles(path string, files []ir.File) error {

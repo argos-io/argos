@@ -17,6 +17,20 @@ func TestParseRejectsBareHostPort(t *testing.T) {
 	}
 }
 
+func TestParseRejectsNilContext(t *testing.T) {
+	if _, err := selector.Parse(nil, "ip://127.0.0.1:9090"); err == nil {
+		t.Fatal("Parse accepted nil context")
+	}
+}
+
+func TestParseRejectsCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := selector.Parse(ctx, "ip://127.0.0.1:9090"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Parse error = %v, want context.Canceled", err)
+	}
+}
+
 func TestParseIPScheme(t *testing.T) {
 	addr, err := selector.Parse(context.Background(), "ip://127.0.0.1:9090")
 	if err != nil {
@@ -51,6 +65,30 @@ func TestRegisterExternal(t *testing.T) {
 	}
 	if got, want := addr, "parsed:svc"; got != want {
 		t.Fatalf("address = %q, want %q", got, want)
+	}
+}
+
+func TestRegisterRejectsInvalidSelector(t *testing.T) {
+	tests := []struct {
+		name    string
+		selectr selector.Selector
+	}{
+		{name: "empty name", selectr: selectorFunc(func(context.Context, string) (string, error) { return "", nil })},
+		{name: "nil selector", selectr: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("Register did not panic")
+				}
+			}()
+			name := "valid"
+			if tt.name == "empty name" {
+				name = ""
+			}
+			selector.Register(name, tt.selectr)
+		})
 	}
 }
 

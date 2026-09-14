@@ -50,6 +50,8 @@ func (f *memoryFramer) CloseSend() error {
 	return nil
 }
 
+func (f *memoryFramer) Close() error { return nil }
+
 type memoryCall struct {
 	ctx    context.Context
 	method string

@@ -17,7 +17,10 @@ type Frontend struct{}
 func (Frontend) Name() string { return "ir" }
 
 // Parse reads one or more JSON files. Each file is either one ir.File or []ir.File.
-func (Frontend) Parse(_ context.Context, inputs []string) ([]ir.File, error) {
+func (Frontend) Parse(ctx context.Context, inputs []string) ([]ir.File, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("ir frontend: nil context")
+	}
 	if len(inputs) == 0 {
 		return nil, fmt.Errorf("ir frontend: no input files")
 	}
@@ -41,7 +44,10 @@ func (Frontend) Parse(_ context.Context, inputs []string) ([]ir.File, error) {
 
 func decodeFiles(blob []byte) ([]ir.File, error) {
 	var many []ir.File
-	if err := json.Unmarshal(blob, &many); err == nil && len(many) > 0 {
+	if err := json.Unmarshal(blob, &many); err == nil {
+		if len(many) == 0 {
+			return nil, fmt.Errorf("no files")
+		}
 		return many, nil
 	}
 	var one ir.File

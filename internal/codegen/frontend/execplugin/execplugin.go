@@ -24,6 +24,9 @@ func (f Frontend) Name() string {
 
 // Parse runs the plugin and decodes stdout as IR JSON ([]ir.File or ir.File).
 func (f Frontend) Parse(ctx context.Context, inputs []string) ([]ir.File, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("exec plugin: nil context")
+	}
 	if f.Command == "" {
 		return nil, fmt.Errorf("exec plugin: empty command")
 	}
@@ -57,7 +60,10 @@ func (f Frontend) Parse(ctx context.Context, inputs []string) ([]ir.File, error)
 
 func decodeIR(blob []byte) ([]ir.File, error) {
 	var many []ir.File
-	if err := json.Unmarshal(blob, &many); err == nil && len(many) > 0 {
+	if err := json.Unmarshal(blob, &many); err == nil {
+		if len(many) == 0 {
+			return nil, fmt.Errorf("decode IR: no files")
+		}
 		return many, nil
 	}
 	var one ir.File

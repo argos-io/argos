@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/codec"
 
 	jsoncodec "github.com/argos-io/argos/codec/json"
 	protobufcodec "github.com/argos-io/argos/codec/protobuf"
@@ -51,7 +52,9 @@ func TestWatchStreaming(t *testing.T) {
 				argos.WithTransport(tr),
 				argos.WithCodec(tc.codec),
 			)
-			stream := client.Watch(context.Background(), &WatchRequest{Msg: tc.name})
+			callCtx, callCancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer callCancel()
+			stream := client.Watch(callCtx, &WatchRequest{Msg: tc.name})
 			want := []string{tc.name + " one", tc.name + " two", tc.name + " three"}
 			for i, wantMsg := range want {
 				event, err := stream.Recv()
@@ -100,29 +103,14 @@ func TestWatchFailsOnUnaryTransports(t *testing.T) {
 				argos.WithTransport(tr),
 				argos.WithCodec(tc.codec),
 			)
-			stream := client.Watch(context.Background(), &WatchRequest{Msg: tc.name})
-			event, err := stream.Recv()
-			if err != nil {
-				t.Fatalf("first Recv: %v", err)
-			}
-			if event.GetMsg() == "" {
-				t.Fatal("expected first event")
-			}
-			deadline := time.After(2 * time.Second)
-			for {
-				select {
-				case <-deadline:
-					t.Fatal("second Recv did not fail")
-				default:
-					_, err := stream.Recv()
-					if err != nil {
-						if errors.Is(err, io.EOF) {
-							t.Fatal("got io.EOF, want streaming error")
-						}
-						return
-					}
-					time.Sleep(10 * time.Millisecond)
-				}
+			callCtx, callCancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer callCancel()
+			stream := client.Watch(callCtx, &WatchRequest{Msg: tc.name})
+			defer stream.Close()
+			if _, err := stream.Recv(); err == nil {
+				t.Fatal("Recv succeeded, want unsupported streaming error")
+			} else if errors.Is(err, io.EOF) || !strings.Contains(err.Error(), "does not support streaming calls") {
+				t.Fatalf("Recv error = %v, want unsupported streaming error", err)
 			}
 		})
 	}

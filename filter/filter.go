@@ -3,6 +3,7 @@ package filter
 
 import (
 	"context"
+	"errors"
 
 	"github.com/argos-io/argos/stream"
 )
@@ -15,9 +16,19 @@ type Filter func(ctx context.Context, method string, st stream.Stream, next Hand
 
 // Chain builds a filter chain ending at end.
 func Chain(filters []Filter, end Handler) Handler {
+	if end == nil {
+		return func(context.Context, string, stream.Stream) error {
+			return errors.New("filter: nil terminal handler")
+		}
+	}
 	next := end
 	for i := len(filters) - 1; i >= 0; i-- {
 		filter := filters[i]
+		if filter == nil {
+			return func(context.Context, string, stream.Stream) error {
+				return errors.New("filter: nil filter")
+			}
+		}
 		downstream := next
 		next = func(ctx context.Context, method string, st stream.Stream) error {
 			return filter(ctx, method, st, downstream)

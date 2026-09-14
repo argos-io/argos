@@ -2,6 +2,7 @@ package telnet
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	jsoncodec "github.com/argos-io/argos/codec/json"
 	"github.com/argos-io/argos/errs"
 	echov1 "github.com/argos-io/argos/example/echo"
+	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/transport"
 )
 
@@ -77,6 +79,106 @@ func TestEchoRoundTrip(t *testing.T) {
 	}
 	if got, want := response.GetMsg(), "hello telnet"; got != want {
 		t.Fatalf("response = %q, want %q", got, want)
+	}
+}
+
+func TestContextCancellationClosesBlockedRecv(t *testing.T) {
+	conn, peer := net.Pipe()
+	defer peer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := &framer{
+		conn:           conn,
+		ctx:            ctx,
+		initiator:      true,
+		reader:         bufio.NewReader(conn),
+		frames:         make(chan []byte, 1),
+		done:           make(chan struct{}),
+		maxMessageSize: transport.DefaultMaxMessageSize,
+	}
+	f.watchContext()
+	go f.readAhead()
+	defer f.Close()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := f.Recv()
+		result <- err
+	}()
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Recv error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked Recv was not interrupted by context cancellation")
+	}
+}
+
+func TestMissingStatusIsProtocolError(t *testing.T) {
+	conn, peer := net.Pipe()
+	f := &framer{
+		conn:           conn,
+		ctx:            context.Background(),
+		reader:         bufio.NewReader(conn),
+		frames:         make(chan []byte, 1),
+		done:           make(chan struct{}),
+		maxMessageSize: transport.DefaultMaxMessageSize,
+		initiator:      true,
+	}
+	go f.readAhead()
+	if err := peer.Close(); err != nil {
+		t.Fatalf("peer.Close: %v", err)
+	}
+	defer f.Close()
+
+	_, err := f.Recv()
+	if err == nil || err.Error() != "telnet: response ended before status line" {
+		t.Fatalf("Recv = %v, want missing-status protocol error", err)
+	}
+}
+
+func TestStatusLineEscapesControlCharacters(t *testing.T) {
+	const message = "bad\\line\nnext\rline"
+	var buf bytes.Buffer
+	if err := writeErrLine(&buf, errs.InvalidArgument, message, transport.DefaultMaxMessageSize); err != nil {
+		t.Fatalf("writeErrLine: %v", err)
+	}
+	line := strings.TrimSuffix(buf.String(), "\n")
+	if strings.ContainsAny(line, "\r\n") {
+		t.Fatalf("status line contains an unescaped line break: %q", line)
+	}
+	if got := parseErrLine(line); errs.CodeOf(got) != errs.InvalidArgument || got.Error() != message {
+		t.Fatalf("parsed status = (%v, %q), want (%v, %q)", errs.CodeOf(got), got, errs.InvalidArgument, message)
+	}
+}
+
+func TestStatusLineIsReadableWithSmallMessageLimit(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeErrLine(&buf, errs.Unauthenticated, "denied", 1); err != nil {
+		t.Fatalf("writeErrLine: %v", err)
+	}
+	line, err := readLine(bufio.NewReader(&buf), lineLimit(1))
+	if err != nil {
+		t.Fatalf("read status line: %v", err)
+	}
+	if got := errs.CodeOf(parseErrLine(line)); got != errs.Unauthenticated {
+		t.Fatalf("status code = %d, want %d", got, errs.Unauthenticated)
+	}
+}
+
+func TestReadLineLimitExcludesDelimiter(t *testing.T) {
+	line, err := readLine(bufio.NewReader(strings.NewReader("abc\n")), 3)
+	if err != nil {
+		t.Fatalf("readLine exact limit: %v", err)
+	}
+	if line != "abc" {
+		t.Fatalf("line = %q, want abc", line)
+	}
+	if _, err := readLine(bufio.NewReader(strings.NewReader("abcd\n")), 3); err == nil {
+		t.Fatal("readLine accepted a payload beyond the limit")
 	}
 }
 
@@ -153,6 +255,47 @@ func TestRawConnErrorPath(t *testing.T) {
 	}
 	if got, want := statusLine, "ERR 2 no token"; got != want {
 		t.Fatalf("status = %q, want %q", got, want)
+	}
+}
+
+func TestRequestMetadataAvailableToHandler(t *testing.T) {
+	tr := New().(*channel)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	gotMetadata := make(chan metadata.Metadata, 1)
+	go func() {
+		done <- tr.ListenAndServe(ctx, func(callCtx context.Context, _ string, _ transport.Framer) error {
+			gotMetadata <- metadata.Clone(metadata.FromContext(callCtx))
+			return nil
+		}, transport.WithListenAddress("127.0.0.1:0"))
+	}()
+	waitBound(tr)
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Errorf("ListenAndServe: %v", err)
+		}
+	})
+
+	conn, err := net.Dial("tcp", transport.DialableAddress(tr.Addr()))
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := io.WriteString(conn, "raw/Echo\n"); err != nil {
+		t.Fatalf("Write method: %v", err)
+	}
+	if _, err := io.WriteString(conn, "m authorization Bearer x\n{}\n"); err != nil {
+		t.Fatalf("Write request: %v", err)
+	}
+
+	select {
+	case md := <-gotMetadata:
+		if got := md["authorization"]; len(got) != 1 || got[0] != "Bearer x" {
+			t.Fatalf("metadata = %v, want authorization=Bearer x", md)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler did not receive request metadata")
 	}
 }
 

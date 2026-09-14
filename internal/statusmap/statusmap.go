@@ -3,9 +3,38 @@ package statusmap
 
 import (
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/argos-io/argos/errs"
 )
+
+// MaxStatusMessageBytes bounds diagnostic text carried outside the normal
+// Codec payload. Status text is commonly copied from application errors and
+// must not turn an error path into an unbounded response.
+const MaxStatusMessageBytes int64 = 4 << 10
+
+// LimitStatusMessage returns at most maxBytes of valid UTF-8 diagnostic text.
+// It also applies the framework-wide status cap. A non-positive limit means
+// that no diagnostic text can be carried, but the status code remains usable.
+func LimitStatusMessage(message string, maxBytes int64) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if maxBytes > MaxStatusMessageBytes {
+		maxBytes = MaxStatusMessageBytes
+	}
+	if int64(len(message)) <= maxBytes && utf8.ValidString(message) {
+		return message
+	}
+	cut := len(message)
+	if int64(cut) > maxBytes {
+		cut = int(maxBytes)
+	}
+	for cut > 0 && !utf8.ValidString(message[:cut]) {
+		cut--
+	}
+	return message[:cut]
+}
 
 // HTTPStatus maps errs.Code to an HTTP status code.
 func HTTPStatus(code errs.Code) int {

@@ -3,6 +3,7 @@ package execplugin_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/argos-io/argos/internal/codegen/frontend/execplugin"
@@ -11,7 +12,11 @@ import (
 )
 
 func TestPluginEmitIR(t *testing.T) {
-	script, err := filepath.Abs(filepath.Join("testdata", "fake-emit-ir.sh"))
+	name := "fake-emit-ir.sh"
+	if runtime.GOOS == "windows" {
+		name = "fake-emit-ir.cmd"
+	}
+	script, err := filepath.Abs(filepath.Join("testdata", name))
 	if err != nil {
 		t.Fatal(err)
 	}

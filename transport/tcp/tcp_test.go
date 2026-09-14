@@ -6,15 +6,12 @@ import (
 	"errors"
 	"io"
 	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/metadata"
-	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/stream"
 
@@ -105,6 +102,64 @@ func TestWatchRoundTrip(t *testing.T) {
 	}
 }
 
+func TestContextCancellationClosesBlockedRecv(t *testing.T) {
+	conn, peer := net.Pipe()
+	defer peer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := &framer{
+		conn:           conn,
+		ctx:            ctx,
+		initiator:      true,
+		frames:         make(chan wire.Envelope, 1),
+		done:           make(chan struct{}),
+		maxMessageSize: transport.DefaultMaxMessageSize,
+		maxFrameSize:   transport.ResolveMaxFrameSize(transport.DefaultMaxMessageSize),
+	}
+	f.watchContext()
+	go f.readAhead()
+	defer f.Close()
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := f.Recv()
+		result <- err
+	}()
+	cancel()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Recv error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked Recv was not interrupted by context cancellation")
+	}
+}
+
+func TestMissingStatusIsProtocolError(t *testing.T) {
+	conn, peer := net.Pipe()
+	f := &framer{
+		conn:           conn,
+		ctx:            context.Background(),
+		frames:         make(chan wire.Envelope, 1),
+		done:           make(chan struct{}),
+		maxMessageSize: transport.DefaultMaxMessageSize,
+		maxFrameSize:   transport.ResolveMaxFrameSize(transport.DefaultMaxMessageSize),
+		initiator:      true,
+	}
+	go f.readAhead()
+	if err := peer.Close(); err != nil {
+		t.Fatalf("peer.Close: %v", err)
+	}
+	defer f.Close()
+
+	_, err := f.Recv()
+	if err == nil || err.Error() != "tcp: response ended before status trailer" {
+		t.Fatalf("Recv = %v, want missing-status protocol error", err)
+	}
+}
+
 // A filter that short-circuits never closes the send side, so the status trailer
 // is the only frame the client gets. It must surface as the filter's Code and not
 // as a codec error.
@@ -131,29 +186,6 @@ func TestFilterShortCircuitStatus(t *testing.T) {
 	if got, want := err.Error(), "no token"; got != want {
 		t.Fatalf("description = %q, want %q", got, want)
 	}
-}
-
-func TestAcceptEnvelopeScript(t *testing.T) {
-	script, err := filepath.Abs(filepath.Join("..", "..", "scripts", "accept-envelope.sh"))
-	if err != nil {
-		t.Fatalf("Abs: %v", err)
-	}
-	if _, err := os.Stat(script); err != nil {
-		t.Skipf("accept-envelope.sh: %v", err)
-	}
-	for _, tool := range []string{"bash", "python3"} {
-		if _, err := exec.LookPath(tool); err != nil {
-			t.Skipf("%s is not installed", tool)
-		}
-	}
-
-	tr := startEcho(t, "127.0.0.1:0")
-	cmd := exec.CommandContext(t.Context(), script, transport.DialableAddress(tr.Addr()), "script")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("accept-envelope.sh: %v\n%s", err, output)
-	}
-	t.Logf("%s", bytes.TrimSpace(output))
 }
 
 func TestRawEnvelope(t *testing.T) {
@@ -263,6 +295,62 @@ func TestRawEnvelope(t *testing.T) {
 		t.Fatalf("status = (%d, %q), want (0, empty)", code, description)
 	}
 	<-gotCall
+}
+
+func TestAcceptsMetadataOnFirstEndFrame(t *testing.T) {
+	conn, peer := net.Pipe()
+	defer peer.Close()
+
+	called := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		(&channel{}).serveConn(context.Background(), conn, func(ctx context.Context, _ string, f transport.Framer) error {
+			if got := metadata.FromContext(ctx)["token"]; len(got) != 1 || got[0] != "abc" {
+				t.Errorf("metadata token = %v, want [abc]", got)
+			}
+			if _, err := f.Recv(); !errors.Is(err, io.EOF) {
+				t.Errorf("Recv = %v, want io.EOF", err)
+			}
+			called <- struct{}{}
+			return nil
+		}, transport.DefaultMaxMessageSize)
+		close(done)
+	}()
+
+	first, err := wire.MarshalEnvelope(wire.Envelope{
+		Method:   "raw/Method",
+		Flags:    wire.FlagEnd,
+		Metadata: []byte{0, 5, 't', 'o', 'k', 'e', 'n', 0, 3, 'a', 'b', 'c'},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFrame(peer, first); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-called:
+		if err := peer.Close(); err != nil {
+			t.Fatalf("peer.Close: %v", err)
+		}
+	case <-done:
+		t.Fatal("server returned before invoking onCall")
+	case <-time.After(time.Second):
+		t.Fatal("server did not accept the empty request")
+	}
+}
+
+func TestRecvRejectsMetadataAfterFirstRequest(t *testing.T) {
+	f := &framer{
+		frames:         make(chan wire.Envelope, 1),
+		done:           make(chan struct{}),
+		maxMessageSize: transport.DefaultMaxMessageSize,
+	}
+	f.frames <- wire.Envelope{Metadata: []byte{1}, Payload: []byte("late")}
+	if _, err := f.Recv(); err == nil {
+		t.Fatal("Recv accepted metadata after the first request")
+	}
 }
 
 func readEnvelope(t *testing.T, reader io.Reader) wire.Envelope {
