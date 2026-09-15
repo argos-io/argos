@@ -3,6 +3,7 @@ module github.com/argos-io/argos
 go 1.27.1
 
 require (
+	github.com/coder/websocket v1.8.15
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 )
