@@ -68,6 +68,10 @@ type call struct {
 	sending atomic.Bool
 	recving atomic.Bool
 
+	// Datagram unary staging (DatagramCarrier only).
+	pendingData    []byte
+	hasPendingData bool
+
 	// peakBuffered is the high-water mark of charged payload bytes (testing).
 	peakBuffered atomic.Int64
 	curBuffered  atomic.Int64
@@ -263,6 +267,9 @@ func (c *call) SendHeaders() error {
 	if c.initiator {
 		return status.Error(status.Unimplemented, "envelope: SendHeaders unsupported for initiator")
 	}
+	if c.sess.kind == kindDatagram {
+		return status.Error(status.Unimplemented, "envelope: SendHeaders unsupported on DatagramCarrier")
+	}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -303,6 +310,10 @@ func (c *call) maybeAutoHeaders() error {
 	if c.initiator {
 		return nil
 	}
+	if c.sess.kind == kindDatagram {
+		// Headers ride with the response datagram at Finish.
+		return nil
+	}
 	c.mu.Lock()
 	if c.headersSent {
 		c.mu.Unlock()
@@ -340,6 +351,29 @@ func (c *call) Send(payload []byte) error {
 	}
 	c.mu.Unlock()
 
+	data := payload
+	if data == nil {
+		data = []byte{}
+	}
+	if max := c.cfgMaxMessage(); max > 0 && int64(len(data)) > max {
+		return fmt.Errorf("%w: Send payload %d > max %d", ErrMessageTooLarge, len(data), max)
+	}
+	// Copy so caller may reuse the buffer after return.
+	cp := append([]byte(nil), data...)
+
+	if c.sess.kind == kindDatagram {
+		c.mu.Lock()
+		if c.hasPendingData {
+			c.mu.Unlock()
+			return status.Error(status.Unimplemented,
+				"envelope: DatagramCarrier allows at most one DATA per call")
+		}
+		c.pendingData = cp
+		c.hasPendingData = true
+		c.mu.Unlock()
+		return nil
+	}
+
 	if c.initiator {
 		if err := c.ensureOpen(); err != nil {
 			return err
@@ -350,15 +384,6 @@ func (c *call) Send(payload []byte) error {
 		}
 	}
 
-	data := payload
-	if data == nil {
-		data = []byte{}
-	}
-	if max := c.cfgMaxMessage(); max > 0 && int64(len(data)) > max {
-		return fmt.Errorf("%w: Send payload %d > max %d", ErrMessageTooLarge, len(data), max)
-	}
-	// Copy so caller may reuse the buffer after return.
-	cp := append([]byte(nil), data...)
 	if err := c.sess.writeFrame(Frame{
 		Type:   TypeData,
 		CallID: c.callID,
@@ -415,7 +440,43 @@ func (c *call) HalfClose() error {
 		return nil
 	}
 	openSent := c.openSent
+	hasData := c.hasPendingData
+	pending := c.pendingData
 	c.mu.Unlock()
+
+	if c.sess.kind == kindDatagram {
+		var hdrs []Header
+		if c.md != nil {
+			hdrs = mdToHeaders(c.md.OutgoingHeaders())
+		}
+		var frames []Frame
+		if !hasData {
+			frames = []Frame{{
+				Type:    TypeOpen,
+				CallID:  c.callID,
+				Method:  c.method,
+				Flags:   FlagOpenEnd,
+				Headers: hdrs,
+			}}
+		} else {
+			frames = []Frame{
+				{Type: TypeOpen, CallID: c.callID, Method: c.method, Headers: hdrs},
+				{Type: TypeData, CallID: c.callID, Data: pending},
+				{Type: TypeEnd, CallID: c.callID},
+			}
+		}
+		if err := c.sess.sendDatagramBatch(frames); err != nil {
+			c.sess.markBad()
+			return err
+		}
+		c.mu.Lock()
+		c.openSent = true
+		c.halfClosed = true
+		c.hasPendingData = false
+		c.pendingData = nil
+		c.mu.Unlock()
+		return nil
+	}
 
 	if !openSent {
 		// Deferred OPEN path: zero-message OPEN|END.
@@ -468,6 +529,10 @@ func (c *call) Finish(err error) error {
 	}
 	c.mu.Unlock()
 
+	if c.sess.kind == kindDatagram {
+		return c.finishDatagram(err)
+	}
+
 	if err := c.maybeAutoHeaders(); err != nil {
 		return err
 	}
@@ -500,6 +565,66 @@ func (c *call) Finish(err error) error {
 	c.mu.Unlock()
 	// Detach demux after STATUS so a Sequential peer may write the next OPEN
 	// before handler return / Call.Close. Residuals drain on next AcceptCall.
+	c.sess.detachCall(c, false)
+	return nil
+}
+
+func (c *call) finishDatagram(err error) error {
+	c.mu.Lock()
+	hasData := c.hasPendingData
+	pending := c.pendingData
+	headersSent := c.headersSent
+	c.mu.Unlock()
+
+	code := status.OK
+	msg := ""
+	if err != nil {
+		code = status.CodeOf(err)
+		msg = err.Error()
+	}
+
+	var frames []Frame
+	if !headersSent && c.md != nil {
+		hdrs := mdToHeaders(c.md.OutgoingHeaders())
+		if len(hdrs) > 0 {
+			frames = append(frames, Frame{
+				Type:    TypeHeaders,
+				CallID:  c.callID,
+				Headers: hdrs,
+			})
+		}
+	}
+	if hasData {
+		frames = append(frames, Frame{
+			Type:   TypeData,
+			CallID: c.callID,
+			Data:   pending,
+		})
+	}
+	var trailers []Header
+	if c.md != nil {
+		trailers = mdToHeaders(c.md.OutgoingTrailers())
+		_ = metadata.FreezeOutgoingTrailers(c.md)
+		_ = metadata.FreezeOutgoingHeaders(c.md)
+	}
+	frames = append(frames, Frame{
+		Type:    TypeStatus,
+		CallID:  c.callID,
+		Code:    uint32(code),
+		Message: msg,
+		Headers: trailers,
+	})
+
+	if werr := c.sess.sendDatagramBatch(frames); werr != nil {
+		c.sess.markBad()
+		return werr
+	}
+	c.mu.Lock()
+	c.finished = true
+	c.headersSent = true
+	c.hasPendingData = false
+	c.pendingData = nil
+	c.mu.Unlock()
 	c.sess.detachCall(c, false)
 	return nil
 }
@@ -648,9 +773,15 @@ func (c *serverCall) Accept(m descriptor.Method) error {
 	if m.IsZero() {
 		return status.Error(status.InvalidArgument, "envelope: zero Method")
 	}
-	// Envelope over stream carriers supports all four shapes.
 	switch c.sess.kind {
 	case kindByteStream, kindMessage:
+		return nil
+	case kindDatagram:
+		if m.Shape() != descriptor.Unary {
+			return status.Error(status.Unimplemented, fmt.Sprintf(
+				"envelope: shape %v unsupported on DatagramCarrier (Framing=envelope Shape=%v); need Unary",
+				m.Shape(), m.Shape()))
+		}
 		return nil
 	default:
 		return status.Error(status.Unimplemented, fmt.Sprintf(

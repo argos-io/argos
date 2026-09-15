@@ -23,6 +23,10 @@ var (
 	_ transport.CarrierConn    = (*MessageConn)(nil)
 	_ transport.MessageCarrier = (*MessageConn)(nil)
 
+	_ transport.Conn            = (*DatagramConn)(nil)
+	_ transport.CarrierConn     = (*DatagramConn)(nil)
+	_ transport.DatagramCarrier = (*DatagramConn)(nil)
+
 	_ transport.Conn       = (*HTTPClientConn)(nil)
 	_ transport.StreamConn = (*HTTPClientConn)(nil)
 
@@ -223,6 +227,107 @@ func (c *MessageConn) SendMessage(p []byte) error {
 		c.out <- cp
 		return nil
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Datagram CarrierConn (udp-like)
+// ---------------------------------------------------------------------------
+
+// DatagramConn is an in-process datagram CarrierConn.
+type DatagramConn struct {
+	in  chan []byte
+	out chan []byte
+
+	mu      sync.Mutex
+	closed  bool
+	closes  int64
+	aborted bool
+}
+
+// DatagramPipe returns a crossed DatagramConn pair.
+func DatagramPipe() (client, server *DatagramConn) {
+	ab := make(chan []byte, 16)
+	ba := make(chan []byte, 16)
+	client = &DatagramConn{in: ba, out: ab}
+	server = &DatagramConn{in: ab, out: ba}
+	return client, server
+}
+
+// Carrier returns the Conn itself as DatagramCarrier.
+func (c *DatagramConn) Carrier() transport.Carrier { return c }
+
+// Close implements transport.Conn.
+func (c *DatagramConn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	c.closes++
+	close(c.out)
+	return nil
+}
+
+// Closed reports whether Close has been called.
+func (c *DatagramConn) Closed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+// CloseCount returns how many times Close ran.
+func (c *DatagramConn) CloseCount() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closes
+}
+
+// Abort implements transport.Carrier.
+func (c *DatagramConn) Abort() error {
+	c.mu.Lock()
+	c.aborted = true
+	c.mu.Unlock()
+	return c.Close()
+}
+
+// RecvDatagram implements transport.DatagramCarrier.
+func (c *DatagramConn) RecvDatagram() ([]byte, error) {
+	msg, ok := <-c.in
+	if !ok {
+		return nil, io.EOF
+	}
+	return msg, nil
+}
+
+// SendDatagram implements transport.DatagramCarrier.
+func (c *DatagramConn) SendDatagram(p []byte) error {
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return io.ErrClosedPipe
+	}
+	cp := append([]byte(nil), p...)
+	select {
+	case c.out <- cp:
+		return nil
+	default:
+		c.mu.Lock()
+		closed = c.closed
+		c.mu.Unlock()
+		if closed {
+			return io.ErrClosedPipe
+		}
+		c.out <- cp
+		return nil
+	}
+}
+
+// InjectDatagram places a datagram on the receive queue (tests: mismatched call ID).
+func (c *DatagramConn) InjectDatagram(p []byte) {
+	cp := append([]byte(nil), p...)
+	c.in <- cp
 }
 
 // ---------------------------------------------------------------------------

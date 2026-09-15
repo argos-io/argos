@@ -23,6 +23,7 @@ type carrierKind int
 const (
 	kindByteStream carrierKind = iota
 	kindMessage
+	kindDatagram
 )
 
 type demuxMode int
@@ -49,6 +50,7 @@ type session struct {
 
 	openTimeout   time.Duration
 	maxDrainBytes int64
+	maxDatagram   int64
 
 	writeMu sync.Mutex
 
@@ -56,6 +58,8 @@ type session struct {
 	closed   bool
 	reusable bool
 	ioError  bool
+	oneCall  bool // OneCallPerConn or DatagramCarrier
+	spent    bool // oneCall: session already used
 
 	mode       demuxMode
 	active     *call
@@ -67,6 +71,9 @@ type session struct {
 
 	// Cross-call leftover for ByteStreamCarrier length-prefix framing.
 	readBuf []byte
+	// datagramRest holds frames after OPEN from the request datagram until
+	// AcceptCall attaches the server call and delivers them.
+	datagramRest []Frame
 
 	// wake notifies recvLoop that mode/active/accept changed or session closed.
 	wake chan struct{}
@@ -75,6 +82,7 @@ type session struct {
 }
 
 func newSession(f *Framing, conn transport.Conn, car transport.Carrier, kind carrierKind, cfg framing.Config, client bool) *session {
+	oneCall := kind == kindDatagram || f.reuse == framing.OneCallPerConn
 	s := &session{
 		framing:       f,
 		conn:          conn,
@@ -85,6 +93,7 @@ func newSession(f *Framing, conn transport.Conn, car transport.Carrier, kind car
 		openTimeout:   f.openTimeout,
 		maxDrainBytes: f.maxDrainBytes,
 		reusable:      true,
+		oneCall:       oneCall,
 		nextCallID:    1,
 		wake:          make(chan struct{}, 1),
 		recvDone:      make(chan struct{}),
@@ -134,6 +143,9 @@ func (s *session) detachCall(c *call, poison bool) {
 func (s *session) Reusable() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.oneCall && s.spent {
+		return false
+	}
 	return s.reusable && !s.closed && !s.ioError
 }
 
@@ -191,6 +203,10 @@ func (s *session) recvLoop() {
 			continue
 
 		case modeAccepting:
+			if s.kind == kindDatagram {
+				s.acceptDatagram(acceptCtx)
+				continue
+			}
 			f, err := s.readFrameAccepting(acceptCtx, lastID)
 			if err != nil {
 				s.mu.Lock()
@@ -233,6 +249,15 @@ func (s *session) recvLoop() {
 		case modeInCall:
 			if active == nil {
 				<-s.wake
+				continue
+			}
+			if s.kind == kindDatagram {
+				if s.client {
+					s.recvClientDatagram(active)
+				} else {
+					// Server datagram: request frames already delivered at accept.
+					s.waitWakeOrClosed()
+				}
 				continue
 			}
 			f, err := s.readFrame()
@@ -344,17 +369,22 @@ func (s *session) readFrameAccepting(ctx context.Context, lastCallID uint64) (Fr
 }
 
 func frameWireSize(f Frame, kind carrierKind) (int64, error) {
-	if kind == kindMessage {
+	switch kind {
+	case kindMessage, kindDatagram:
 		body, err := MarshalFrameBody(f)
 		return int64(len(body)), err
+	default:
+		raw, err := MarshalFrame(f)
+		return int64(len(raw)), err
 	}
-	raw, err := MarshalFrame(f)
-	return int64(len(raw)), err
 }
 
 func (s *session) readFrameFirstByteThenTimeout(ctx context.Context) (Frame, error) {
 	if s.kind == kindMessage {
 		return s.readMessageFrame(ctx, true)
+	}
+	if s.kind == kindDatagram {
+		return Frame{}, fmt.Errorf("envelope: datagram AcceptCall uses acceptDatagram")
 	}
 	// Byte stream: wait for ≥1 byte with only accept ctx, then OpenTimeout.
 	if err := s.waitFirstByte(ctx); err != nil {
@@ -534,8 +564,220 @@ func (s *session) writeFrame(f Frame) error {
 		}
 		mc := s.carrier.(transport.MessageCarrier)
 		return mc.SendMessage(body)
+	case kindDatagram:
+		return fmt.Errorf("envelope: datagram path must use sendDatagramBatch")
 	default:
 		return fmt.Errorf("envelope: unknown carrier kind")
+	}
+}
+
+// sendDatagramBatch marshals frames into one datagram and sends it.
+func (s *session) sendDatagramBatch(frames []Frame) error {
+	for _, f := range frames {
+		if err := f.Validate(s.cfg.MaxFrameSize, s.cfg.MaxMetadataSize); err != nil {
+			return err
+		}
+	}
+	raw, err := MarshalDatagram(frames)
+	if err != nil {
+		return err
+	}
+	if s.maxDatagram > 0 && int64(len(raw)) > s.maxDatagram {
+		return status.Error(status.ResourceExhausted,
+			fmt.Sprintf("envelope: datagram %d bytes exceeds limit %d", len(raw), s.maxDatagram))
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	dc, ok := s.carrier.(transport.DatagramCarrier)
+	if !ok {
+		return fmt.Errorf("envelope: DatagramCarrier required")
+	}
+	return dc.SendDatagram(raw)
+}
+
+// acceptDatagram reads one request datagram for AcceptCall.
+func (s *session) acceptDatagram(ctx context.Context) {
+	dc, ok := s.carrier.(transport.DatagramCarrier)
+	if !ok {
+		s.failAccept(fmt.Errorf("envelope: DatagramCarrier required"))
+		s.waitModeChange(modeAccepting)
+		return
+	}
+
+	type result struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		data, err := dc.RecvDatagram()
+		ch <- result{data, err}
+	}()
+
+	var res result
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			select {
+			case res = <-ch:
+			case <-time.After(50 * time.Millisecond):
+				s.failAccept(ctx.Err())
+				s.waitModeChange(modeAccepting)
+				return
+			}
+			if res.err != nil && res.data == nil {
+				s.failAccept(ctx.Err())
+				s.waitModeChange(modeAccepting)
+				return
+			}
+		case res = <-ch:
+		}
+	} else {
+		res = <-ch
+	}
+
+	if res.err != nil {
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return
+		}
+		if !errors.Is(res.err, context.Canceled) && !errors.Is(res.err, context.DeadlineExceeded) {
+			if !errors.Is(res.err, io.EOF) {
+				s.markBadLocked()
+			} else {
+				s.reusable = false
+			}
+		}
+		acceptCh := s.acceptCh
+		s.mu.Unlock()
+		if acceptCh != nil {
+			select {
+			case acceptCh <- acceptResult{err: res.err}:
+			default:
+			}
+		}
+		s.waitModeChange(modeAccepting)
+		return
+	}
+
+	frames, err := ParseDatagram(res.data, s.cfg.MaxFrameSize, s.cfg.MaxMessageSize)
+	if err != nil {
+		s.failAccept(err)
+		s.markBad()
+		s.waitModeChange(modeAccepting)
+		return
+	}
+	if len(frames) == 0 || frames[0].Type != TypeOpen {
+		s.failAccept(fmt.Errorf("envelope: datagram expected OPEN, got %v", frames))
+		s.markBad()
+		s.waitModeChange(modeAccepting)
+		return
+	}
+
+	s.mu.Lock()
+	acceptCh := s.acceptCh
+	s.mu.Unlock()
+	if acceptCh == nil {
+		s.waitModeChange(modeAccepting)
+		return
+	}
+	// Deliver OPEN; remaining frames ride on acceptResult via a side channel
+	// on the session until AcceptCall attaches the call.
+	s.mu.Lock()
+	s.datagramRest = frames[1:]
+	s.mu.Unlock()
+	acceptCh <- acceptResult{frame: frames[0]}
+	s.waitModeChange(modeAccepting)
+}
+
+func (s *session) failAccept(err error) {
+	s.mu.Lock()
+	ch := s.acceptCh
+	s.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- acceptResult{err: err}:
+		default:
+		}
+	}
+}
+
+// recvClientDatagram reads response datagrams until call-ID match or fatal error.
+// Mismatched call IDs are discarded (§4.5).
+func (s *session) recvClientDatagram(active *call) {
+	dc, ok := s.carrier.(transport.DatagramCarrier)
+	if !ok {
+		active.abortRecv(fmt.Errorf("envelope: DatagramCarrier required"))
+		s.markBad()
+		s.waitWakeOrClosed()
+		return
+	}
+
+	for {
+		if s.isClosed() {
+			return
+		}
+		s.mu.Lock()
+		cur := s.active
+		mode := s.mode
+		s.mu.Unlock()
+		if cur != active || mode != modeInCall {
+			s.waitWakeOrClosed()
+			return
+		}
+
+		data, err := dc.RecvDatagram()
+		if err != nil {
+			if s.isClosed() {
+				return
+			}
+			if isTimeoutErr(err) {
+				s.clearReadDeadline()
+				continue
+			}
+			s.mu.Lock()
+			cur = s.active
+			mode = s.mode
+			s.mu.Unlock()
+			if cur != active || mode != modeInCall {
+				s.waitWakeOrClosed()
+				return
+			}
+			cur.abortRecv(err)
+			s.markBad()
+			s.waitWakeOrClosed()
+			return
+		}
+
+		frames, err := ParseDatagram(data, s.cfg.MaxFrameSize, s.cfg.MaxMessageSize)
+		if err != nil {
+			active.abortRecv(err)
+			s.markBad()
+			s.waitWakeOrClosed()
+			return
+		}
+		if len(frames) == 0 {
+			continue
+		}
+		// Ownership check: any mismatched call ID → discard whole datagram.
+		mismatch := false
+		for _, f := range frames {
+			if f.CallID != active.callID {
+				mismatch = true
+				break
+			}
+		}
+		if mismatch {
+			continue // discard; keep waiting
+		}
+		for _, f := range frames {
+			active.deliver(f)
+		}
+		if active.recvFinished() {
+			s.waitWakeOrClosed()
+			return
+		}
 	}
 }
 
@@ -608,12 +850,24 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 		s.mu.Unlock()
 		return nil, status.Error(status.Unavailable, "envelope: session not reusable")
 	}
+	if s.oneCall && s.spent {
+		s.mu.Unlock()
+		return nil, framing.ErrSessionSpent
+	}
 	if s.mode != modeIdle || s.active != nil {
 		s.mu.Unlock()
 		return nil, framing.ErrSessionBusy
 	}
+	if s.kind == kindDatagram && m.Shape() != descriptor.Unary {
+		s.mu.Unlock()
+		return nil, status.Error(status.Unimplemented, fmt.Sprintf(
+			"envelope: shape %v unsupported on DatagramCarrier (Framing=envelope); need Unary", m.Shape()))
+	}
 	id := s.nextCallID
 	s.nextCallID++
+	if s.oneCall {
+		s.spent = true
+	}
 	s.mu.Unlock()
 
 	if spec.Metadata != nil {
@@ -629,6 +883,11 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 	s.mode = modeInCall
 	s.mu.Unlock()
 	s.signal()
+
+	if s.kind == kindDatagram {
+		// OPEN is deferred until HalfClose (single request datagram).
+		return c, nil
+	}
 
 	var hdrs []Header
 	if spec.Metadata != nil {
@@ -663,6 +922,10 @@ type serverSession struct {
 func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (framing.ServerCall, error) {
 	s.mu.Lock()
 	if s.closed {
+		s.mu.Unlock()
+		return nil, io.EOF
+	}
+	if s.oneCall && s.spent {
 		s.mu.Unlock()
 		return nil, io.EOF
 	}
@@ -729,7 +992,25 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 		c.deliverEnd()
 	}
 
+	s.mu.Lock()
+	rest := s.datagramRest
+	s.datagramRest = nil
+	if s.oneCall {
+		s.spent = true
+	}
+	s.mu.Unlock()
+
 	s.finishAccept(c)
+
+	// Deliver remaining request frames from the same datagram (DATA/END).
+	for _, rf := range rest {
+		if rf.CallID != c.callID {
+			c.abortRecv(fmt.Errorf("envelope: unexpected call ID %d want %d", rf.CallID, c.callID))
+			s.markBad()
+			break
+		}
+		c.deliver(rf)
+	}
 	return &serverCall{call: c}, nil
 }
 

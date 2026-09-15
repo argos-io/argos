@@ -1,20 +1,27 @@
 // Package envelope implements the argos envelope protocol: wire codec
-// (OPEN / HEADERS / DATA / END / STATUS) and Sequential Call/Session state
-// machines over ByteStreamCarrier and MessageCarrier.
+// (OPEN / HEADERS / DATA / END / STATUS) and Call/Session state machines over
+// ByteStreamCarrier, MessageCarrier, and DatagramCarrier.
 //
-// Reuse is always Sequential: one in-flight call per connection. The wire
-// format carries a call ID on every frame and therefore allows a peer to
-// open concurrent calls on one connection, but this implementation does not —
-// AcceptCall is serial (the next OPEN is read only after Call.Close). A
-// third-party client that writes two OPENs concurrently will see the second
-// call wait, not fail. That gap is intentional (§4.5).
+// Over byte/message carriers Reuse defaults to Sequential: one in-flight call
+// per connection. The wire format carries a call ID on every frame and
+// therefore allows a peer to open concurrent calls on one connection, but this
+// implementation does not — AcceptCall is serial (the next OPEN is read only
+// after Call.Close). A third-party client that writes two OPENs concurrently
+// will see the second call wait, not fail. That gap is intentional (§4.5).
+//
+// Over DatagramCarrier (UDP) Reuse is OneCallPerConn: one request datagram and
+// one response datagram per session. Request = OPEN + 0..1 DATA + END
+// (zero-message = OPEN|END); response = 0..1 HEADERS + 0..1 DATA + STATUS.
+// Call IDs validate response ownership; they do not multiplex.
 package envelope
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // Type is the one-byte frame type on the wire.
@@ -106,13 +113,70 @@ func MarshalFrameBody(f Frame) ([]byte, error) {
 	return out, nil
 }
 
-// AppendFrame appends a frame body (no length prefix) to dst for UDP batching.
+// AppendFrame appends a frame body (no length prefix) to dst.
+// Prefer MarshalDatagram for on-wire UDP payloads (length-prefixed frames).
 func AppendFrame(dst []byte, f Frame) ([]byte, error) {
 	body, err := MarshalFrameBody(f)
 	if err != nil {
 		return dst, err
 	}
 	return append(dst, body...), nil
+}
+
+// MarshalDatagram encodes frames as one UDP payload: concatenated
+// length-prefixed frames (same encoding as ByteStreamCarrier).
+func MarshalDatagram(frames []Frame) ([]byte, error) {
+	if len(frames) == 0 {
+		return nil, fmt.Errorf("envelope: empty datagram")
+	}
+	var out []byte
+	for _, f := range frames {
+		raw, err := MarshalFrame(f)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, raw...)
+	}
+	return out, nil
+}
+
+// ParseDatagram decodes a UDP payload into frames. Non-positive maxFrame /
+// maxMessage disable the corresponding check (same as UnmarshalPrefixedLimited).
+func ParseDatagram(data []byte, maxFrame, maxMessage int64) ([]Frame, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("envelope: empty datagram")
+	}
+	r := bytes.NewReader(data)
+	var frames []Frame
+	for r.Len() > 0 {
+		f, err := UnmarshalPrefixedLimited(r, maxFrame, maxMessage)
+		if err != nil {
+			return nil, err
+		}
+		frames = append(frames, f)
+	}
+	return frames, nil
+}
+
+// CheckDatagramLimits fails when MaxFrameSize or MaxMessageSize cannot fit in
+// a single datagram of maxDatagram bytes (typically udp.MaxDatagramSize).
+// The error lists conflicting field names. Intended for Binding/Client start.
+func CheckDatagramLimits(maxFrame, maxMessage, maxDatagram int64) error {
+	if maxDatagram <= 0 {
+		return fmt.Errorf("envelope: invalid datagram size limit %d", maxDatagram)
+	}
+	var fields []string
+	if maxFrame > maxDatagram {
+		fields = append(fields, "MaxFrameSize")
+	}
+	if maxMessage > maxDatagram {
+		fields = append(fields, "MaxMessageSize")
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return fmt.Errorf("envelope: MaxFrameSize/MaxMessageSize exceed datagram limit %d (%s)",
+		maxDatagram, strings.Join(fields, ", "))
 }
 
 // UnmarshalPrefixed reads one length-prefixed frame from r.

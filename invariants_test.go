@@ -316,6 +316,41 @@ func TestInvariantTransitiveEnvelopeTCPNoGRPC(t *testing.T) {
 	}
 }
 
+// TestInvariantTransitiveEnvelopeUDPNoGenproto is Task 4.2:
+// framing/envelope + transport/udp must not pull genproto (same gate as tcp).
+func TestInvariantTransitiveEnvelopeUDPNoGenproto(t *testing.T) {
+	t.Parallel()
+	cmd := exec.Command(
+		"go", "list", "-deps",
+		"-f", "{{if not .Standard}}{{.ImportPath}}{{end}}",
+		"./framing/envelope", "./transport/udp",
+	)
+	cmd.Dir = moduleRoot(t)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list -deps envelope+udp: %v\n%s", err, stderr.String())
+	}
+	forbidden := []string{
+		modulePath + "/framing/grpc",
+		modulePath + "/binding/grpc",
+		modulePath + "/compressor",
+		"google.golang.org/genproto",
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		for _, bad := range forbidden {
+			if line == bad || strings.HasPrefix(line, bad+"/") {
+				t.Errorf("envelope+udp transitive deps include %q (§3.1-15)", line)
+			}
+		}
+	}
+}
+
 func TestInvariantFramingConfigNoCompression(t *testing.T) {
 	t.Parallel()
 	compressField := regexp.MustCompile(`(?i)compress`)
