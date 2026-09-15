@@ -151,15 +151,6 @@ func (s *acceptServer) waitReady(t *testing.T) {
 	}
 }
 
-func (s *acceptServer) waitOnConn(t *testing.T, d time.Duration) {
-	t.Helper()
-	select {
-	case <-s.firstDone:
-	case <-time.After(d):
-		t.Fatalf("onConn did not exit within %v", d)
-	}
-}
-
 func (s *acceptServer) serve() {
 	c, err := s.ln.Accept()
 	if err != nil {
@@ -735,10 +726,14 @@ func TestResidualFrameSkip(t *testing.T) {
 	})
 
 	t.Run("drain_exceeded", func(t *testing.T) {
+		// 等客户端写完全部残余帧后再让 handler 返回，避免排空关连接与
+		// 客户端还在 Write 之间竞态成 connection reset。
+		release := make(chan struct{})
 		f := NewSeqFraming()
 		f.MaxDrainBytes = 64 // 很小，易超限
 		s := startAcceptServer(t, f, func(ctx context.Context, call *ServerSeqCall) error {
 			_, _ = call.Recv(ctx)
+			<-release
 			return nil
 		})
 
@@ -752,7 +747,7 @@ func TestResidualFrameSkip(t *testing.T) {
 		if err := clientData(c, 1, []byte("one")); err != nil {
 			t.Fatal(err)
 		}
-		// 大量残余 DATA
+		// 大量残余 DATA（合计远超 MaxDrainBytes）
 		big := make([]byte, 40)
 		for i := 0; i < 10; i++ {
 			if err := clientData(c, 1, big); err != nil {
@@ -762,6 +757,8 @@ func TestResidualFrameSkip(t *testing.T) {
 		if err := clientEnd(c, 1); err != nil {
 			t.Fatal(err)
 		}
+		close(release)
+
 		_, _, _, _ = clientReadStatus(c, &buf)
 
 		// 下一轮 AcceptCall 排空时应超限并关掉连接
