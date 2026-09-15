@@ -254,6 +254,13 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.Cl
 				p.mu.Unlock()
 				return nil, err
 			}
+			if p.closed {
+				fl.err = fmt.Errorf("sessionpool: pool closed")
+				close(fl.done)
+				p.mu.Unlock()
+				_ = sess.Close()
+				return nil, fl.err
+			}
 			e := p.addEntryLocked(endpoint, sess, time.Now())
 			e.refcount = 1
 			fl.sess = sess

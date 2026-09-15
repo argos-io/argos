@@ -3,6 +3,7 @@ package sessionpool_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -153,6 +154,63 @@ func TestConcurrentSingleflightOneDial(t *testing.T) {
 	}
 	for i := 0; i < n; i++ {
 		p.Release(sessions[i])
+	}
+}
+
+func TestConcurrentCloseDuringDial(t *testing.T) {
+	t.Parallel()
+	hold := make(chan struct{})
+
+	f := fake.NewFraming(framing.Concurrent)
+	f.Handshake = func(ctx context.Context, c transport.Conn) error {
+		select {
+		case <-hold:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	var closed atomic.Bool
+	dial := func(ctx context.Context, endpoint string) (transport.Conn, error) {
+		cli, lis := fake.HTTPLoopback()
+		go func() {
+			for {
+				srv, err := lis.Accept(context.Background())
+				if err != nil {
+					return
+				}
+				_ = srv.Close()
+			}
+		}()
+		return cli, nil
+	}
+
+	p := sessionpool.New(f, dial, sessionpool.Config{
+		MaxSessionsPerEndpoint: 64,
+		MaxIdleSessions:        8,
+		HandshakeTimeout:       5 * time.Second,
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := p.Acquire(context.Background(), "ep")
+		errCh <- err
+	}()
+	time.Sleep(50 * time.Millisecond) // dial in flight, blocked in Handshake
+	p.Close()
+	closed.Store(true)
+	close(hold)
+
+	err := <-errCh
+	if err == nil {
+		t.Fatal("Acquire after Pool.Close during dial returned nil error")
+	}
+	if !closed.Load() {
+		t.Fatal("test sequencing: Close should have run before Acquire returns")
+	}
+	if !strings.Contains(err.Error(), "pool closed") {
+		t.Fatalf("Acquire err = %v, want pool closed", err)
 	}
 }
 

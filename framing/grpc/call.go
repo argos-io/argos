@@ -505,7 +505,11 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 		}
 	}
 
-	compressed, data, err := ReadLPM(c.body)
+	maxWire := c.cfg.MaxFrameSize
+	if maxWire <= 0 {
+		maxWire = c.maxMsg
+	}
+	compressed, data, err := ReadLPMLimited(c.body, maxWire)
 	if err != nil {
 		if err == io.EOF {
 			if c.initiator {

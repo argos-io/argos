@@ -2,10 +2,12 @@ package grpc_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"io"
 	"testing"
 
 	grpcframing "github.com/argos-io/argos/framing/grpc"
+	"github.com/argos-io/argos/status"
 )
 
 func TestLPMRoundTrip(t *testing.T) {
@@ -88,5 +90,39 @@ func TestLPMRejectsCompressed(t *testing.T) {
 	}
 	if string(payload) != "x" {
 		t.Fatalf("payload = %q", payload)
+	}
+}
+
+func TestReadLPMLimitedRejectsOversizeWithoutAlloc(t *testing.T) {
+	t.Parallel()
+	// Hostile length claim: 1 GiB. Must fail before allocating.
+	var hdr [5]byte
+	hdr[0] = 0
+	binary.BigEndian.PutUint32(hdr[1:], 1<<30)
+	_, payload, err := grpcframing.ReadLPMLimited(bytes.NewReader(hdr[:]), 1024)
+	if err == nil {
+		t.Fatal("want error for oversize LPM length")
+	}
+	if status.CodeOf(err) != status.ResourceExhausted {
+		t.Fatalf("err = %v (code %v), want ResourceExhausted", err, status.CodeOf(err))
+	}
+	if payload != nil {
+		t.Fatalf("payload must be nil on reject, got len=%d", len(payload))
+	}
+}
+
+func TestReadLPMLimitedAllowsExactMax(t *testing.T) {
+	t.Parallel()
+	payload := []byte("abcd")
+	var buf bytes.Buffer
+	if err := grpcframing.WriteLPM(&buf, false, payload); err != nil {
+		t.Fatal(err)
+	}
+	_, got, err := grpcframing.ReadLPMLimited(&buf, int64(len(payload)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("got %q", got)
 	}
 }

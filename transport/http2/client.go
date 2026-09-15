@@ -50,6 +50,7 @@ func (c *streamConn) OpenStream(ctx context.Context, p transport.RequestPreface)
 	pr, pw := io.Pipe()
 	reqCtx, cancel := context.WithCancel(ctx)
 	car := &clientCarrier{
+		conn:   c,
 		pw:     pw,
 		pr:     pr,
 		cancel: cancel,
@@ -74,6 +75,7 @@ func (c *streamConn) OpenStream(ctx context.Context, p transport.RequestPreface)
 		return nil, errAborted
 	}
 	c.carriers[car] = struct{}{}
+	car.tracked.Store(true)
 	c.mu.Unlock()
 
 	go func() {
@@ -132,12 +134,14 @@ func streamURL(base, target string) (string, error) {
 
 // clientCarrier is one client HTTP/2 stream.
 type clientCarrier struct {
+	conn   *streamConn
 	pw     *io.PipeWriter
 	pr     *io.PipeReader
 	cancel context.CancelFunc
 
 	ready      chan struct{}
 	finishOnce sync.Once
+	tracked    atomic.Bool // true while present in streamConn.carriers
 
 	mu      sync.Mutex
 	resp    *http.Response
@@ -145,6 +149,22 @@ type clientCarrier struct {
 	aborted bool
 
 	sendClosed atomic.Bool
+}
+
+func (c *streamConn) untrack(car *clientCarrier) {
+	if car == nil || !car.tracked.Swap(false) {
+		return
+	}
+	c.mu.Lock()
+	delete(c.carriers, car)
+	c.mu.Unlock()
+}
+
+// trackedCarrierCount reports in-flight OpenStream carriers (tests).
+func (c *streamConn) trackedCarrierCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.carriers)
 }
 
 // finish records the RoundTrip result once. Reports whether this call won.
@@ -224,6 +244,9 @@ func (c *clientCarrier) ResponseTrailers() (transport.Headers, error) {
 	c.mu.Unlock()
 	_, _ = io.Copy(io.Discard, body)
 	_ = body.Close()
+	if c.conn != nil {
+		c.conn.untrack(c)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return headersFromHTTP(c.resp.Trailer), nil
@@ -247,5 +270,8 @@ func (c *clientCarrier) Abort() error {
 		_ = resp.Body.Close()
 	}
 	_ = c.finish(nil, errAborted)
+	if c.conn != nil {
+		c.conn.untrack(c)
+	}
 	return nil
 }

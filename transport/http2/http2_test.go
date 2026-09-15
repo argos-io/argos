@@ -459,3 +459,31 @@ func equalFold(a, b string) bool {
 	}
 	return true
 }
+
+func TestOpenStreamCarrierUntrackedAfterAbort(t *testing.T) {
+	_, addr := startServer(t, func(_ context.Context, c transport.Conn) {
+		cc := c.(transport.CarrierConn)
+		car := cc.Carrier().(interface {
+			transport.ByteStreamCarrier
+			transport.ResponseWriter
+		})
+		_, _ = io.Copy(io.Discard, car)
+		_ = car.Finish(200, nil, nil)
+	})
+
+	_, sc := dial(t, addr)
+	ctx := context.Background()
+	const n = 32
+	for i := 0; i < n; i++ {
+		car, err := sc.OpenStream(ctx, transport.RequestPreface{RequestTarget: "/x"})
+		if err != nil {
+			t.Fatalf("OpenStream #%d: %v", i, err)
+		}
+		_ = car.(transport.SendCloser).CloseSend()
+		_, _ = io.Copy(io.Discard, car.(transport.ByteStreamCarrier))
+		_ = car.Abort()
+		if got := argoshttp2.TrackedCarrierCount(sc.(transport.Conn)); got != 0 {
+			t.Fatalf("after Abort #%d tracked=%d, want 0", i, got)
+		}
+	}
+}
