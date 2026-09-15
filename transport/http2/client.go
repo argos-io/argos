@@ -1,0 +1,251 @@
+package http2
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"net/url"
+	"sync"
+	"sync/atomic"
+
+	"github.com/argos-io/argos/transport"
+)
+
+// streamConn is a client endpoint handle (StreamConn). Close releases the
+// handle and aborts in-flight streams; it does not close the Transport-owned
+// http.Client.
+type streamConn struct {
+	client *http.Client
+	base   string
+
+	mu       sync.Mutex
+	closed   atomic.Bool
+	carriers map[*clientCarrier]struct{}
+}
+
+func newStreamConn(client *http.Client, base string) *streamConn {
+	return &streamConn{
+		client:   client,
+		base:     base,
+		carriers: make(map[*clientCarrier]struct{}),
+	}
+}
+
+// OpenStream starts one HTTP/2 request and returns a writable Carrier before
+// response headers arrive.
+func (c *streamConn) OpenStream(ctx context.Context, p transport.RequestPreface) (transport.Carrier, error) {
+	if c.closed.Load() {
+		return nil, errAborted
+	}
+
+	target := p.RequestTarget
+	if target == "" {
+		target = "/"
+	}
+	u, err := streamURL(c.base, target)
+	if err != nil {
+		return nil, err
+	}
+
+	pr, pw := io.Pipe()
+	reqCtx, cancel := context.WithCancel(ctx)
+	car := &clientCarrier{
+		pw:     pw,
+		pr:     pr,
+		cancel: cancel,
+		ready:  make(chan struct{}),
+	}
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, u, pr)
+	if err != nil {
+		cancel()
+		_ = pw.Close()
+		_ = pr.Close()
+		return nil, err
+	}
+	applyHeaders(req.Header, p.Headers)
+
+	c.mu.Lock()
+	if c.closed.Load() {
+		c.mu.Unlock()
+		cancel()
+		_ = pw.Close()
+		_ = pr.Close()
+		return nil, errAborted
+	}
+	c.carriers[car] = struct{}{}
+	c.mu.Unlock()
+
+	go func() {
+		resp, err := c.client.Do(req)
+		if err != nil {
+			_ = pr.CloseWithError(err)
+		}
+		if !car.finish(resp, err) && resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	return car, nil
+}
+
+// Close marks the endpoint handle closed and aborts in-flight streams.
+// Idempotent. Does not shut down the shared http.Client.
+func (c *streamConn) Close() error {
+	if c.closed.Swap(true) {
+		return nil
+	}
+	c.mu.Lock()
+	carriers := make([]*clientCarrier, 0, len(c.carriers))
+	for car := range c.carriers {
+		carriers = append(carriers, car)
+	}
+	c.carriers = nil
+	c.mu.Unlock()
+	for _, car := range carriers {
+		_ = car.Abort()
+	}
+	return nil
+}
+
+// streamURL joins an endpoint base URL with an HTTP request target (:path).
+func streamURL(base, target string) (string, error) {
+	bu, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
+	if target == "" || target[0] != '/' {
+		target = "/" + target
+	}
+	// Preserve query in target if Framing put one in RequestTarget.
+	if tu, err := url.ParseRequestURI(target); err == nil {
+		bu.Path = tu.Path
+		bu.RawPath = tu.RawPath
+		bu.RawQuery = tu.RawQuery
+	} else {
+		bu.Path = target
+		bu.RawQuery = ""
+	}
+	bu.Fragment = ""
+	return bu.String(), nil
+}
+
+// clientCarrier is one client HTTP/2 stream.
+type clientCarrier struct {
+	pw     *io.PipeWriter
+	pr     *io.PipeReader
+	cancel context.CancelFunc
+
+	ready      chan struct{}
+	finishOnce sync.Once
+
+	mu      sync.Mutex
+	resp    *http.Response
+	respErr error
+	aborted bool
+
+	sendClosed atomic.Bool
+}
+
+// finish records the RoundTrip result once. Reports whether this call won.
+func (c *clientCarrier) finish(resp *http.Response, err error) bool {
+	won := false
+	c.finishOnce.Do(func() {
+		won = true
+		c.mu.Lock()
+		c.resp, c.respErr = resp, err
+		c.mu.Unlock()
+		close(c.ready)
+	})
+	return won
+}
+
+func (c *clientCarrier) waitReady() error {
+	<-c.ready
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.respErr != nil {
+		return c.respErr
+	}
+	if c.resp == nil {
+		return errAborted
+	}
+	return nil
+}
+
+// Write writes to the request body. Safe before response headers arrive.
+func (c *clientCarrier) Write(p []byte) (int, error) {
+	return c.pw.Write(p)
+}
+
+// Read reads the response body, waiting for headers first if needed.
+func (c *clientCarrier) Read(p []byte) (int, error) {
+	if err := c.waitReady(); err != nil {
+		return 0, err
+	}
+	return c.resp.Body.Read(p)
+}
+
+// CloseSend ends the request body (HTTP/2 END_STREAM on the request side).
+func (c *clientCarrier) CloseSend() error {
+	if c.sendClosed.Swap(true) {
+		return nil
+	}
+	return c.pw.Close()
+}
+
+// ResponseStatus waits for response headers and returns the HTTP status code.
+func (c *clientCarrier) ResponseStatus() (int, error) {
+	if err := c.waitReady(); err != nil {
+		return 0, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.resp.StatusCode, nil
+}
+
+// ResponseHeaders waits for response headers.
+func (c *clientCarrier) ResponseHeaders() (transport.Headers, error) {
+	if err := c.waitReady(); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return headersFromHTTP(c.resp.Header), nil
+}
+
+// ResponseTrailers drains any unread body then returns trailers.
+func (c *clientCarrier) ResponseTrailers() (transport.Headers, error) {
+	if err := c.waitReady(); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	body := c.resp.Body
+	c.mu.Unlock()
+	_, _ = io.Copy(io.Discard, body)
+	_ = body.Close()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return headersFromHTTP(c.resp.Trailer), nil
+}
+
+// Abort cancels the request and unblocks I/O. Idempotent.
+func (c *clientCarrier) Abort() error {
+	c.mu.Lock()
+	if c.aborted {
+		c.mu.Unlock()
+		return nil
+	}
+	c.aborted = true
+	resp := c.resp
+	c.mu.Unlock()
+
+	c.cancel()
+	_ = c.pw.CloseWithError(errAborted)
+	_ = c.pr.CloseWithError(errAborted)
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	_ = c.finish(nil, errAborted)
+	return nil
+}
