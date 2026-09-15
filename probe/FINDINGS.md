@@ -29,3 +29,25 @@
 - **不确定窗口真实存在**：写失败后 `responded()` 仍为 false 的采样点稳定出现（每轮 5–14 次，约 10–28%）。
 - **保守 `ReceiveOpen`（不确定时返回 true）给出正确结果**：无论是否落在窗口内，写失败后 `ResponseHeaders` 均返回 `Grpc-Status: 16`（Unauthenticated），500/500 次一致。
 - **§2.4 契约成立**：`false` 仅用于已确知不可恢复；窗口内返回 `true` 由后续 `Recv` 给出确定结果——本探针验证了后者。
+
+## Task 0.11 — UDP 单包 envelope 往返
+
+**日期**：2026-09-15  
+**探针**：`TestUDP*`  
+**参数**：`127.0.0.1` loopback · `net.ListenPacket("udp", …)` · `-race`
+
+### 实测数据
+
+| 项 | 结果 |
+|---|---|
+| 单请求/单响应数据报计数 | 客户端、服务端各 1 读 + 1 写 |
+| `OPEN\|END` 零消息 | 首次 `Recv` 得 `io.EOF`；响应仍单包 |
+| 错误 call ID | 不匹配响应被丢弃，正确 ID 后续到达 |
+| IPv4 UDP 有效载荷上限 | **65507** 字节可发；**65508** 字节 `WriteTo` 失败 |
+
+### 结论
+
+- **单包往返成立**：请求 `OPEN + DATA + END`、响应 `HEADERS + DATA + STATUS` 各编码为一个 UDP 数据报，两侧计数均为 1。
+- **零消息可区分**：`OPEN\|END` 与零长度 `DATA` 语义分离；零消息路径首次 `Recv` 直接 EOF。
+- **call ID 校验成立**：响应归属靠 call ID 匹配，不匹配包丢弃而非误用。
+- **§4.5 尺寸上限可验证**：loopback 上 65507 字节为实测可发上限，支持 Binding 启动期 `MaxMessageSize`/`MaxFrameSize` 校验依据。
