@@ -1,6 +1,6 @@
-// Package envelope implements the argos envelope wire codec (OPEN / HEADERS /
-// DATA / END / STATUS). It encodes and decodes frames only; Call/Session state
-// machines live elsewhere.
+// Package envelope implements the argos envelope protocol: wire codec
+// (OPEN / HEADERS / DATA / END / STATUS) and Sequential Call/Session state
+// machines over ByteStreamCarrier and MessageCarrier.
 package envelope
 
 import (
