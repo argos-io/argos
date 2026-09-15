@@ -139,3 +139,123 @@
 ### 结论
 
 - **§2.1 Session / Sequential 借还模型可实现**；步骤 1–5e 全绿，无需改设计。
+
+## Task 0.4 — TLS/ALPN、trailers-only、grpc-timeout、`-bin` metadata
+
+**日期**：2026-09-15  
+**探针**：`TestGRPCGoTLS`  
+**参数**：自签 TLS · ALPN `h2` · `-race -count=1`
+
+### 实测数据
+
+| 子测试 | 结果 |
+|--------|------|
+| `TLS_ALPN` | unary OK；`NegotiatedProtocol == "h2"` |
+| `TrailersOnly` | Status:5 → `codes.NotFound`；无 initial metadata |
+| `Timeout` | `Grpc-Timeout` 可解析且 ≤ 100ms |
+| `BinaryMetadata` | `-bin` 两侧原字节；线上 unpadded base64 |
+
+### 结论
+
+- TLS/ALPN、trailers-only、`grpc-timeout`、`-bin` metadata 均成立；无需改设计。
+
+## Task 0.5 — 单响应终态与 cardinality
+
+**日期**：2026-09-15  
+**探针**：`TestCardinality`  
+**参数**：probe→probe h2c · `-race`
+
+### 结论
+
+- 成功路径须「一条 DATA + 再读 EOF」；零条/两条在 OK 下检出 cardinality；非 OK 优先于响应体；第二条须独立消息对象（§2.2）。
+
+## Task 0.6 — 真实双向流与 headers 握手
+
+**日期**：2026-09-15  
+**探针**：`TestHandshakeOrder*` · `TestEmptyMetadata*` · `TestInterleavedBidiStreaming` · `TestBidiEarlyError*`  
+**参数**：h2c · grpc-go 手写 bidi · `-race -count=5`
+
+### 结论
+
+- 主动 initial headers、空 metadata 唤醒、交错 bidi 100 条、提前错误可读均成立。
+
+## Task 0.7 — HTTP/2 连接复用与流隔离
+
+**日期**：2026-09-15  
+**探针**：`TestHTTP2ConnectionReuse` · `TestHTTP2StreamIsolation` · `TestHTTP2StreamGoroutineLeak`  
+**参数**：32 并发 · `-race`
+
+### 实测数据
+
+| 项 | 结果 |
+|---|---|
+| 唯一 TCP 连接 | **1** |
+| 取消 1 路后其余完成 | **31/31** |
+| goroutine Δ after settle | **0** |
+
+### 结论
+
+- Concurrent 复用与流隔离成立；无常驻 goroutine 泄漏。
+
+## Task 0.8 — 有界背压与额度峰值
+
+**日期**：2026-09-15  
+**探针**：`TestSlowConsumerBudgetPeak` 等  
+**参数**：1000×64KiB · ReadAheadMessages=1 · `-race`
+
+### 实测数据
+
+| 项 | 结果 |
+|---|---|
+| 慢消费峰值计费 | **131072** B（128 KiB）≤ perCall 16 MiB |
+| 取消中途 | 额度归零；无泄漏 |
+| 4 MiB / 4MiB+1 | 通过 / 分配前拒绝 |
+
+### 结论
+
+- 有界预读与额度上限在真实流控下成立。
+
+## Task 0.14 — 服务端 AcceptCall 循环
+
+**日期**：2026-09-15  
+**探针**：`TestAcceptCall*` / `TestShutdown*` / `TestHandshake*` / `TestIdleAndSlowloris` / `TestResidualFrameSkip`  
+**结论**：成立
+
+### 实测数据
+
+| 项 | 结果 |
+|---|---|
+| 单连接 10 调用 | HandlerCount=10，同一 onConn |
+| 空闲 Shutdown 叫醒 | ~166µs |
+| HandshakeTimeout | 挂握手子 ctx；完成后不约束存续 |
+| 残余帧 / MaxDrainBytes | 跳过 N+1；超限 → 连接级错误 |
+
+### 结论
+
+- accept ctx 与连接 ctx 分离足够表达优雅关闭；OpenTimeout 自首字节起算；有界 drain 保持连接卫生。步骤 1–5d 全绿，无需改设计。
+
+---
+
+## 里程碑 ⓪ 汇总（Task 0.16）
+
+**日期**：2026-09-15  
+**验证**：`go test ./probe/ -race -count=3` 全绿；`make verify` 全绿。
+
+| 任务 | 结论 |
+|---|---|
+| 0.0 Makefile+CI | 成立 |
+| 0.1 OpenStream 非阻塞 | 成立（重跑） |
+| 0.2 ReceiveOpen 窗口 | 成立 |
+| 0.3 grpc-go h2c | 成立 |
+| 0.4 TLS/ALPN 等 | 成立 |
+| 0.5 cardinality | 成立 |
+| 0.6 bidi/headers | 成立 |
+| 0.7 复用/隔离 | 成立 |
+| 0.8 有界背压 | 成立（峰值 128 KiB） |
+| 0.9 OpenFilter+池 | 成立（重跑） |
+| 0.10 HTTP/1 Finish | 成立 |
+| 0.11 UDP 单包 | 成立 |
+| 0.13 Sequential 借还 | 成立 |
+| 0.14 AcceptCall 循环 | 成立 |
+
+**与规格不符项**：无。公开接口可按 §2.1 冻结进入里程碑 ①。
