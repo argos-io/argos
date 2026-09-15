@@ -489,6 +489,62 @@ func TestHandshakeTimeoutMapsDeadlineExceeded(t *testing.T) {
 	}
 }
 
+// TestHandshakeTimeoutBeforeOpenFilterNext: slow NewClientSession handshake
+// fails with DeadlineExceeded and must not count as a successful next() open
+// (filter post-next / stream-wrap path never runs).
+func TestHandshakeTimeoutBeforeOpenFilterNext(t *testing.T) {
+	t.Parallel()
+	var nextOK atomic.Int64
+	f := fake.NewFraming(framing.Sequential)
+	f.Handshake = func(ctx context.Context, c transport.Conn) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	tr := &loopTransport{
+		dial: func(ctx context.Context, endpoint string) (transport.Conn, error) {
+			cli, srv := fake.BytePipe()
+			t.Cleanup(func() { _ = srv.Close() })
+			return cli, nil
+		},
+	}
+	cfg, err := argos.New(
+		argos.WithMaxConcurrentCalls(2),
+		argos.WithMaxBufferedBytes(2*16*1024*1024),
+		argos.WithHandshakeTimeout(30*time.Millisecond),
+		argos.WithOpenFilter(func(ctx context.Context, m descriptor.Method, next filter.OpenFunc) (stream.Stream, error) {
+			st, err := next(ctx, m)
+			if err != nil {
+				return nil, err
+			}
+			// Count only when next yields a stream (call actually opened).
+			nextOK.Add(1)
+			return st, nil
+		}),
+		argos.WithService(testService,
+			argos.ServiceBinding(func() (argos.Binding, error) {
+				return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
+			}),
+			argos.ServiceTarget(testTarget)),
+	)
+	if err != nil {
+		t.Fatalf("argos.New: %v", err)
+	}
+	cli, err := client.New(cfg, testService)
+	if err != nil {
+		t.Fatalf("client.New: %v", err)
+	}
+	defer cli.Close()
+
+	_, err = cli.Open(context.Background(), testMethod(t))
+	code := status.CodeOf(err)
+	if code != status.DeadlineExceeded && code != status.Unavailable {
+		t.Fatalf("CodeOf = %v, want DeadlineExceeded or Unavailable; err=%v", code, err)
+	}
+	if got := nextOK.Load(); got != 0 {
+		t.Fatalf("OpenFilter next success count = %d, want 0 (handshake timed out)", got)
+	}
+}
+
 func TestNarrowInterfaceAssertStaysConfigError(t *testing.T) {
 	t.Parallel()
 	// Concurrent framing requires StreamConn; ByteConn is CarrierConn only.
