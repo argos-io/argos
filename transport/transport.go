@@ -49,8 +49,41 @@ type ClientOption interface {
 	applyClient(*dialConfig)
 }
 
-type serveConfig struct{}
+type serveConfig struct {
+	listenAddress string
+}
+
 type dialConfig struct{}
+
+type serverOptionFunc func(*serveConfig)
+
+func (f serverOptionFunc) applyServer(c *serveConfig) { f(c) }
+
+// WithListenAddress sets the address Transport.Serve listens on
+// (host:port, e.g. "127.0.0.1:0"). Concrete transports read it via
+// ApplyServerOptions.
+func WithListenAddress(addr string) ServerOption {
+	return serverOptionFunc(func(c *serveConfig) { c.listenAddress = addr })
+}
+
+// ServerSettings is the resolved view of ServerOption values for concrete
+// transport implementations.
+type ServerSettings struct {
+	ListenAddress string
+}
+
+// ApplyServerOptions applies sealed ServerOption values and returns the
+// resulting settings. Concrete transports (e.g. transport/tcp) call this
+// inside Serve.
+func ApplyServerOptions(opts ...ServerOption) ServerSettings {
+	var c serveConfig
+	for _, o := range opts {
+		if o != nil {
+			o.applyServer(&c)
+		}
+	}
+	return ServerSettings{ListenAddress: c.listenAddress}
+}
 
 // Transport produces Conn only. It does not import descriptor, framing, or
 // codec.
