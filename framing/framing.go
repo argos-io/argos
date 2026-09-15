@@ -27,6 +27,12 @@ type Config struct {
 	MaxFrameSize      int64
 	MaxMetadataSize   int64
 	ReadAheadMessages int // complete DATA messages allowed ahead per receive direction; must be >= 1 when validated
+	// OpenTimeout is the server AcceptCall budget from the first byte of a call
+	// through OPEN parse. Zero means the Framing implementation's default.
+	OpenTimeout time.Duration
+	// MaxDrainBytes caps residual-frame discard between AcceptCall iterations.
+	// Zero means the Framing implementation's default.
+	MaxDrainBytes int64
 }
 
 // SessionSpec is everything the composition layer gives Framing for one

@@ -46,6 +46,9 @@ type session struct {
 	cfg     framing.Config
 	client  bool
 
+	openTimeout   time.Duration
+	maxDrainBytes int64
+
 	writeMu sync.Mutex
 
 	mu       sync.Mutex
@@ -72,16 +75,18 @@ type session struct {
 
 func newSession(f *Framing, conn transport.Conn, car transport.Carrier, kind carrierKind, cfg framing.Config, client bool) *session {
 	s := &session{
-		framing:    f,
-		conn:       conn,
-		carrier:    car,
-		kind:       kind,
-		cfg:        cfg,
-		client:     client,
-		reusable:   true,
-		nextCallID: 1,
-		wake:       make(chan struct{}, 1),
-		recvDone:   make(chan struct{}),
+		framing:       f,
+		conn:          conn,
+		carrier:       car,
+		kind:          kind,
+		cfg:           cfg,
+		client:        client,
+		openTimeout:   f.openTimeout,
+		maxDrainBytes: f.maxDrainBytes,
+		reusable:      true,
+		nextCallID:    1,
+		wake:          make(chan struct{}, 1),
+		recvDone:      make(chan struct{}),
 	}
 	go s.recvLoop()
 	return s
@@ -101,8 +106,28 @@ func (s *session) markBadLocked() {
 
 func (s *session) markBad() {
 	s.mu.Lock()
+	already := s.ioError
 	s.markBadLocked()
+	car := s.carrier
 	s.mu.Unlock()
+	if !already && car != nil {
+		_ = car.Abort()
+	}
+}
+
+// detachCall releases the demux consumer. If poison is true (initiator closed
+// without a protocol terminal), Reusable becomes false.
+func (s *session) detachCall(c *call, poison bool) {
+	s.mu.Lock()
+	if s.active == c {
+		s.active = nil
+		s.mode = modeIdle
+		if poison {
+			s.reusable = false
+		}
+	}
+	s.mu.Unlock()
+	s.signal()
 }
 
 func (s *session) Reusable() bool {
@@ -121,6 +146,10 @@ func (s *session) closeSession() error {
 	s.reusable = false
 	active := s.active
 	acceptCh := s.acceptCh
+	s.active = nil
+	s.mode = modeIdle
+	s.acceptCh = nil
+	s.acceptCtx = nil
 	s.mu.Unlock()
 
 	s.signal()
@@ -134,9 +163,11 @@ func (s *session) closeSession() error {
 	if active != nil {
 		active.abortRecv(errors.New("envelope: session closed"))
 	}
+	// Unblock recvLoop Reads before joining; otherwise a stuck Read deadlocks Close.
+	err := s.conn.Close()
 	<-s.recvDone
 	s.clearReadDeadline()
-	return s.conn.Close()
+	return err
 }
 
 func (s *session) recvLoop() {
@@ -181,24 +212,22 @@ func (s *session) recvLoop() {
 					default:
 					}
 				}
-				<-s.wake
+				s.waitModeChange(modeAccepting)
 				continue
 			}
 			s.mu.Lock()
 			ch := s.acceptCh
 			s.mu.Unlock()
 			if ch != nil {
-				// Channel is buffered (1). Never drop OPEN on a wake race.
-				select {
-				case ch <- acceptResult{frame: f}:
-				default:
-					// AcceptCall gone; keep frame for a later AcceptCall.
-					s.pushFront(f)
-				}
+				// Blocking send: AcceptCall is waiting. Never use the default
+				// branch — a wake race used to re-enter modeAccepting, read the
+				// next END into a stale acceptCh, and lose it forever.
+				ch <- acceptResult{frame: f}
 			} else {
 				s.pushFront(f)
 			}
-			<-s.wake
+			// Do not read again until AcceptCall attaches (modeInCall) or aborts.
+			s.waitModeChange(modeAccepting)
 
 		case modeInCall:
 			if active == nil {
@@ -210,19 +239,23 @@ func (s *session) recvLoop() {
 				if s.isClosed() {
 					return
 				}
+				if isTimeoutErr(err) {
+					// Deadline wake from Close/Accept cancel — not a hard I/O fault.
+					s.clearReadDeadline()
+					continue
+				}
 				s.mu.Lock()
 				cur := s.active
 				mode := s.mode
 				s.mu.Unlock()
 				s.clearReadDeadline()
 				if cur == nil || mode != modeInCall {
-					// Call.Close detached us; the deadline wake is expected.
-					<-s.wake
+					s.waitWakeOrClosed()
 					continue
 				}
 				cur.abortRecv(err)
 				s.markBad()
-				<-s.wake
+				s.waitWakeOrClosed()
 				continue
 			}
 			s.mu.Lock()
@@ -230,18 +263,18 @@ func (s *session) recvLoop() {
 			s.mu.Unlock()
 			if cur == nil {
 				s.pushFront(f)
-				<-s.wake
+				s.waitWakeOrClosed()
 				continue
 			}
 			if f.CallID != cur.callID {
 				cur.abortRecv(fmt.Errorf("envelope: unexpected call ID %d want %d", f.CallID, cur.callID))
 				s.markBad()
-				<-s.wake
+				s.waitWakeOrClosed()
 				continue
 			}
 			cur.deliver(f)
 			if cur.recvFinished() {
-				<-s.wake
+				s.waitWakeOrClosed()
 			}
 		}
 	}
@@ -251,6 +284,34 @@ func (s *session) isClosed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.closed
+}
+
+// waitModeChange blocks until session.mode differs from from, or the session closes.
+func (s *session) waitModeChange(from demuxMode) {
+	for {
+		s.mu.Lock()
+		closed := s.closed
+		mode := s.mode
+		s.mu.Unlock()
+		if closed || mode != from {
+			return
+		}
+		<-s.wake
+	}
+}
+
+// waitWakeOrClosed waits for a wake signal or session close (whichever first).
+func (s *session) waitWakeOrClosed() {
+	for {
+		if s.isClosed() {
+			return
+		}
+		select {
+		case <-s.wake:
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 }
 
 func (s *session) readFrameAccepting(ctx context.Context, lastCallID uint64) (Frame, error) {
@@ -271,7 +332,7 @@ func (s *session) readFrameAccepting(ctx context.Context, lastCallID uint64) (Fr
 		if lastCallID != 0 && f.CallID == lastCallID && f.Type != TypeOpen {
 			n, _ := frameWireSize(f, s.kind)
 			drained += n
-			max := s.framing.maxDrainBytes
+			max := s.maxDrainBytes
 			if max > 0 && drained > max {
 				return Frame{}, fmt.Errorf("envelope: residual drain exceeded MaxDrainBytes (%d)", max)
 			}
@@ -298,7 +359,7 @@ func (s *session) readFrameFirstByteThenTimeout(ctx context.Context) (Frame, err
 	if err := s.waitFirstByte(ctx); err != nil {
 		return Frame{}, err
 	}
-	to := s.framing.openTimeout
+	to := s.openTimeout
 	if to > 0 {
 		s.setReadDeadline(time.Now().Add(to))
 		defer s.clearReadDeadline()
@@ -321,6 +382,9 @@ func (s *session) waitFirstByte(ctx context.Context) error {
 
 	var one [1]byte
 	for {
+		if s.isClosed() {
+			return io.EOF
+		}
 		if ctx != nil {
 			select {
 			case <-ctx.Done():
@@ -614,7 +678,7 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 		case <-time.After(200 * time.Millisecond):
 			res.err = ctx.Err()
 		}
-		s.clearAccept()
+		s.finishAccept(nil)
 		s.clearReadDeadline()
 		if res.err == nil {
 			res.err = ctx.Err()
@@ -623,8 +687,8 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 	case res = <-ch:
 	}
 
-	s.clearAccept()
 	if res.err != nil {
+		s.finishAccept(nil)
 		if errors.Is(res.err, io.EOF) {
 			return nil, io.EOF
 		}
@@ -632,10 +696,12 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 	}
 	f := res.frame
 	if f.Type != TypeOpen {
+		s.finishAccept(nil)
 		s.markBad()
 		return nil, fmt.Errorf("envelope: expected OPEN, got type %d", f.Type)
 	}
 	if f.Method == "" {
+		s.finishAccept(nil)
 		return nil, fmt.Errorf("%w: %w", framing.ErrCallRejected,
 			status.Error(status.InvalidArgument, "envelope: empty method in OPEN"))
 	}
@@ -651,21 +717,21 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 		c.deliverEnd()
 	}
 
-	s.mu.Lock()
-	s.active = c
-	s.lastCallID = f.CallID
-	s.mode = modeInCall
-	s.mu.Unlock()
-	s.signal()
-
+	s.finishAccept(c)
 	return &serverCall{call: c}, nil
 }
 
-func (s *serverSession) clearAccept() {
+// finishAccept clears accept state. If c != nil, attaches it as the in-call
+// demux consumer (AcceptCall success). Otherwise returns to idle.
+func (s *serverSession) finishAccept(c *call) {
 	s.mu.Lock()
 	s.acceptCh = nil
 	s.acceptCtx = nil
-	if s.mode == modeAccepting {
+	if c != nil {
+		s.active = c
+		s.lastCallID = c.callID
+		s.mode = modeInCall
+	} else if s.mode == modeAccepting {
 		s.mode = modeIdle
 	}
 	s.mu.Unlock()

@@ -211,6 +211,8 @@ func (s *Server) Run(ctx context.Context) error {
 					MaxFrameSize:      b.cfg.MaxFrameSize,
 					MaxMetadataSize:   b.cfg.MaxMetadataSize,
 					ReadAheadMessages: b.cfg.ReadAheadMessages,
+					OpenTimeout:       b.cfg.OpenTimeout,
+					MaxDrainBytes:     b.cfg.MaxDrainBytes,
 				},
 			},
 		}

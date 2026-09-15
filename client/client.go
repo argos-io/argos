@@ -116,6 +116,8 @@ func New(cfg *argos.Config, service string, opts ...argos.Option) (*Client, erro
 				MaxFrameSize:      cfg.MaxFrameSize,
 				MaxMetadataSize:   cfg.MaxMetadataSize,
 				ReadAheadMessages: cfg.ReadAheadMessages,
+				OpenTimeout:       cfg.OpenTimeout,
+				MaxDrainBytes:     cfg.MaxDrainBytes,
 			},
 		},
 	})

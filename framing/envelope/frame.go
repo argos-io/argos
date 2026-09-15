@@ -1,6 +1,13 @@
 // Package envelope implements the argos envelope protocol: wire codec
 // (OPEN / HEADERS / DATA / END / STATUS) and Sequential Call/Session state
 // machines over ByteStreamCarrier and MessageCarrier.
+//
+// Reuse is always Sequential: one in-flight call per connection. The wire
+// format carries a call ID on every frame and therefore allows a peer to
+// open concurrent calls on one connection, but this implementation does not —
+// AcceptCall is serial (the next OPEN is read only after Call.Close). A
+// third-party client that writes two OPENs concurrently will see the second
+// call wait, not fail. That gap is intentional (§4.5).
 package envelope
 
 import (

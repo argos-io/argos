@@ -69,6 +69,7 @@ func (f *Framing) NewClientSession(ctx context.Context, c transport.Conn, spec f
 		return nil, err
 	}
 	s := newSession(f, c, car, kind, spec.Config, true)
+	applySessionSpec(s, f, spec.Config)
 	return &clientSession{session: s}, nil
 }
 
@@ -80,7 +81,21 @@ func (f *Framing) NewServerSession(ctx context.Context, c transport.Conn, spec f
 		return nil, err
 	}
 	s := newSession(f, c, car, kind, spec.Config, false)
+	applySessionSpec(s, f, spec.Config)
 	return &serverSession{session: s}, nil
+}
+
+// applySessionSpec overlays SessionSpec.Config limits onto the Framing defaults
+// when the composition layer provides non-zero values.
+func applySessionSpec(s *session, f *Framing, cfg framing.Config) {
+	s.openTimeout = f.openTimeout
+	s.maxDrainBytes = f.maxDrainBytes
+	if cfg.OpenTimeout > 0 {
+		s.openTimeout = cfg.OpenTimeout
+	}
+	if cfg.MaxDrainBytes > 0 {
+		s.maxDrainBytes = cfg.MaxDrainBytes
+	}
 }
 
 func assertCarrier(c transport.Conn) (transport.Carrier, carrierKind, error) {

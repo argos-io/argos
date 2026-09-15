@@ -404,6 +404,9 @@ func (c *call) Finish(err error) error {
 	c.finished = true
 	c.headersSent = true
 	c.mu.Unlock()
+	// Detach demux after STATUS so a Sequential peer may write the next OPEN
+	// before handler return / Call.Close. Residuals drain on next AcceptCall.
+	c.sess.detachCall(c, false)
 	return nil
 }
 
@@ -483,7 +486,7 @@ func (c *call) Close() error {
 		return nil
 	}
 	c.closed = true
-	terminalOK := c.terminalRead || (c.initiator && c.sawStatus) || (!c.initiator && c.finished)
+	terminalOK := false
 	if c.initiator {
 		terminalOK = c.sawStatus || c.terminalRead
 	} else {
@@ -498,17 +501,9 @@ func (c *call) Close() error {
 	default:
 	}
 
-	c.sess.mu.Lock()
-	if c.sess.active == c {
-		c.sess.active = nil
-		c.sess.mode = modeIdle
-		if c.initiator && !terminalOK {
-			c.sess.reusable = false
-		}
-	}
-	c.sess.mu.Unlock()
+	poison := c.initiator && !terminalOK
+	c.sess.detachCall(c, poison)
 	c.sess.wakeRead()
-	c.sess.signal()
 	c.sess.clearReadDeadline()
 
 	select {
