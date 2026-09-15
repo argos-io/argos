@@ -11,8 +11,8 @@
 | | |
 |---|---|
 | 定位 | **验证可组装模型**，不是生产 RPC 框架 |
-| 阶段 | 里程碑 ⓪ 探针 → ① 契约冻结 → ②–⑦ 实现与收门 |
-| 探针 | `probe/` 一次性；① 结束时整目录删除，**不要演变成实现** |
+| 阶段 | 里程碑 ⓪✅ → ①✅（tag `milestone-1`）→ ② Envelope → ③–⑦ |
+| 探针 | 已删除（① Task 1.17）；价值转入 `internal/fake` 与正式测试 |
 | 真源 | 代码 + 测试 + 本文件；设计/计划/决策记录不入库（勿建 `docs/`） |
 
 ---
@@ -69,16 +69,19 @@
 
 ---
 
-## 目录（v2 目标，⓪ 阶段仅有部分）
+## 目录（v2 ① 完成后）
 
 ```
-probe/                   # ⓪ 一次性探针（① 删除）
-Makefile                 # 0.0：lint / test / test-race / verify
-.github/workflows/ci.yml
-descriptor/ status/ …    # ① 起陆续出现；见 README §13.2
+descriptor/ status/ metadata/ budget/
+transport/ framing/ codec/ stream/ filter/
+resolver/ resolver/ip/
+client/ server/
+internal/fake/ internal/sessionpool/
+argos 根包（Config/Option/Binding）
+Makefile · .github/workflows/ci.yml · invariants_test.go
 ```
 
-依赖方向硬约束见 `README.md` §3.1；未实现前不要提前造空包。
+依赖方向硬约束见 `README.md` §3.1；由 `invariants_test.go` 强制。
 
 ---
 
