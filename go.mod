@@ -1,6 +1,6 @@
 module github.com/argos-io/argos
 
-go 1.27.0
+go 1.27.1
 
 require (
 	golang.org/x/net v0.59.0
