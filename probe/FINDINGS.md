@@ -91,3 +91,51 @@
 - **响应在 Finish 一次性提交**：Send 只缓冲、不落线；Finish 才 `WriteHeader` + body，handler 事后 error 仍能提交 500。
 - **标准 ResponseWriter 不可改已提交状态**：一旦 `WriteHeader(200)`，后续 `WriteHeader(500)` 被忽略（net/http 打 superfluous 警告），客户端永远看到 200。
 - **支撑 UnaryResponseWriter 契约**：wholebody × http1 必须缓冲至 Finish，否则无法在 Send 之后用错误状态覆盖——§4.6 成立。
+
+## Task 0.1 — OpenStream 在响应 headers 之前返回（重跑）
+
+**日期**：2026-09-15  
+**探针**：`TestOpenStreamReturnsBeforeResponseHeaders`  
+**参数**：h2c · `newH2Endpoint` + `openH2Stream` · `-race`
+
+### 结论
+
+- **成立**：第五轮把非阻塞约束从 Dial 挪到 `StreamConn.OpenStream`。`newH2Endpoint` 无 I/O；`openH2Stream` 在响应 headers 到达前返回可写 `*h2Carrier`（`io.Pipe` + 后台 `RoundTrip`）。
+- **断言**：返回后、写首字节前 `responded()==false`；服务端读到 body 且未写响应头时仍为 false；释放后 `ResponseHeaders` 成功。
+- **无需改设计**；`dialH2` 已删除，sendwindow / grpc-go 互通调用点已切换。
+
+## Task 0.9 — OpenFilter 短路不占池中会话（重跑）
+
+**日期**：2026-09-15  
+**探针**：`TestOpenFilterShortCircuitDoesNotBorrowSession` 等  
+**参数**：内存 `sessionPoolStub` · `-race`
+
+### 结论
+
+- **成立**：链终点为「取会话 → OpenCall」。短路过滤器不调用 `next` 时，`openCallCount`、`borrowCount` 均为 0，且 `idle`/`inUse` 与调用前一致——既不产生网络资源，也不占用池中空闲会话。
+- 包装顺序、追加失败、不得清除已有失败、(nil,nil) 误用检出均仍绿。
+
+## Task 0.13 — 顺序复用借还
+
+**日期**：2026-09-15  
+**探针**：`probe/sequential_test.go` · `probe/seqconn.go`  
+**参数**：tcp length-prefixed · Sequential 会话池 · `-race`
+
+### 实测数据
+
+| 项 | 实测 |
+|---|---|
+| 单连接 100 次 | DialCount=1, Borrow=100, Return=100, 无串包 |
+| Call.Close 不关 Conn | 100 次后 Close flag=false |
+| 并发借出 8 | DialCount=8, distinct=8, 无排队 |
+| Busy 兜底 | BusyRetry=3, ResourceExhausted↔ErrSessionsExhausted, Busy 不外泄 |
+| 故障丢弃 #50 | Reusable=false, 后续 DialCount=2 |
+| Cap=2 / 4 并发 | ok=2 exhausted=2, 立即返回 |
+| 承载卫生 | on: 无串包+新连接; off: call31 读到 "EXTRA" |
+| Read 交接 | ConcurrentHits=0 |
+| 跨调用缓冲 | Close 后 Session 保留下一帧 |
+| Conn ctx | 非 call 子 ctx; HandshakeTimeout 不杀空闲连接 |
+
+### 结论
+
+- **§2.1 Session / Sequential 借还模型可实现**；步骤 1–5e 全绿，无需改设计。
