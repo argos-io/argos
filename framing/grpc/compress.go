@@ -100,7 +100,8 @@ func decompressMessage(c compressor.Compressor, data []byte, maxMsg int64) ([]by
 		return nil, err
 	}
 	if maxMsg > 0 && int64(len(out)) > maxMsg {
-		return nil, fmt.Errorf("framing/grpc: decompressed payload %d > max %d", len(out), maxMsg)
+		return nil, status.Error(status.ResourceExhausted,
+			fmt.Sprintf("framing/grpc: decompressed payload %d > max %d", len(out), maxMsg))
 	}
 	return out, nil
 }

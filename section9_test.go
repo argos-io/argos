@@ -62,7 +62,13 @@ var section9Checklist = []section9Evidence{
 	{id: "§9-6a", title: "interop h2c unary echo", pkg: "./binding/grpc", test: "TestH2CUnaryEcho"},
 	{id: "§9-6b", title: "interop TLS/ALPN unary echo", pkg: "./binding/grpc", test: "TestTLSALPNUnaryEcho"},
 	{id: "§9-6c", title: "interop metadata binary + trailers", pkg: "./binding/grpc", test: "TestInteropMetadata_BinaryAndTrailers"},
-	{id: "§9-6d", title: "interop trailers-only", pkg: "./binding/grpc", test: "TestInteropTrailersOnly", softGap: "full 4-shape×TLS×17-code matrix remains a soft gap beyond these smokes"},
+	{id: "§9-6d", title: "interop trailers-only", pkg: "./binding/grpc", test: "TestInteropTrailersOnly"},
+	{id: "§9-6e", title: "interop 4-shape × h2c/TLS", pkg: "./binding/grpc", test: "TestInteropOK_Shapes"},
+	{id: "§9-6f", title: "interop 17 codes × h2c/TLS unary", pkg: "./binding/grpc", test: "TestInteropStatusCodes_Unary"},
+	{id: "§9-6g", title: "interop zero-message client-stream × TLS", pkg: "./binding/grpc", test: "TestInteropZeroMessageClientStream"},
+	{id: "§9-6h", title: "interop half-close timing × TLS", pkg: "./binding/grpc", test: "TestInteropHalfCloseTiming"},
+	{id: "§9-6i", title: "gRPC MaxMessageSize boundary", pkg: "./framing/grpc", test: "TestMaxMessageSizeBoundary"},
+	{id: "§9-6j", title: "gRPC compression bomb MaxMessageSize", pkg: "./framing/grpc", test: "TestCompressionBombMaxMessageSize", softGap: "custom Compressor↔grpc-go adapter and details conflict/corrupt remain framing-level only; not re-duplicated as full interop cells"},
 
 	// §9-7: Filter / OpenFilter / CallMetadata.
 	{id: "§9-7a", title: "OpenFilter short-circuit", pkg: "./filter", test: "TestOpenFilterShortCircuit"},

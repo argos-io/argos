@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -288,3 +289,358 @@ func (n namedComp) Decompress(src io.Reader) (io.ReadCloser, error) {
 type nopWC struct{ io.Writer }
 
 func (nopWC) Close() error { return nil }
+
+// TestMaxMessageSizeBoundary: exact MaxMessageSize is accepted; MaxMessageSize+1
+// is rejected as ResourceExhausted on both Send (local) and Recv (peer).
+func TestMaxMessageSizeBoundary(t *testing.T) {
+	t.Parallel()
+	const maxMsg = 4 << 10
+
+	t.Run("exact_ok", func(t *testing.T) {
+		t.Parallel()
+		payload := bytes.Repeat([]byte("x"), maxMsg)
+		runMaxMsgRoundTrip(t, maxMsg, maxMsg, payload, false)
+	})
+
+	t.Run("send_oversize_local", func(t *testing.T) {
+		t.Parallel()
+		cli, lis := fake.HTTPLoopback()
+		t.Cleanup(func() { _ = cli.Close() })
+		cfg := framing.Config{MaxMessageSize: maxMsg}
+		f := newTestFraming(t)
+		method := descriptor.MustMethod("echo.v1.Echo.Echo", descriptor.Unary)
+		spec := framing.SessionSpec{CodecName: "proto", Config: cfg}
+
+		// Accept side must run so OpenStream completes.
+		errCh := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			srvConn, err := lis.Accept(ctx)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			ss, err := f.NewServerSession(ctx, srvConn, spec)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			defer ss.Close()
+			md := metadata.New(metadata.RoleResponder, nil)
+			sc, err := ss.AcceptCall(ctx, framing.CallSpec{Metadata: md})
+			if err != nil {
+				errCh <- err
+				return
+			}
+			_ = sc.Accept(method)
+			_, _, _ = sc.Recv()
+			errCh <- sc.Finish(status.Error(status.Canceled, "unused"))
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cs, err := f.NewClientSession(ctx, cli, spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cs.Close()
+		md := metadata.New(metadata.RoleInitiator, nil)
+		call, err := cs.OpenCall(ctx, method, framing.CallSpec{Metadata: md})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer call.Close()
+
+		err = call.Send(bytes.Repeat([]byte("y"), maxMsg+1))
+		if status.CodeOf(err) != status.ResourceExhausted {
+			t.Fatalf("Send oversize: CodeOf=%v err=%v, want ResourceExhausted", status.CodeOf(err), err)
+		}
+		_ = call.HalfClose()
+		_ = <-errCh
+	})
+
+	t.Run("recv_oversize_peer", func(t *testing.T) {
+		t.Parallel()
+		// Client allows a larger message so Send succeeds; server MaxMessageSize
+		// is the limit under test on Recv.
+		payload := bytes.Repeat([]byte("z"), maxMsg+1)
+		cli, lis := fake.HTTPLoopback()
+		t.Cleanup(func() { _ = cli.Close() })
+
+		clientF := newTestFraming(t)
+		serverF := newTestFraming(t)
+		method := descriptor.MustMethod("echo.v1.Echo.Echo", descriptor.Unary)
+		cliSpec := framing.SessionSpec{CodecName: "proto", Config: framing.Config{MaxMessageSize: maxMsg + 64}}
+		srvSpec := framing.SessionSpec{CodecName: "proto", Config: framing.Config{MaxMessageSize: maxMsg}}
+
+		errCh := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			srvConn, err := lis.Accept(ctx)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			ss, err := serverF.NewServerSession(ctx, srvConn, srvSpec)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			defer ss.Close()
+			md := metadata.New(metadata.RoleResponder, nil)
+			sc, err := ss.AcceptCall(ctx, framing.CallSpec{Metadata: md})
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if err := sc.Accept(method); err != nil {
+				errCh <- err
+				return
+			}
+			_, release, err := sc.Recv()
+			if release != nil {
+				release()
+			}
+			if status.CodeOf(err) != status.ResourceExhausted {
+				errCh <- fmt.Errorf("server Recv CodeOf=%v err=%v, want ResourceExhausted", status.CodeOf(err), err)
+				return
+			}
+			errCh <- sc.Finish(err)
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cs, err := clientF.NewClientSession(ctx, cli, cliSpec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cs.Close()
+		md := metadata.New(metadata.RoleInitiator, nil)
+		call, err := cs.OpenCall(ctx, method, framing.CallSpec{Metadata: md})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer call.Close()
+		if err := call.Send(payload); err != nil {
+			t.Fatal(err)
+		}
+		if err := call.HalfClose(); err != nil {
+			t.Fatal(err)
+		}
+		_, release, err := call.Recv()
+		if release != nil {
+			release()
+		}
+		if status.CodeOf(err) != status.ResourceExhausted {
+			t.Fatalf("client Recv CodeOf=%v err=%v, want ResourceExhausted", status.CodeOf(err), err)
+		}
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func runMaxMsgRoundTrip(t *testing.T, cliMax, srvMax int64, payload []byte, expectServerErr bool) {
+	t.Helper()
+	cli, lis := fake.HTTPLoopback()
+	t.Cleanup(func() { _ = cli.Close() })
+
+	clientF := newTestFraming(t)
+	serverF := newTestFraming(t)
+	method := descriptor.MustMethod("echo.v1.Echo.Echo", descriptor.Unary)
+	cliSpec := framing.SessionSpec{CodecName: "proto", Config: framing.Config{MaxMessageSize: cliMax}}
+	srvSpec := framing.SessionSpec{CodecName: "proto", Config: framing.Config{MaxMessageSize: srvMax}}
+
+	errCh := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srvConn, err := lis.Accept(ctx)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		ss, err := serverF.NewServerSession(ctx, srvConn, srvSpec)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer ss.Close()
+		md := metadata.New(metadata.RoleResponder, nil)
+		sc, err := ss.AcceptCall(ctx, framing.CallSpec{Metadata: md})
+		if err != nil {
+			errCh <- err
+			return
+		}
+		if err := sc.Accept(method); err != nil {
+			errCh <- err
+			return
+		}
+		p, release, err := sc.Recv()
+		if expectServerErr {
+			if release != nil {
+				release()
+			}
+			errCh <- err
+			_ = sc.Finish(err)
+			return
+		}
+		if err != nil {
+			errCh <- err
+			return
+		}
+		got := append([]byte(nil), p...)
+		release()
+		_, _, _ = sc.Recv()
+		if !bytes.Equal(got, payload) {
+			errCh <- fmt.Errorf("server got len=%d want %d", len(got), len(payload))
+			return
+		}
+		if err := sc.Send([]byte("ok")); err != nil {
+			errCh <- err
+			return
+		}
+		errCh <- sc.Finish(nil)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cs, err := clientF.NewClientSession(ctx, cli, cliSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	md := metadata.New(metadata.RoleInitiator, nil)
+	call, err := cs.OpenCall(ctx, method, framing.CallSpec{Metadata: md})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer call.Close()
+	if err := call.Send(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := call.HalfClose(); err != nil {
+		t.Fatal(err)
+	}
+	if expectServerErr {
+		_, release, err := call.Recv()
+		if release != nil {
+			release()
+		}
+		_ = err
+		if err := <-errCh; status.CodeOf(err) != status.ResourceExhausted {
+			t.Fatalf("server err CodeOf=%v err=%v", status.CodeOf(err), err)
+		}
+		return
+	}
+	p, release, err := call.Recv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := append([]byte(nil), p...)
+	release()
+	if string(got) != "ok" {
+		t.Fatalf("got %q", got)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCompressionBombMaxMessageSize sends a tiny gzip LPM that expands past
+// MaxMessageSize. Decompress must stop at max+1 (no OOM) and surface
+// ResourceExhausted.
+func TestCompressionBombMaxMessageSize(t *testing.T) {
+	t.Parallel()
+	const (
+		maxMsg   = 1024
+		bombSize = 1 << 20 // 1 MiB of zeros → tiny gzip wire
+	)
+	bomb := make([]byte, bombSize)
+
+	cli, lis := fake.HTTPLoopback()
+	t.Cleanup(func() { _ = cli.Close() })
+
+	gz := gzip.New()
+	clientOpts := []grpcframing.Option{
+		grpcframing.WithCompressors(gz),
+		grpcframing.WithSendCompressor(gzip.Name),
+	}
+	serverOpts := []grpcframing.Option{
+		grpcframing.WithCompressors(gzip.New()),
+	}
+	clientF := newTestFraming(t, clientOpts...)
+	serverF := newTestFraming(t, serverOpts...)
+	method := descriptor.MustMethod("echo.v1.Echo.Echo", descriptor.Unary)
+	cliSpec := framing.SessionSpec{CodecName: "proto", Config: framing.Config{MaxMessageSize: bombSize}}
+	srvSpec := framing.SessionSpec{CodecName: "proto", Config: framing.Config{MaxMessageSize: maxMsg}}
+
+	errCh := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srvConn, err := lis.Accept(ctx)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		ss, err := serverF.NewServerSession(ctx, srvConn, srvSpec)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer ss.Close()
+		md := metadata.New(metadata.RoleResponder, nil)
+		sc, err := ss.AcceptCall(ctx, framing.CallSpec{Metadata: md})
+		if err != nil {
+			errCh <- err
+			return
+		}
+		if err := sc.Accept(method); err != nil {
+			errCh <- err
+			return
+		}
+		_, release, err := sc.Recv()
+		if release != nil {
+			release()
+		}
+		if status.CodeOf(err) != status.ResourceExhausted {
+			errCh <- fmt.Errorf("server Recv CodeOf=%v err=%v, want ResourceExhausted", status.CodeOf(err), err)
+			return
+		}
+		errCh <- sc.Finish(err)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cs, err := clientF.NewClientSession(ctx, cli, cliSpec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	md := metadata.New(metadata.RoleInitiator, nil)
+	call, err := cs.OpenCall(ctx, method, framing.CallSpec{Metadata: md})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer call.Close()
+
+	if err := call.Send(bomb); err != nil {
+		t.Fatal(err)
+	}
+	if err := call.HalfClose(); err != nil {
+		t.Fatal(err)
+	}
+	_, release, err := call.Recv()
+	if release != nil {
+		release()
+	}
+	if status.CodeOf(err) != status.ResourceExhausted {
+		t.Fatalf("client Recv CodeOf=%v err=%v, want ResourceExhausted", status.CodeOf(err), err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}

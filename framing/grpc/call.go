@@ -381,7 +381,8 @@ func (c *call) Send(payload []byte) error {
 		data = []byte{}
 	}
 	if c.maxMsg > 0 && int64(len(data)) > c.maxMsg {
-		return fmt.Errorf("framing/grpc: Send payload %d > max %d", len(data), c.maxMsg)
+		return status.Error(status.ResourceExhausted,
+			fmt.Sprintf("framing/grpc: Send payload %d > max %d", len(data), c.maxMsg))
 	}
 	// Copy so caller may reuse the buffer after return.
 	cp := append([]byte(nil), data...)
@@ -554,7 +555,8 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 		data = decoded
 	} else if c.maxMsg > 0 && int64(len(data)) > c.maxMsg {
 		c.markBad()
-		return nil, nil, fmt.Errorf("framing/grpc: Recv payload %d > max %d", len(data), c.maxMsg)
+		return nil, nil, status.Error(status.ResourceExhausted,
+			fmt.Sprintf("framing/grpc: Recv payload %d > max %d", len(data), c.maxMsg))
 	}
 	c.mu.Lock()
 	c.messagesRecv = true
