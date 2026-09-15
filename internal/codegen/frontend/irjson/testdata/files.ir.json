@@ -1,0 +1,12 @@
+[
+  {
+    "go_package": "example.com/a",
+    "output_name": "a.argos.go",
+    "services": []
+  },
+  {
+    "go_package": "example.com/b",
+    "output_name": "b.argos.go",
+    "services": []
+  }
+]

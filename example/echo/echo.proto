@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package echo.v1;
+
+option go_package = "github.com/argos-io/argos/example/echo;echov1";
+
+message EchoRequest { string msg = 1; }
+message EchoResponse { string msg = 1; }
+message WatchRequest { string msg = 1; }
+message Event { string msg = 1; }
+
+service EchoService {
+  rpc Echo(EchoRequest) returns (EchoResponse);
+  rpc Watch(WatchRequest) returns (stream Event);
+}

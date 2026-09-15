@@ -1,0 +1,28 @@
+{
+  "go_package": "github.com/argos-io/argos/example/echo",
+  "proto_package": "echo.v1",
+  "output_name": "echo.argos.go",
+  "services": [
+    {
+      "go_name": "EchoService",
+      "full_name": "echo.v1.EchoService",
+      "methods": [
+        {
+          "go_name": "Echo",
+          "full_name": "echo.v1.EchoService.Echo",
+          "input_type": "EchoRequest",
+          "output_type": "EchoResponse",
+          "shape": 0
+        },
+        {
+          "go_name": "Watch",
+          "full_name": "echo.v1.EchoService.Watch",
+          "input_type": "WatchRequest",
+          "output_type": "Event",
+          "shape": 1,
+          "server_stream": true
+        }
+      ]
+    }
+  ]
+}
