@@ -1,15 +1,14 @@
 // Package grpc implements the gRPC framing protocol over HTTP/2.
 //
-// Task 3.3 delivers request/response header codecs (path, content subtype,
-// grpc-timeout, -bin metadata, reserved keys). LPM framing, trailers status,
-// and Call/Session state machines arrive in Task 3.4+.
+// Reuse is always Concurrent. Client sessions open multiplexed streams via
+// StreamConn; server sessions accept one HTTP request CarrierConn per Conn.
 package grpc
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/argos-io/argos/framing"
-	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport"
 )
 
@@ -25,22 +24,51 @@ func New() framing.Framing {
 // Reuse implements framing.Framing.
 func (f *Framing) Reuse() framing.ReuseModel { return framing.Concurrent }
 
-// NewClientSession implements framing.Framing. No handshake I/O; Call/Session
-// state machines land in Task 3.4.
+// NewClientSession implements framing.Framing. No handshake I/O.
 func (f *Framing) NewClientSession(ctx context.Context, c transport.Conn, spec framing.SessionSpec) (framing.ClientSession, error) {
-	_ = ctx
-	_ = c
-	_ = spec
-	return nil, status.Error(status.Unimplemented, "framing/grpc: Call/Session not implemented (Task 3.4)")
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	sc, ok := c.(transport.StreamConn)
+	if !ok {
+		return nil, fmt.Errorf("framing/grpc: client requires StreamConn")
+	}
+	return &clientSession{
+		framing:  f,
+		conn:     sc,
+		cfg:      spec.Config,
+		subtype:  CodecContentSubtype(spec.CodecName),
+		reusable: true,
+	}, nil
 }
 
-// NewServerSession implements framing.Framing. No handshake I/O; Call/Session
-// state machines land in Task 3.4.
+// NewServerSession implements framing.Framing. No handshake I/O.
+// c must be a CarrierConn for one inbound HTTP request.
 func (f *Framing) NewServerSession(ctx context.Context, c transport.Conn, spec framing.SessionSpec) (framing.ServerSession, error) {
-	_ = ctx
-	_ = c
-	_ = spec
-	return nil, status.Error(status.Unimplemented, "framing/grpc: Call/Session not implemented (Task 3.4)")
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	cc, ok := c.(transport.CarrierConn)
+	if !ok {
+		return nil, fmt.Errorf("framing/grpc: server requires CarrierConn")
+	}
+	return &serverSession{
+		framing:  f,
+		conn:     cc,
+		carrier:  cc.Carrier(),
+		cfg:      spec.Config,
+		subtype:  CodecContentSubtype(spec.CodecName),
+	}, nil
 }
 
-var _ framing.Framing = (*Framing)(nil)
+var (
+	_ framing.Framing       = (*Framing)(nil)
+	_ framing.ClientSession = (*clientSession)(nil)
+	_ framing.ServerSession = (*serverSession)(nil)
+	_ framing.Call          = (*call)(nil)
+	_ framing.ServerCall    = (*serverCall)(nil)
+)

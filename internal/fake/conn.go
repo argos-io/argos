@@ -26,13 +26,14 @@ var (
 	_ transport.Conn       = (*HTTPClientConn)(nil)
 	_ transport.StreamConn = (*HTTPClientConn)(nil)
 
-	_ transport.Conn              = (*HTTPServerConn)(nil)
-	_ transport.CarrierConn       = (*HTTPServerConn)(nil)
-	_ transport.ByteStreamCarrier = (*httpCarrier)(nil)
-	_ transport.RequestHeaderReader = (*httpCarrier)(nil)
+	_ transport.Conn                 = (*HTTPServerConn)(nil)
+	_ transport.CarrierConn          = (*HTTPServerConn)(nil)
+	_ transport.ByteStreamCarrier    = (*httpCarrier)(nil)
+	_ transport.RequestHeaderReader  = (*httpCarrier)(nil)
 	_ transport.ResponseHeaderReader = (*httpCarrier)(nil)
-	_ transport.ResponseWriter      = (*httpCarrier)(nil)
-	_ transport.SendCloser          = (*httpCarrier)(nil)
+	_ transport.ResponseTrailerReader = (*httpCarrier)(nil)
+	_ transport.ResponseWriter       = (*httpCarrier)(nil)
+	_ transport.SendCloser           = (*httpCarrier)(nil)
 )
 
 // ---------------------------------------------------------------------------
@@ -261,13 +262,16 @@ type httpCarrier struct {
 
 	preface transport.RequestPreface
 
-	mu       sync.Mutex
-	hdrDone  chan struct{}
-	status   int
-	headers  transport.Headers
-	hdrErr   error
-	aborted  atomic.Bool
-	peer     *httpCarrier // opposite direction for header signaling
+	mu         sync.Mutex
+	hdrDone    chan struct{}
+	trailersMu sync.Mutex
+	status     int
+	headers    transport.Headers
+	trailers   transport.Headers
+	headersWritten bool
+	hdrErr     error
+	aborted    atomic.Bool
+	peer       *httpCarrier // opposite direction for header signaling
 }
 
 // HTTPLoopback returns a client StreamConn and a listener for server Conns.
@@ -440,6 +444,9 @@ func (h *httpCarrier) WriteHeaders(status int, headers transport.Headers) error 
 	if h.peer == nil {
 		return errors.New("fake: no peer")
 	}
+	h.mu.Lock()
+	h.headersWritten = true
+	h.mu.Unlock()
 	h.peer.mu.Lock()
 	h.peer.status = status
 	h.peer.headers = append(transport.Headers(nil), headers...)
@@ -452,10 +459,27 @@ func (h *httpCarrier) WriteHeaders(status int, headers transport.Headers) error 
 	return nil
 }
 
+func (h *httpCarrier) ResponseTrailers() (transport.Headers, error) {
+	h.waitHeaders()
+	h.trailersMu.Lock()
+	defer h.trailersMu.Unlock()
+	return append(transport.Headers(nil), h.trailers...), nil
+}
+
 func (h *httpCarrier) Finish(status int, initial, trailers transport.Headers) error {
-	_ = trailers
-	if err := h.WriteHeaders(status, initial); err != nil {
-		return err
+	h.mu.Lock()
+	already := h.headersWritten
+	h.mu.Unlock()
+	if !already {
+		// Trailers-only: status keys land in response headers (HEADERS+END_STREAM).
+		merged := append(append(transport.Headers(nil), initial...), trailers...)
+		if err := h.WriteHeaders(status, merged); err != nil {
+			return err
+		}
+	} else if h.peer != nil {
+		h.peer.trailersMu.Lock()
+		h.peer.trailers = append(transport.Headers(nil), trailers...)
+		h.peer.trailersMu.Unlock()
 	}
 	return h.pw.Close()
 }

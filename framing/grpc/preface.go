@@ -124,7 +124,7 @@ func EncodeResponseHeaders(contentSubtype string, md metadata.Metadata) transpor
 }
 
 // EncodeTrailers encodes user trailer metadata (reserved keys stripped).
-// Status trailers (grpc-status / grpc-message / details) are Task 3.4.
+// Status keys are added separately via EncodeStatusTrailers.
 func EncodeTrailers(md metadata.Metadata) transport.Headers {
 	return EncodeMetadata(md)
 }
@@ -164,10 +164,9 @@ func DecodeResponseHeaders(hs transport.Headers) (md metadata.Metadata, contentS
 }
 
 // DecodeTrailers decodes inbound trailers into user metadata.
-// Status keys (grpc-status, grpc-message, grpc-status-details-bin) are left
-// for Task 3.4; they are reserved / protocol and not returned here except
-// grpc-status-details-bin which ends in -bin and is not in IsReservedHeader —
-// callers that need status should inspect raw headers in 3.4.
+// Protocol keys grpc-status and grpc-message are reserved and stripped.
+// grpc-status-details-bin (Task 3.7) ends in -bin and is not reserved —
+// callers that need status details should inspect raw headers.
 func DecodeTrailers(hs transport.Headers) (metadata.Metadata, error) {
 	return DecodeMetadata(hs)
 }
