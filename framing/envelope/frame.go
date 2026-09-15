@@ -69,6 +69,8 @@ var (
 	ErrFrameTooLarge = errors.New("envelope: frame exceeds max size")
 	// ErrMetaTooLarge reports that metadata exceeds the configured max.
 	ErrMetaTooLarge = errors.New("envelope: metadata exceeds max size")
+	// ErrMessageTooLarge reports that a DATA payload exceeds MaxMessageSize.
+	ErrMessageTooLarge = errors.New("envelope: message exceeds max size")
 )
 
 const (
@@ -114,7 +116,17 @@ func AppendFrame(dst []byte, f Frame) ([]byte, error) {
 }
 
 // UnmarshalPrefixed reads one length-prefixed frame from r.
+// It does not enforce MaxFrameSize / MaxMessageSize; see UnmarshalPrefixedLimited.
 func UnmarshalPrefixed(r io.Reader) (Frame, error) {
+	return UnmarshalPrefixedLimited(r, 0, 0)
+}
+
+// UnmarshalPrefixedLimited reads one length-prefixed frame, enforcing optional
+// maxFrame (body length) and maxMessage (DATA payload) limits. When a DATA
+// payload would exceed maxMessage, the remainder of the frame is discarded with
+// a fixed-size scratch buffer so no oversized allocation is made.
+// Non-positive limits disable the corresponding check.
+func UnmarshalPrefixedLimited(r io.Reader, maxFrame, maxMessage int64) (Frame, error) {
 	var hdr [lenPrefix]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -126,6 +138,42 @@ func UnmarshalPrefixed(r io.Reader) (Frame, error) {
 	if n < headerSize {
 		return Frame{}, fmt.Errorf("%w: body length %d", ErrInvalidLength, n)
 	}
+	if maxFrame > 0 && int64(n) > maxFrame {
+		if err := discardN(r, int64(n)); err != nil {
+			return Frame{}, err
+		}
+		return Frame{}, fmt.Errorf("%w: body %d > max %d", ErrFrameTooLarge, n, maxFrame)
+	}
+
+	payloadLen := int64(n) - headerSize
+	if maxMessage > 0 && payloadLen > maxMessage {
+		// Peek type without allocating the full body.
+		var typ [1]byte
+		if _, err := io.ReadFull(r, typ[:]); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return Frame{}, fmt.Errorf("%w: frame type", ErrTruncated)
+			}
+			return Frame{}, err
+		}
+		rest := int64(n) - 1
+		if Type(typ[0]) == TypeData {
+			if err := discardN(r, rest); err != nil {
+				return Frame{}, err
+			}
+			return Frame{}, fmt.Errorf("%w: DATA payload %d > max %d", ErrMessageTooLarge, payloadLen, maxMessage)
+		}
+		// Non-DATA under MaxFrameSize: assemble body from peeked type + rest.
+		body := make([]byte, n)
+		body[0] = typ[0]
+		if _, err := io.ReadFull(r, body[1:]); err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return Frame{}, fmt.Errorf("%w: frame body", ErrTruncated)
+			}
+			return Frame{}, err
+		}
+		return ParseFrameBody(body)
+	}
+
 	body := make([]byte, n)
 	if _, err := io.ReadFull(r, body); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
@@ -134,6 +182,30 @@ func UnmarshalPrefixed(r io.Reader) (Frame, error) {
 		return Frame{}, err
 	}
 	return ParseFrameBody(body)
+}
+
+func discardN(r io.Reader, n int64) error {
+	if n <= 0 {
+		return nil
+	}
+	var scratch [32 << 10]byte
+	for n > 0 {
+		chunk := len(scratch)
+		if int64(chunk) > n {
+			chunk = int(n)
+		}
+		got, err := r.Read(scratch[:chunk])
+		if got > 0 {
+			n -= int64(got)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return fmt.Errorf("%w: discard", ErrTruncated)
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 // ParseFrameBody parses one frame body (no length prefix).

@@ -430,9 +430,28 @@ func TestClientEarlyCloseNotReturnedToPool(t *testing.T) {
 }
 
 func TestServerDrainResidualsNextCall(t *testing.T) {
-	cliConn, srvConn := fake.BytePipe()
-	defer cliConn.Close()
-	defer srvConn.Close()
+	// Use real TCP: after Finish the server demux goes idle while the client may
+	// still write residual DATA/END. net.Pipe is unbuffered and deadlocks that
+	// race; AcceptCall drains residuals once it resumes reading (§2.4c).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	cliNC, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cliNC.Close()
+	srvNC, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srvNC.Close()
+
+	cliConn := &netCarrier{nc: cliNC}
+	srvConn := &netCarrier{nc: srvNC}
 
 	fr := envelope.New()
 	cliSess, _ := fr.NewClientSession(context.Background(), cliConn, framing.SessionSpec{})

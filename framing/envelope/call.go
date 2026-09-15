@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/argos-io/argos/budget"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/status"
@@ -23,20 +24,29 @@ var (
 
 type recvEvent struct {
 	payload []byte
+	release func() // budget release for buffered payload; idempotent
 	err     error
 	headers bool // HEADERS arrived (payload ignored); Recv does not surface these
+	data    bool // occupies a read-ahead DATA slot
 }
 
 // call is the shared Call implementation for initiator and responder.
 type call struct {
-	sess     *session
-	callID   uint64
-	method   string
-	md       metadata.CallMetadata
-	shape    descriptor.Shape
+	sess      *session
+	callID    uint64
+	method    string
+	md        metadata.CallMetadata
+	shape     descriptor.Shape
 	initiator bool
+	budget    budget.Budget
 
+	// inbox holds DATA and control events in wire order.
+	// Capacity is ReadAheadMessages+2 so END/STATUS can be enqueued while the
+	// DATA gate is full (backpressure stops further DATA reads, not control).
 	inbox chan recvEvent
+	// dataGate limits buffered complete DATA to ReadAheadMessages.
+	// Send a token when buffering DATA; receive when Recv/Close drains it.
+	dataGate chan struct{}
 
 	mu sync.Mutex
 
@@ -57,9 +67,17 @@ type call struct {
 
 	sending atomic.Bool
 	recving atomic.Bool
+
+	// peakBuffered is the high-water mark of charged payload bytes (testing).
+	peakBuffered atomic.Int64
+	curBuffered  atomic.Int64
 }
 
-func newCall(s *session, id uint64, method string, initiator bool, md metadata.CallMetadata, shape descriptor.Shape) *call {
+func newCall(s *session, id uint64, method string, initiator bool, md metadata.CallMetadata, shape descriptor.Shape, b budget.Budget) *call {
+	ra := s.cfg.ReadAheadMessages
+	if ra < 1 {
+		ra = 1
+	}
 	return &call{
 		sess:      s,
 		callID:    id,
@@ -67,7 +85,9 @@ func newCall(s *session, id uint64, method string, initiator bool, md metadata.C
 		md:        md,
 		shape:     shape,
 		initiator: initiator,
-		inbox:     make(chan recvEvent, 64),
+		budget:    b,
+		inbox:     make(chan recvEvent, ra+2),
+		dataGate:  make(chan struct{}, ra),
 		detachCh:  make(chan struct{}),
 	}
 }
@@ -85,6 +105,7 @@ func (c *call) deliver(f Frame) {
 		if c.md != nil {
 			_ = metadata.SetIncomingHeaders(c.md, headersToMD(f.Headers))
 		}
+		// Metadata is applied synchronously; inbox wake is best-effort.
 		select {
 		case c.inbox <- recvEvent{headers: true}:
 		default:
@@ -95,7 +116,11 @@ func (c *call) deliver(f Frame) {
 		if payload == nil {
 			payload = []byte{}
 		}
-		c.enqueue(recvEvent{payload: payload})
+		if max := c.cfgMaxMessage(); max > 0 && int64(len(payload)) > max {
+			c.abortRecv(fmt.Errorf("%w: DATA payload %d > max %d", ErrMessageTooLarge, len(payload), max))
+			return
+		}
+		c.enqueueData(payload)
 	case TypeEnd:
 		c.deliverEnd()
 	case TypeStatus:
@@ -115,7 +140,7 @@ func (c *call) deliver(f Frame) {
 		} else if c.md != nil {
 			_ = metadata.SetIncomingTrailers(c.md, metadata.Metadata{})
 		}
-		c.enqueue(recvEvent{err: errStatusPending})
+		c.enqueueCtrl(recvEvent{err: errStatusPending})
 	case TypeOpen:
 		c.abortRecv(fmt.Errorf("envelope: unexpected OPEN on active call"))
 	default:
@@ -123,10 +148,79 @@ func (c *call) deliver(f Frame) {
 	}
 }
 
-func (c *call) enqueue(ev recvEvent) {
+func (c *call) enqueueData(payload []byte) {
+	// Acquire a read-ahead slot (backpressure when full).
+	select {
+	case c.dataGate <- struct{}{}:
+	case <-c.detachCh:
+		return
+	}
+
+	rel, err := c.chargePayload(payload)
+	if err != nil {
+		c.releaseDataSlot()
+		c.abortRecv(err)
+		return
+	}
+
+	ev := recvEvent{payload: payload, release: rel, data: true}
 	select {
 	case c.inbox <- ev:
 	case <-c.detachCh:
+		if rel != nil {
+			rel()
+			c.noteRelease(int64(cap(payload)))
+		}
+		c.releaseDataSlot()
+	}
+}
+
+func (c *call) enqueueCtrl(ev recvEvent) {
+	select {
+	case c.inbox <- ev:
+	case <-c.detachCh:
+	}
+}
+
+func (c *call) releaseDataSlot() {
+	select {
+	case <-c.dataGate:
+	default:
+	}
+}
+
+func (c *call) chargePayload(payload []byte) (func(), error) {
+	if c.budget == nil {
+		return nil, nil
+	}
+	var (
+		rel func()
+		err error
+	)
+	if sb, ok := c.budget.(budget.SliceBudget); ok {
+		rel, err = sb.TryAcquireSlice(payload)
+	} else {
+		rel, err = c.budget.TryAcquire(int64(cap(payload)))
+	}
+	if err != nil {
+		return nil, err
+	}
+	n := int64(cap(payload))
+	if n > 0 {
+		cur := c.curBuffered.Add(n)
+		for {
+			peak := c.peakBuffered.Load()
+			if cur <= peak || c.peakBuffered.CompareAndSwap(peak, cur) {
+				break
+			}
+		}
+	}
+	return rel, nil
+}
+
+func (c *call) noteRelease(n int64) {
+	if n > 0 {
+		c.curBuffered.Add(-n)
 	}
 }
 
@@ -148,14 +242,14 @@ func (c *call) deliverEnd() {
 	c.mu.Lock()
 	c.peerHalfClosed = true
 	c.mu.Unlock()
-	c.enqueue(recvEvent{err: io.EOF})
+	c.enqueueCtrl(recvEvent{err: io.EOF})
 }
 
 func (c *call) abortRecv(err error) {
 	c.mu.Lock()
 	c.recvDone = true
 	c.mu.Unlock()
-	c.enqueue(recvEvent{err: err})
+	c.enqueueCtrl(recvEvent{err: err})
 }
 
 func (c *call) recvFinished() bool {
@@ -260,6 +354,9 @@ func (c *call) Send(payload []byte) error {
 	if data == nil {
 		data = []byte{}
 	}
+	if max := c.cfgMaxMessage(); max > 0 && int64(len(data)) > max {
+		return fmt.Errorf("%w: Send payload %d > max %d", ErrMessageTooLarge, len(data), max)
+	}
 	// Copy so caller may reuse the buffer after return.
 	cp := append([]byte(nil), data...)
 	if err := c.sess.writeFrame(Frame{
@@ -269,9 +366,6 @@ func (c *call) Send(payload []byte) error {
 	}); err != nil {
 		c.sess.markBad()
 		return err
-	}
-	if c.cfgMaxMessage() > 0 && int64(len(cp)) > c.cfgMaxMessage() {
-		// Already on the wire; mark bad for oversized (Validate on frame uses MaxFrameSize).
 	}
 	return nil
 }
@@ -428,24 +522,34 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 			c.mu.Unlock()
 			return nil, nil, io.EOF
 		}
-		// STATUS OK already observed and pending DATA drained → EOF.
-		if c.sawStatus && c.statusErr == nil {
-			// Still may have buffered DATA ahead of the status event; fall through
-			// to inbox unless status event already consumed.
-		}
 		c.mu.Unlock()
 
-		ev, ok := <-c.inbox
-		if !ok {
-			c.mu.Lock()
-			c.terminalRead = true
-			c.mu.Unlock()
-			return nil, nil, io.EOF
+		var ev recvEvent
+		var ok bool
+		select {
+		case ev, ok = <-c.inbox:
+			if !ok {
+				c.mu.Lock()
+				c.terminalRead = true
+				c.mu.Unlock()
+				return nil, nil, io.EOF
+			}
+		case <-c.detachCh:
+			// Close closes detachCh; Finish only detaches demux and leaves it open.
+			return nil, nil, ErrCallClosed
 		}
+
 		if ev.headers {
 			continue
 		}
+		if ev.data {
+			c.releaseDataSlot()
+		}
 		if ev.err != nil {
+			if ev.release != nil {
+				ev.release()
+				c.noteRelease(int64(cap(ev.payload)))
+			}
 			if errors.Is(ev.err, errStatusPending) {
 				c.mu.Lock()
 				stErr := c.statusErr
@@ -475,7 +579,14 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 			return nil, nil, ev.err
 		}
 		p := ev.payload
-		return p, func() {}, nil
+		capN := int64(cap(p))
+		budRel := ev.release
+		return p, func() {
+			if budRel != nil {
+				budRel()
+				c.noteRelease(capN)
+			}
+		}, nil
 	}
 }
 
@@ -495,23 +606,37 @@ func (c *call) Close() error {
 	}
 	c.mu.Unlock()
 
-	// Wake blocked Recv.
-	select {
-	case c.inbox <- recvEvent{err: ErrCallClosed}:
-	default:
-	}
-
-	poison := c.initiator && !terminalOK
-	c.sess.detachCall(c, poison)
-	c.sess.wakeRead()
-	c.sess.clearReadDeadline()
-
+	// Wake blocked DATA enqueue / Recv before draining.
 	select {
 	case <-c.detachCh:
 	default:
 		close(c.detachCh)
 	}
+
+	c.drainInbox()
+
+	poison := c.initiator && !terminalOK
+	c.sess.detachCall(c, poison)
+	c.sess.wakeRead()
+	c.sess.clearReadDeadline()
 	return nil
+}
+
+func (c *call) drainInbox() {
+	for {
+		select {
+		case ev := <-c.inbox:
+			if ev.data {
+				c.releaseDataSlot()
+			}
+			if ev.release != nil {
+				ev.release()
+				c.noteRelease(int64(cap(ev.payload)))
+			}
+		default:
+			return
+		}
+	}
 }
 
 // serverCall wraps call with Accept.

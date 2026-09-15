@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/argos-io/argos/budget"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/metadata"
@@ -441,7 +442,7 @@ func (s *session) readPrefixedFrame() (Frame, error) {
 		return Frame{}, fmt.Errorf("envelope: ByteStreamCarrier required")
 	}
 	r := &bufReader{s: s, r: bs}
-	return UnmarshalPrefixed(r)
+	return UnmarshalPrefixedLimited(r, s.cfg.MaxFrameSize, s.cfg.MaxMessageSize)
 }
 
 func (s *session) readMessageFrame(ctx context.Context, honorCtx bool) (Frame, error) {
@@ -479,6 +480,15 @@ func (s *session) readMessageFrame(ctx context.Context, honorCtx bool) (Frame, e
 	}
 	if res.err != nil {
 		return Frame{}, res.err
+	}
+	if s.cfg.MaxFrameSize > 0 && int64(len(res.msg)) > s.cfg.MaxFrameSize {
+		return Frame{}, fmt.Errorf("%w: body %d > max %d", ErrFrameTooLarge, len(res.msg), s.cfg.MaxFrameSize)
+	}
+	if s.cfg.MaxMessageSize > 0 && len(res.msg) > headerSize &&
+		Type(res.msg[0]) == TypeData &&
+		int64(len(res.msg)-headerSize) > s.cfg.MaxMessageSize {
+		return Frame{}, fmt.Errorf("%w: DATA payload %d > max %d",
+			ErrMessageTooLarge, len(res.msg)-headerSize, s.cfg.MaxMessageSize)
 	}
 	return ParseFrameBody(res.msg)
 }
@@ -610,7 +620,8 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 		_ = metadata.FreezeOutgoingHeaders(spec.Metadata)
 	}
 
-	c := newCall(s.session, id, m.FullName(), true, spec.Metadata, m.Shape())
+	b, _ := budget.FromContext(ctx)
+	c := newCall(s.session, id, m.FullName(), true, spec.Metadata, m.Shape(), b)
 
 	// Attach before writing OPEN so a fast response cannot race the demux.
 	s.mu.Lock()
@@ -710,7 +721,8 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 		_ = metadata.SetIncomingHeaders(spec.Metadata, headersToMD(f.Headers))
 	}
 
-	c := newCall(s.session, f.CallID, f.Method, false, spec.Metadata, 0)
+	b, _ := budget.FromContext(ctx)
+	c := newCall(s.session, f.CallID, f.Method, false, spec.Metadata, 0, b)
 	c.openSeen = true
 	if f.Flags&FlagOpenEnd != 0 {
 		c.peerHalfClosed = true
