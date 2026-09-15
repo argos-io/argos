@@ -87,6 +87,23 @@ func wrapFilter(name string, sendOrder, recvOrder *[]string, recvMutate func(err
 	}
 }
 
+// sessionPoolStub is a probe-quality stand-in for the client session pool.
+// Terminus borrows a session (idle → in-use) before OpenCall; short-circuit
+// must leave idle/inUse unchanged.
+type sessionPoolStub struct {
+	idle        int
+	inUse       int
+	borrowCount int
+}
+
+func (p *sessionPoolStub) borrow() {
+	p.borrowCount++
+	if p.idle > 0 {
+		p.idle--
+	}
+	p.inUse++
+}
+
 func TestOpenFilterShortCircuit(t *testing.T) {
 	var dialCount int
 	term := func(ctx context.Context, m pMethod) (pStream, error) {
@@ -105,6 +122,43 @@ func TestOpenFilterShortCircuit(t *testing.T) {
 	}
 	if dialCount != 0 {
 		t.Fatalf("dialCount = %d, want 0 (short-circuit must not reach terminal)", dialCount)
+	}
+}
+
+// TestOpenFilterShortCircuitDoesNotBorrowSession asserts the re-run requirement
+// for Task 0.9: chain terminus is 取会话 → OpenCall; short-circuit must not
+// produce network resources AND must not occupy an idle session from the pool.
+func TestOpenFilterShortCircuitDoesNotBorrowSession(t *testing.T) {
+	pool := &sessionPoolStub{idle: 2}
+	idleBefore, inUseBefore := pool.idle, pool.inUse
+
+	var openCallCount int
+	term := func(ctx context.Context, m pMethod) (pStream, error) {
+		// Terminus: borrow session from pool, then OpenCall.
+		pool.borrow()
+		openCallCount++
+		return &stubStream{}, nil
+	}
+
+	want := errors.New("auth denied")
+	short := func(ctx context.Context, m pMethod, next openFunc) (pStream, error) {
+		// Outer filter returns error without calling next.
+		return nil, want
+	}
+
+	_, err := chain(term, short)(context.Background(), pMethod{"svc/m"})
+	if !errors.Is(err, want) {
+		t.Fatalf("error = %v, want %v", err, want)
+	}
+	if openCallCount != 0 {
+		t.Fatalf("openCallCount = %d, want 0 (short-circuit must not reach terminus)", openCallCount)
+	}
+	if pool.borrowCount != 0 {
+		t.Fatalf("borrowCount = %d, want 0 (short-circuit must not borrow a session)", pool.borrowCount)
+	}
+	if pool.idle != idleBefore || pool.inUse != inUseBefore {
+		t.Fatalf("pool idle/inUse = %d/%d, want %d/%d (idle sessions must stay unoccupied)",
+			pool.idle, pool.inUse, idleBefore, inUseBefore)
 	}
 }
 
