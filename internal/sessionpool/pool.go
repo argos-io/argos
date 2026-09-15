@@ -7,6 +7,10 @@
 // OpenCall). The caller must OpenCall on that session, then after Call.Close
 // returns call Release exactly once for that Acquire.
 //
+// OpenCall combines Acquire + sess.OpenCall with Busy/Spent fallback: on
+// framing.ErrSessionBusy it switches session (retry ≤ MaxSessionsPerEndpoint)
+// and never leaks that sentinel; on exhaust it returns status.ErrSessionsExhausted.
+//
 // Release decrements the refcount and applies the four-state return (§4.6):
 //
 //	Reusable && refcount==0 && idle room → idle queue
@@ -24,10 +28,12 @@ package sessionpool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport"
@@ -130,6 +136,52 @@ func New(f framing.Framing, dial DialFunc, cfg Config) *Pool {
 // Acquire pretakes one in-flight slot on a reusable session, or dials a new
 // one. It does not call OpenCall.
 func (p *Pool) Acquire(ctx context.Context, endpoint string) (framing.ClientSession, error) {
+	return p.acquire(ctx, endpoint, nil)
+}
+
+// OpenCall acquires a session, calls sess.OpenCall, and on framing.ErrSessionBusy
+// releases the pretaken slot, skips that session for this attempt chain, and
+// retries with another. Retry count is at most MaxSessionsPerEndpoint.
+//
+// On exhaust it returns status.ErrSessionsExhausted (Code ResourceExhausted).
+// framing.ErrSessionBusy and framing.ErrSessionSpent never leak to the caller.
+//
+// On framing.ErrSessionSpent the session is closed/discarded and another is tried.
+//
+// On success the caller must Release(sess) after Call.Close returns (same
+// contract as Acquire).
+func (p *Pool) OpenCall(ctx context.Context, endpoint string, m descriptor.Method, spec framing.CallSpec) (framing.Call, framing.ClientSession, error) {
+	max := p.cfg.MaxSessionsPerEndpoint
+	skip := make(map[framing.ClientSession]struct{})
+
+	for attempt := 0; attempt < max; attempt++ {
+		sess, err := p.acquire(ctx, endpoint, skip)
+		if err != nil {
+			return nil, nil, err
+		}
+		call, err := sess.OpenCall(ctx, m, spec)
+		if err == nil {
+			return call, sess, nil
+		}
+		if errors.Is(err, framing.ErrSessionBusy) {
+			skip[sess] = struct{}{}
+			p.Release(sess)
+			continue
+		}
+		if errors.Is(err, framing.ErrSessionSpent) {
+			_ = sess.Close()
+			p.Release(sess)
+			continue
+		}
+		p.Release(sess)
+		return nil, nil, err
+	}
+	return nil, nil, status.ErrSessionsExhausted
+}
+
+// acquire is Acquire with an optional skip set used by OpenCall Busy fallback
+// so the pool switches session instead of re-lending the same busy one.
+func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.ClientSession]struct{}) (framing.ClientSession, error) {
 	for {
 		p.mu.Lock()
 		if p.closed {
@@ -138,7 +190,7 @@ func (p *Pool) Acquire(ctx context.Context, endpoint string) (framing.ClientSess
 		}
 		p.reclaimLocked(time.Now())
 
-		if sess, ok := p.tryLendLocked(endpoint, time.Now()); ok {
+		if sess, ok := p.tryLendLocked(endpoint, time.Now(), skip); ok {
 			p.mu.Unlock()
 			return sess, nil
 		}
@@ -165,11 +217,11 @@ func (p *Pool) Acquire(ctx context.Context, endpoint string) (framing.ClientSess
 						p.mu.Unlock()
 						return nil, fmt.Errorf("sessionpool: pool closed")
 					}
-					if sess, ok := p.tryLendLocked(endpoint, time.Now()); ok {
+					if sess, ok := p.tryLendLocked(endpoint, time.Now(), skip); ok {
 						p.mu.Unlock()
 						return sess, nil
 					}
-					// Session exists but not lendable (e.g. marked bad) — fall through.
+					// Session exists but not lendable (e.g. marked bad / skipped) — fall through.
 					atCap = len(p.bucketLocked(endpoint).entries)+p.bucketLocked(endpoint).pendingDial >= p.cfg.MaxSessionsPerEndpoint
 					if atCap {
 						p.mu.Unlock()
@@ -320,12 +372,20 @@ func (p *Pool) addEntryLocked(endpoint string, sess framing.ClientSession, now t
 	return e
 }
 
-func (p *Pool) tryLendLocked(endpoint string, now time.Time) (framing.ClientSession, bool) {
+func (p *Pool) tryLendLocked(endpoint string, now time.Time, skip map[framing.ClientSession]struct{}) (framing.ClientSession, bool) {
 	b := p.buckets[endpoint]
 	if b == nil {
 		return nil, false
 	}
 	for _, e := range b.entries {
+		if e.sess == nil {
+			continue
+		}
+		if skip != nil {
+			if _, ok := skip[e.sess]; ok {
+				continue
+			}
+		}
 		if !p.lendableLocked(e, now) {
 			continue
 		}

@@ -8,12 +8,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/internal/fake"
 	"github.com/argos-io/argos/internal/sessionpool"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport"
 )
+
+func testMethod(t *testing.T) descriptor.Method {
+	t.Helper()
+	m, err := descriptor.NewMethod("echo.v1.Echo.Echo", descriptor.Unary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
 
 func TestSequentialReuseKeepsConnUntilPoolClose(t *testing.T) {
 	t.Parallel()
@@ -510,6 +520,261 @@ func TestConcurrentKeepAliveUntilLastRelease(t *testing.T) {
 	p.Release(s2)
 	if closes.Load() != 1 {
 		t.Fatalf("CloseCount after last Release = %d, want 1", closes.Load())
+	}
+}
+
+func TestOpenCallBusyThenSucceeds(t *testing.T) {
+	t.Parallel()
+	var attempts atomic.Int64
+	const busyFirst = 2
+
+	var mu sync.Mutex
+	var servers []*fake.ByteConn
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, s := range servers {
+			_ = s.Close()
+		}
+	})
+	dial := func(ctx context.Context, endpoint string) (transport.Conn, error) {
+		cli, srv := fake.BytePipe()
+		mu.Lock()
+		servers = append(servers, srv)
+		mu.Unlock()
+		go drainByteConn(srv)
+		return cli, nil
+	}
+
+	f := fake.NewFraming(framing.Sequential)
+	f.OpenCallHook = func(callSeq int) error {
+		if attempts.Add(1) <= busyFirst {
+			return framing.ErrSessionBusy
+		}
+		return nil
+	}
+
+	p := sessionpool.New(f, dial, sessionpool.Config{
+		MaxSessionsPerEndpoint: 8,
+		MaxIdleSessions:        8,
+	})
+	defer p.Close()
+
+	call, sess, err := p.OpenCall(context.Background(), "ep", testMethod(t), framing.CallSpec{})
+	if err != nil {
+		t.Fatalf("OpenCall: %v", err)
+	}
+	if errors.Is(err, framing.ErrSessionBusy) {
+		t.Fatal("ErrSessionBusy leaked")
+	}
+	if call == nil || sess == nil {
+		t.Fatal("nil call or session")
+	}
+	if got := attempts.Load(); got <= busyFirst {
+		t.Fatalf("attempts=%d, want > %d", got, busyFirst)
+	}
+	_ = call.Close()
+	p.Release(sess)
+}
+
+func TestOpenCallAlwaysBusyExhausted(t *testing.T) {
+	t.Parallel()
+	var servers []*fake.ByteConn
+	t.Cleanup(func() {
+		for _, s := range servers {
+			_ = s.Close()
+		}
+	})
+	dial := func(ctx context.Context, endpoint string) (transport.Conn, error) {
+		cli, srv := fake.BytePipe()
+		servers = append(servers, srv)
+		return cli, nil
+	}
+
+	const max = 3
+	f := fake.NewFraming(framing.Sequential)
+	f.OpenCallHook = func(callSeq int) error {
+		return framing.ErrSessionBusy
+	}
+
+	p := sessionpool.New(f, dial, sessionpool.Config{
+		MaxSessionsPerEndpoint: max,
+		MaxIdleSessions:        max,
+	})
+	defer p.Close()
+
+	call, sess, err := p.OpenCall(context.Background(), "ep", testMethod(t), framing.CallSpec{})
+	if call != nil || sess != nil {
+		t.Fatalf("want nil call/sess on exhaust, got call=%v sess=%v", call, sess)
+	}
+	if errors.Is(err, framing.ErrSessionBusy) {
+		t.Fatalf("ErrSessionBusy leaked: %v", err)
+	}
+	if !errors.Is(err, status.ErrSessionsExhausted) {
+		t.Fatalf("got %v, want ErrSessionsExhausted", err)
+	}
+	if status.CodeOf(err) != status.ResourceExhausted {
+		t.Fatalf("CodeOf = %v, want ResourceExhausted", status.CodeOf(err))
+	}
+}
+
+func TestOpenCallConcurrentEmptyPoolSingleflight(t *testing.T) {
+	t.Parallel()
+	var dials atomic.Int64
+	hold := make(chan struct{})
+	stopErr := errors.New("opencall stop after dial")
+
+	f := fake.NewFraming(framing.Concurrent)
+	// Fail in hook before OpenStream/write so this asserts dial singleflight only.
+	f.OpenCallHook = func(callSeq int) error { return stopErr }
+	f.Handshake = func(ctx context.Context, c transport.Conn) error {
+		select {
+		case <-hold:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	dial := func(ctx context.Context, endpoint string) (transport.Conn, error) {
+		dials.Add(1)
+		cli, lis := fake.HTTPLoopback()
+		go func() {
+			for {
+				srv, err := lis.Accept(context.Background())
+				if err != nil {
+					return
+				}
+				_ = srv.Close()
+			}
+		}()
+		return cli, nil
+	}
+
+	p := sessionpool.New(f, dial, sessionpool.Config{
+		MaxSessionsPerEndpoint: 64,
+		MaxIdleSessions:        8,
+		HandshakeTimeout:       5 * time.Second,
+	})
+	defer p.Close()
+
+	const n = 8
+	var wg sync.WaitGroup
+	wg.Add(n)
+	errs := make([]error, n)
+	started := make(chan struct{})
+	var startOnce sync.Once
+	m := testMethod(t)
+
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			startOnce.Do(func() { close(started) })
+			_, _, errs[i] = p.OpenCall(context.Background(), "ep", m, framing.CallSpec{})
+		}()
+	}
+	<-started
+	time.Sleep(50 * time.Millisecond)
+	close(hold)
+	wg.Wait()
+
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dial count = %d, want 1", got)
+	}
+	for i := 0; i < n; i++ {
+		if !errors.Is(errs[i], stopErr) {
+			t.Fatalf("OpenCall #%d: %v, want stopErr", i, errs[i])
+		}
+		if errors.Is(errs[i], framing.ErrSessionBusy) {
+			t.Fatal("ErrSessionBusy leaked")
+		}
+	}
+}
+
+func TestOpenCallSequentialEmptyPoolOwnDial(t *testing.T) {
+	t.Parallel()
+	var dials atomic.Int64
+	hold := make(chan struct{})
+	stopErr := errors.New("opencall stop after dial")
+
+	f := fake.NewFraming(framing.Sequential)
+	f.OpenCallHook = func(callSeq int) error { return stopErr }
+	f.Handshake = func(ctx context.Context, c transport.Conn) error {
+		select {
+		case <-hold:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	var servers []*fake.ByteConn
+	var serversMu sync.Mutex
+	t.Cleanup(func() {
+		serversMu.Lock()
+		defer serversMu.Unlock()
+		for _, s := range servers {
+			_ = s.Close()
+		}
+	})
+	dial := func(ctx context.Context, endpoint string) (transport.Conn, error) {
+		dials.Add(1)
+		cli, srv := fake.BytePipe()
+		serversMu.Lock()
+		servers = append(servers, srv)
+		serversMu.Unlock()
+		return cli, nil
+	}
+
+	p := sessionpool.New(f, dial, sessionpool.Config{
+		MaxSessionsPerEndpoint: 16,
+		MaxIdleSessions:        16,
+		HandshakeTimeout:       5 * time.Second,
+	})
+	defer p.Close()
+
+	const n = 8
+	var wg sync.WaitGroup
+	wg.Add(n)
+	errs := make([]error, n)
+	started := make(chan struct{})
+	var startOnce sync.Once
+	m := testMethod(t)
+
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			startOnce.Do(func() { close(started) })
+			_, _, errs[i] = p.OpenCall(context.Background(), "ep", m, framing.CallSpec{})
+		}()
+	}
+	<-started
+	time.Sleep(50 * time.Millisecond)
+	close(hold)
+	wg.Wait()
+
+	if got := dials.Load(); got != int64(n) {
+		t.Fatalf("dial count = %d, want %d", got, n)
+	}
+	for i := 0; i < n; i++ {
+		if !errors.Is(errs[i], stopErr) {
+			t.Fatalf("OpenCall #%d: %v, want stopErr", i, errs[i])
+		}
+		if errors.Is(errs[i], framing.ErrSessionBusy) {
+			t.Fatal("ErrSessionBusy leaked")
+		}
+	}
+}
+
+func drainByteConn(c *fake.ByteConn) {
+	buf := make([]byte, 4096)
+	for {
+		_, err := c.Read(buf)
+		if err != nil {
+			return
+		}
 	}
 }
 
