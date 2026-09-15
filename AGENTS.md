@@ -96,6 +96,8 @@ make verify     # lint + test + test-race（全集要到任务 6.1）
 
 提交前：`make verify` 全绿。§6.1 标 ⚠️ 的连接级默认值在任务 7.5 前不得当确认值引用。
 
+本机若 `go` 与 `GOROOT` 版本不一致（gvm），先 `export GOROOT=/data/root/.gvm/1.27.1/go` 且 `PATH` 含 `$GOROOT/bin`。
+
 ---
 
 ## 不要提交
