@@ -258,8 +258,7 @@ func TestInvariantDependencyTable(t *testing.T) {
 	})
 }
 
-// TestInvariantClientDepsNoProbe is the Task 1.16 stand-in for the §9-2
-// go list -deps envelope+tcp check (envelope not landed yet).
+// TestInvariantClientDepsNoProbe ensures client production deps still exclude probe/.
 func TestInvariantClientDepsNoProbe(t *testing.T) {
 	t.Parallel()
 	cmd := exec.Command("go", "list", "-deps", "-f", "{{if not .Standard}}{{.ImportPath}}{{end}}", "./client")
@@ -277,6 +276,42 @@ func TestInvariantClientDepsNoProbe(t *testing.T) {
 		}
 		if strings.HasPrefix(line, modulePath+"/probe") {
 			t.Errorf("client transitive deps include %q", line)
+		}
+	}
+}
+
+// TestInvariantTransitiveEnvelopeTCPNoGRPC is Task 2.7 / §3.1-15:
+// a program that only imports framing/envelope + transport/tcp must not
+// transitively depend on gRPC framing, binding, compressor, or genproto.
+func TestInvariantTransitiveEnvelopeTCPNoGRPC(t *testing.T) {
+	t.Parallel()
+	cmd := exec.Command(
+		"go", "list", "-deps",
+		"-f", "{{if not .Standard}}{{.ImportPath}}{{end}}",
+		"./framing/envelope", "./transport/tcp",
+	)
+	cmd.Dir = moduleRoot(t)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list -deps envelope+tcp: %v\n%s", err, stderr.String())
+	}
+	forbidden := []string{
+		modulePath + "/framing/grpc",
+		modulePath + "/binding/grpc",
+		modulePath + "/compressor",
+		"google.golang.org/genproto",
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		for _, bad := range forbidden {
+			if line == bad || strings.HasPrefix(line, bad+"/") {
+				t.Errorf("envelope+tcp transitive deps include %q (§3.1-15)", line)
+			}
 		}
 	}
 }
