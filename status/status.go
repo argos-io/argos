@@ -85,6 +85,14 @@ func (e *StatusError) Code() Code {
 	return e.code
 }
 
+// Message returns the status message string (may be empty).
+func (e *StatusError) Message() string {
+	if e == nil {
+		return ""
+	}
+	return e.msg
+}
+
 // Error returns an error carrying code and msg. It is recoverable with errors.As
 // to *status.StatusError. Same-Code errors match via errors.Is (message ignored).
 func Error(code Code, msg string) error {

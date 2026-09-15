@@ -134,6 +134,9 @@ func TestErrorAs(t *testing.T) {
 	if se.Code() != status.Aborted {
 		t.Fatalf("Code() = %v", se.Code())
 	}
+	if se.Message() != "stop" {
+		t.Fatalf("Message() = %q", se.Message())
+	}
 }
 
 func TestErrorIsSameCode(t *testing.T) {
