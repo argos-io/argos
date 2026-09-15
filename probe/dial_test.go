@@ -6,9 +6,9 @@ import (
 	"testing"
 )
 
-// §4.2 要求 Dial 在收到响应 headers 之前就返回可写承载。如果这条不成立，
-// 客户端"先 Dial 再 Send"的顺序无法表达，请求永远发不出去。
-func TestDialReturnsBeforeResponseHeaders(t *testing.T) {
+// §4.2 要求 OpenStream 在收到响应 headers 之前就返回可写承载。如果这条不成立，
+// 客户端"先 OpenStream 再 Send"的顺序无法表达，请求永远发不出去。
+func TestOpenStreamReturnsBeforeResponseHeaders(t *testing.T) {
 	gotFirstByte := make(chan struct{})
 	release := make(chan struct{})
 	srv := newH2CServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -19,7 +19,7 @@ func TestDialReturnsBeforeResponseHeaders(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	c := dialH2(t.Context(), srv.client, srv.url, grpcHeaders())
+	c := newH2Endpoint(srv.client, srv.url).openH2Stream(t.Context(), grpcHeaders())
 
 	if c.responded() {
 		t.Fatal("RoundTrip 在写入任何请求字节之前就返回了：请求方向被阻塞")

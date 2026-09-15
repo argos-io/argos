@@ -112,7 +112,7 @@ func TestProbeClientToGRPCGoServer(t *testing.T) {
 	t.Cleanup(cl.CloseIdleConnections)
 
 	url := "http://" + lis.Addr().String() + "/grpc.health.v1.Health/Check"
-	c := dialH2(t.Context(), cl, url, grpcHeaders())
+	c := newH2Endpoint(cl, url).openH2Stream(t.Context(), grpcHeaders())
 
 	payload, _ := proto.Marshal(&grpc_health_v1.HealthCheckRequest{})
 	if err := writeLPM(c, payload); err != nil {

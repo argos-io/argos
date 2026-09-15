@@ -21,11 +21,22 @@ type h2Carrier struct {
 	respErr error
 }
 
-func dialH2(ctx context.Context, cl *http.Client, url string, hdr http.Header) *h2Carrier {
+// h2Endpoint 对应 §2.1 StreamConn：持有客户端与 URL，本身不做 I/O。
+// OpenStream（openH2Stream）才打开可写承载；非阻塞约束落在 OpenStream 上。
+type h2Endpoint struct {
+	cl  *http.Client
+	url string
+}
+
+func newH2Endpoint(cl *http.Client, url string) *h2Endpoint {
+	return &h2Endpoint{cl: cl, url: url}
+}
+
+func (e *h2Endpoint) openH2Stream(ctx context.Context, hdr http.Header) *h2Carrier {
 	pr, pw := io.Pipe()
 	c := &h2Carrier{pw: pw, ready: make(chan struct{})}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.url, pr)
 	if err != nil {
 		c.finish(nil, err)
 		return c
@@ -36,7 +47,7 @@ func dialH2(ctx context.Context, cl *http.Client, url string, hdr http.Header) *
 		}
 	}
 	go func() {
-		resp, err := cl.Do(req)
+		resp, err := e.cl.Do(req)
 		if err != nil {
 			// 让已经阻塞在 Write 上的发送方立刻失败，而不是永远等下去。
 			_ = pr.CloseWithError(err)

@@ -26,7 +26,7 @@ func TestSendWindowReceiveOpen(t *testing.T) {
 	var inWindowCount int
 
 	for i := range attempts {
-		c := dialH2(t.Context(), srv.client, srv.url, grpcHeaders())
+		c := newH2Endpoint(srv.client, srv.url).openH2Stream(t.Context(), grpcHeaders())
 
 		var writeErr error
 		inWindow := false
