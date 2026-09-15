@@ -14,5 +14,7 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Full §13.1 gate set via Makefile verify (lint/test/race/accept/
+      # test-generate/test-integration/test-deps).
       - name: make verify
         run: make verify

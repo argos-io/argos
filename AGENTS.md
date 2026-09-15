@@ -11,7 +11,7 @@
 | | |
 |---|---|
 | 定位 | **验证可组装模型**，不是生产 RPC 框架 |
-| 阶段 | ⓪–⑤✅（`milestone-5`）→ ⑥ 门禁 → ⑦ 可组装性收门 |
+| 阶段 | ⓪–⑤✅（`milestone-5`）→ ⑥ 门禁（6.1/6.2✅；6.3 §9 核对待做）→ ⑦ 可组装性收门 |
 | 探针 | 已删除（① Task 1.17）；价值转入 `internal/fake` 与正式测试 |
 | 真源 | 代码 + 测试 + 本文件；设计/计划/决策记录不入库（勿建 `docs/`） |
 
@@ -19,11 +19,11 @@
 
 ## 落地执行
 
-规格与步骤级计划在 `README.md` §13。每个任务以可测交付物结束，走 TDD，**一个任务一次提交**。当前：⓪–⑤✅（`milestone-5`）；下一步 ⑥ 门禁与全量验收，然后 ⑦ 可组装性收门。
+规格与步骤级计划在 `README.md` §13。每个任务以可测交付物结束，走 TDD，**一个任务一次提交**。当前：⓪–⑤✅；⑥ 的 6.1/6.2 已落地，6.3（§9 逐条核对）与 ⑦ 收门待做。
 
 **⑤**（已完成）：IR FullName/Shape、v2 stubgen、example/echo 五传输。
 
-**⑥**：把 `make verify` 补齐到 §13.1 全集（accept / test-generate / test-integration / 传递依赖）；重写本文件目录表；§9 逐条核对。
+**⑥**：6.1 `make verify` = §13.1 全集；6.2 本文件目录表已对齐 v2；**6.3** §9 逐条核对（未穷尽：组合矩阵缺口、resp/synth 收门、§6.1 ⚠️ 默认值压测等仍属后续）。
 
 **⑦ 可尽早并行**（依赖 ① 接口 + ② Sequential）：7.1 resp → 7.2/7.2b；7.3/7.4 synth；7.5 压测默认值；7.6 源码扫描。
 
@@ -75,14 +75,22 @@
 
 ---
 
-## 目录（v2 ① 完成后）
+## 目录（v2 ⑥）
 
 ```
 descriptor/ status/ metadata/ budget/
-transport/ framing/ codec/ stream/ filter/
+transport/ transport/{tcp,ws,udp,http1,http2}/
+framing/ framing/{envelope,grpc,wholebody}/
+codec/ codec/{protobuf,json}/
+compressor/ compressor/{gzip,grpccodec}/
+stream/ filter/
 resolver/ resolver/ip/
 client/ server/
-internal/fake/ internal/sessionpool/
+binding/ binding/{envelope,grpc,wholebody}/
+internal/fake/ internal/sessionpool/ internal/httpstatus/
+internal/codegen/ internal/codegen/{ir,frontend,gen,stub,check}/
+cmd/argos/
+example/echo/   # example/{resp,synth} → 里程碑 ⑦
 argos 根包（Config/Option/Binding）
 Makefile · .github/workflows/ci.yml · invariants_test.go
 ```
@@ -91,13 +99,17 @@ Makefile · .github/workflows/ci.yml · invariants_test.go
 
 ---
 
-## 工具链（⓪）
+## 工具链（⓪ → ⑥）
 
 ```bash
-make test       # go test ./...
-make test-race  # go test -race ./...
-make lint       # go vet + 有则 staticcheck
-make verify     # lint + test + test-race（全集要到任务 6.1）
+make test              # go test ./...
+make test-race         # go test -race ./...
+make lint              # go vet + 有则 staticcheck
+make accept            # 根包 Invariant|Accept（§3 / §3.1）
+make test-generate     # stub --check vs example/echo
+make test-integration  # example/echo multi-transport
+make test-deps         # 传递依赖门禁（Transitive*）
+make verify            # §13.1 全集：上列全部
 ```
 
 提交前：`make verify` 全绿。§6.1 标 ⚠️ 的连接级默认值在任务 7.5 前不得当确认值引用。

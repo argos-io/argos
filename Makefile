@@ -1,4 +1,4 @@
-.PHONY: test test-race lint verify test-generate build-argos
+.PHONY: test test-race lint verify accept test-generate test-integration test-deps build-argos
 
 test:
 	go test ./...
@@ -20,6 +20,19 @@ lint:
 	@command -v staticcheck >/dev/null && staticcheck ./... || \
 		echo "staticcheck 未安装，跳过（go install honnef.co/go/tools/cmd/staticcheck@latest）"
 
-# 里程碑 ⓪：verify = lint + test + test-race。
-# accept / test-generate / test-integration 到任务 6.1 再补齐。
-verify: lint test test-race
+# Architecture accept gates (§3 / §3.1): root-package Invariant* (and Accept* if added).
+# v2 has no separate TestAccept; invariants_test.go is the accept suite from Task 1.16.
+accept:
+	go test . -run 'Invariant|Accept' -count=1
+
+# example/echo multi-transport end-to-end (binding + five transports).
+test-integration:
+	go test ./example/echo/ -count=1 -timeout 180s
+
+# Transitive dependency gate (§3.1-15 / §9-2): envelope(+tcp/udp) must not pull gRPC/genproto.
+test-deps:
+	go test . -run Transitive -count=1
+
+# §13.1 full verify set (Task 6.1): lint + test + test-race + accept +
+# test-generate + test-integration + transitive dependency gate.
+verify: lint test test-race accept test-generate test-integration test-deps
