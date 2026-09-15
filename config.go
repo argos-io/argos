@@ -53,6 +53,11 @@ type Config struct {
 	// Nil is allowed until a Client/Server path requires it.
 	Binding BindingFunc
 
+	// ListenAddress is the server-only bind address passed to Transport.Serve
+	// as transport.WithListenAddress (e.g. "127.0.0.1:0"). Empty is ignored;
+	// concrete transports that require a listen address fail Serve themselves.
+	ListenAddress string
+
 	// Filters are server-side Filter chain entries (WithFilter).
 	Filters []filter.Filter
 	// OpenFilters are client-side OpenFilter chain entries (WithOpenFilter).

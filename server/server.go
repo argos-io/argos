@@ -242,9 +242,13 @@ func (s *Server) Run(ctx context.Context) error {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
+			var serveOpts []transport.ServerOption
+			if lb.cfg.ListenAddress != "" {
+				serveOpts = append(serveOpts, transport.WithListenAddress(lb.cfg.ListenAddress))
+			}
 			err := lb.tr.Serve(runCtx, func(_ context.Context, c transport.Conn) {
 				s.onConn(lb, routes, filters, c)
-			})
+			}, serveOpts...)
 			if err != nil && runCtx.Err() == nil {
 				s.serveErr.Store(err)
 				runCancel(err)

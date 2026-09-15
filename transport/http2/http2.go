@@ -41,8 +41,8 @@ var (
 	_ transport.ResponseWriter         = (*serverCarrier)(nil)
 )
 
-// Option configures a Transport. TLS options are accepted now so Task 3.8
-// can wire ALPN without an API break; h2c is the path exercised today.
+// Option configures a Transport. WithServerTLS / WithClientTLS select TLS+ALPN
+// (h2) versus cleartext h2c.
 type Option interface {
 	apply(*options)
 }
@@ -56,14 +56,14 @@ type optionFunc func(*options)
 
 func (f optionFunc) apply(o *options) { f(o) }
 
-// WithServerTLS reserves a server TLS config for later Task 3.8 (h2 + ALPN).
-// When nil (default), Serve uses cleartext h2c.
+// WithServerTLS enables TLS+ALPN("h2") on Serve. When nil (default), Serve uses
+// cleartext h2c. The config is cloned; NextProtos is ensured to include "h2".
 func WithServerTLS(cfg *tls.Config) Option {
 	return optionFunc(func(o *options) { o.serverTLS = cfg })
 }
 
-// WithClientTLS reserves a client TLS config for later Task 3.8.
-// When nil (default), Dial uses h2c.
+// WithClientTLS enables TLS+ALPN("h2") on Dial. When nil (default), Dial uses
+// h2c. The config is cloned; NextProtos is ensured to include "h2".
 func WithClientTLS(cfg *tls.Config) Option {
 	return optionFunc(func(o *options) { o.clientTLS = cfg })
 }
@@ -112,13 +112,17 @@ func (t *Transport) newHTTPClient() *http.Client {
 	h2t := &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			// Task 3.8: when clientTLS is set, dial TLS with ALPN h2.
-			// Until then, always cleartext (h2c).
 			_ = cfg
 			if t.opts.clientTLS != nil {
-				tlsCfg := t.opts.clientTLS.Clone()
-				if tlsCfg.NextProtos == nil {
-					tlsCfg.NextProtos = []string{"h2"}
+				tlsCfg := ensureH2ALPN(t.opts.clientTLS.Clone())
+				// Prefer ServerName from config; otherwise derive from dial addr
+				// so SNI works when callers only set RootCAs.
+				if tlsCfg.ServerName == "" {
+					if host, _, err := net.SplitHostPort(addr); err == nil {
+						tlsCfg.ServerName = host
+					} else {
+						tlsCfg.ServerName = addr
+					}
 				}
 				d := tls.Dialer{Config: tlsCfg, NetDialer: &net.Dialer{}}
 				return d.DialContext(ctx, network, addr)
@@ -128,6 +132,29 @@ func (t *Transport) newHTTPClient() *http.Client {
 	}
 	t.h2t = h2t
 	return &http.Client{Transport: h2t}
+}
+
+// ensureH2ALPN clones cfg semantics: NextProtos must advertise "h2" for ALPN.
+func ensureH2ALPN(cfg *tls.Config) *tls.Config {
+	if cfg == nil {
+		cfg = &tls.Config{}
+	}
+	if !strSliceContains(cfg.NextProtos, "h2") {
+		cfg.NextProtos = append([]string{"h2"}, cfg.NextProtos...)
+	}
+	if cfg.MinVersion == 0 {
+		cfg.MinVersion = tls.VersionTLS12
+	}
+	return cfg
+}
+
+func strSliceContains(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 // Addr returns the listener address after Serve has bound, or nil.
@@ -152,8 +179,11 @@ func (t *Transport) Serve(ctx context.Context, onConn func(context.Context, tran
 	if err != nil {
 		return fmt.Errorf("http2: listen %s: %w", settings.ListenAddress, err)
 	}
+
+	var serverTLS *tls.Config
 	if t.opts.serverTLS != nil {
-		ln = tls.NewListener(ln, t.opts.serverTLS)
+		serverTLS = ensureH2ALPN(t.opts.serverTLS.Clone())
+		ln = tls.NewListener(ln, serverTLS)
 	}
 
 	t.mu.Lock()
@@ -178,10 +208,15 @@ func (t *Transport) Serve(ctx context.Context, onConn func(context.Context, tran
 		t.handleRequest(ctx, w, r, onConn)
 	})
 	srv := &http.Server{}
-	if t.opts.serverTLS != nil {
-		// Task 3.8 will harden ALPN / cert wiring; structure is ready.
-		_ = http2.ConfigureServer(srv, h2s)
-		srv.TLSConfig = t.opts.serverTLS
+	if serverTLS != nil {
+		srv.TLSConfig = serverTLS
+		if err := http2.ConfigureServer(srv, h2s); err != nil {
+			t.serving = false
+			t.listener = nil
+			t.mu.Unlock()
+			_ = ln.Close()
+			return fmt.Errorf("http2: ConfigureServer: %w", err)
+		}
 		srv.Handler = inner
 	} else {
 		srv.Handler = h2c.NewHandler(inner, h2s)

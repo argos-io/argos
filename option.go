@@ -161,3 +161,9 @@ func WithMaxInboundConnIdle(d time.Duration) Option {
 func WithMaxInboundConnAge(d time.Duration) Option {
 	return optionFunc(func(c *Config) { c.MaxInboundConnAge = d })
 }
+
+// WithListenAddress sets the server bind address for Transport.Serve
+// (host:port). Client-side Configs ignore it. Empty clears the override.
+func WithListenAddress(addr string) Option {
+	return optionFunc(func(c *Config) { c.ListenAddress = addr })
+}
