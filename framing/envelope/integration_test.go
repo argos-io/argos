@@ -494,6 +494,8 @@ func TestServerDrainResidualsNextCall(t *testing.T) {
 	}()
 
 	// Call 1: send two DATA then END — server only reads one.
+	// Recv must run concurrently with the server's Finish write; otherwise both
+	// sides fill TCP send buffers and deadlock under -race (§2.4c residual case).
 	c1, err := cliSess.OpenCall(context.Background(), method, framing.CallSpec{
 		Metadata: metadata.New(metadata.RoleInitiator, nil),
 	})
@@ -501,9 +503,20 @@ func TestServerDrainResidualsNextCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = c1.Send([]byte("a"))
+	statusDone := make(chan struct{})
+	go func() {
+		defer close(statusDone)
+		_, _, _ = c1.Recv() // status error from early Finish
+		for {
+			_, _, err := c1.Recv()
+			if err != nil {
+				return
+			}
+		}
+	}()
 	_ = c1.Send([]byte("residual"))
 	_ = c1.HalfClose()
-	_, _, _ = c1.Recv() // status error
+	<-statusDone
 	_ = c1.Close()
 	<-acceptDone
 

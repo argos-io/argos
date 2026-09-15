@@ -132,6 +132,7 @@ func (s *session) detachCall(c *call, poison bool) {
 	if s.active == c {
 		s.active = nil
 		s.mode = modeIdle
+		s.lastCallID = c.callID
 		if poison {
 			s.reusable = false
 		}
@@ -199,10 +200,19 @@ func (s *session) recvLoop() {
 
 		switch mode {
 		case modeIdle:
-			// Sequential idle watchdog (§2.6): one Read waits for peer FIN/RST
-			// or unexpected bytes while the session sits between calls. OpenCall/
-			// AcceptCall/Close wake via signal+wakeRead.
-			s.watchIdle()
+			// Sequential idle watchdog (§2.6): client pooled sessions only, and
+			// only after at least one call (lastCallID≠0). Server AcceptCall owns
+			// the next read; birth-time client Reads race OpenCall/AcceptCall.
+			if s.client {
+				s.mu.Lock()
+				armed := s.lastCallID != 0
+				s.mu.Unlock()
+				if armed {
+					s.watchIdle()
+					continue
+				}
+			}
+			<-s.wake
 			continue
 
 		case modeAccepting:
@@ -315,28 +325,16 @@ func (s *session) isClosed() bool {
 	return s.closed
 }
 
-// watchIdle runs one idle-watch iteration on the sole recvLoop reader.
-// Peer EOF → reusable=false; other hard I/O / unexpected bytes → markBad;
-// wakeRead deadlines from OpenCall/AcceptCall/Close → return to re-check mode.
+// watchIdle runs one idle-watch iteration on the sole recvLoop reader (client).
+// Peer EOF/hard I/O → reusable=false / markBad. Unexpected bytes are parked and
+// mark the session not reusable without parsing (avoids racing residual STATUS/END).
 func (s *session) watchIdle() {
 	s.mu.Lock()
-	if s.closed || s.mode != modeIdle {
+	if s.closed || s.mode != modeIdle || !s.client {
 		s.mu.Unlock()
 		return
 	}
 	if len(s.readBuf) > 0 {
-		if s.client {
-			// Leftover bytes with no in-flight call are a protocol violation.
-			s.markBadLocked()
-			car := s.carrier
-			s.mu.Unlock()
-			if car != nil {
-				_ = car.Abort()
-			}
-			s.waitWakeOrClosed()
-			return
-		}
-		// Server: byte parked for the next AcceptCall — wait for mode change.
 		s.mu.Unlock()
 		s.waitWakeOrClosed()
 		return
@@ -348,8 +346,6 @@ func (s *session) watchIdle() {
 	case kindByteStream:
 		s.watchIdleByteStream()
 	default:
-		// Message/Datagram carriers lack a portable deadline wake for Recv*
-		// without spawning a second reader; wait for signal and re-check.
 		select {
 		case <-s.wake:
 		case <-time.After(50 * time.Millisecond):
@@ -363,72 +359,77 @@ func (s *session) watchIdleByteStream() {
 		<-s.wake
 		return
 	}
-	// Block until peer data/FIN/RST or wakeRead from OpenCall/AcceptCall/Close.
-	s.clearReadDeadline()
-	var one [1]byte
-	n, err := bs.Read(one[:])
-
-	s.mu.Lock()
-	closed := s.closed
-	mode := s.mode
-	s.mu.Unlock()
-	if closed {
-		return
-	}
-
-	if isTimeoutErr(err) {
-		// Deadline wake — clear and let recvLoop observe the new mode.
-		s.clearReadDeadline()
-		return
-	}
-
-	if mode != modeIdle {
-		// Mode changed while Read completed: preserve any byte for AcceptCall /
-		// in-call demux; surface hard errors without dropping the transition.
-		if n > 0 {
-			s.mu.Lock()
-			s.readBuf = append([]byte{one[0]}, s.readBuf...)
+	for {
+		s.mu.Lock()
+		if s.closed || s.mode != modeIdle {
 			s.mu.Unlock()
 			return
 		}
-		if err == nil {
+		s.mu.Unlock()
+
+		select {
+		case <-s.wake:
 			return
+		default:
+		}
+
+		s.setReadDeadline(time.Now().Add(50 * time.Millisecond))
+		var one [1]byte
+		n, err := bs.Read(one[:])
+		s.clearReadDeadline()
+
+		s.mu.Lock()
+		closed := s.closed
+		mode := s.mode
+		s.mu.Unlock()
+		if closed {
+			return
+		}
+
+		if isTimeoutErr(err) {
+			if mode != modeIdle {
+				return
+			}
+			continue
+		}
+
+		if mode != modeIdle {
+			if n > 0 {
+				s.mu.Lock()
+				s.readBuf = append([]byte{one[0]}, s.readBuf...)
+				s.mu.Unlock()
+			} else if errors.Is(err, io.EOF) {
+				s.mu.Lock()
+				s.reusable = false
+				s.mu.Unlock()
+			} else if err != nil {
+				s.markBad()
+			}
+			return
+		}
+
+		if n > 0 {
+			// §2.6: unexpected idle traffic → not reusable; park for demux/Close.
+			s.mu.Lock()
+			s.readBuf = append(s.readBuf, one[0])
+			s.reusable = false
+			s.mu.Unlock()
+			s.waitWakeOrClosed()
+			return
+		}
+		if err == nil {
+			continue
 		}
 		if errors.Is(err, io.EOF) {
 			s.mu.Lock()
 			s.reusable = false
 			s.mu.Unlock()
-			return
-		}
-		s.markBad()
-		return
-	}
-
-	if n > 0 {
-		if s.client {
-			// Client pooled idle: peer must not send; protocol violation.
+		} else {
 			s.markBad()
-			s.waitWakeOrClosed()
-			return
 		}
-		// Server between AcceptCalls: park the byte for the next AcceptCall.
-		s.mu.Lock()
-		s.readBuf = append([]byte{one[0]}, s.readBuf...)
-		s.mu.Unlock()
 		s.waitWakeOrClosed()
 		return
 	}
-	if err == nil {
-		return
-	}
-	if errors.Is(err, io.EOF) {
-		s.mu.Lock()
-		s.reusable = false
-		s.mu.Unlock()
-	} else {
-		s.markBad()
-	}
-	s.waitWakeOrClosed()
 }
 
 // waitModeChange blocks until session.mode differs from from, or the session closes.
@@ -1000,6 +1001,7 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 	s.mu.Lock()
 	s.active = c
 	s.mode = modeInCall
+	s.lastCallID = id
 	s.mu.Unlock()
 	s.signal()
 	s.wakeRead() // unblock idle watchdog Read
@@ -1059,7 +1061,6 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 	s.mode = modeAccepting
 	s.mu.Unlock()
 	s.signal()
-	s.wakeRead() // unblock idle watchdog Read
 
 	var res acceptResult
 	select {

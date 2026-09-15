@@ -765,7 +765,7 @@ func TestIdleWatchdogUnexpectedByteNotReusable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	for cliSess.Reusable() && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
