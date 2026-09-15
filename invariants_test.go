@@ -285,52 +285,34 @@ func TestInvariantClientDepsNoProbe(t *testing.T) {
 // transitively depend on gRPC framing, binding, compressor, or genproto.
 func TestInvariantTransitiveEnvelopeTCPNoGRPC(t *testing.T) {
 	t.Parallel()
-	cmd := exec.Command(
-		"go", "list", "-deps",
-		"-f", "{{if not .Standard}}{{.ImportPath}}{{end}}",
-		"./framing/envelope", "./transport/tcp",
-	)
-	cmd.Dir = moduleRoot(t)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("go list -deps envelope+tcp: %v\n%s", err, stderr.String())
-	}
-	forbidden := []string{
-		modulePath + "/framing/grpc",
-		modulePath + "/binding/grpc",
-		modulePath + "/compressor",
-		"google.golang.org/genproto",
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		for _, bad := range forbidden {
-			if line == bad || strings.HasPrefix(line, bad+"/") {
-				t.Errorf("envelope+tcp transitive deps include %q (§3.1-15)", line)
-			}
-		}
-	}
+	assertTransitiveNoGRPC(t, "envelope+tcp", "./framing/envelope", "./transport/tcp")
 }
 
 // TestInvariantTransitiveEnvelopeUDPNoGenproto is Task 4.2:
 // framing/envelope + transport/udp must not pull genproto (same gate as tcp).
 func TestInvariantTransitiveEnvelopeUDPNoGenproto(t *testing.T) {
 	t.Parallel()
-	cmd := exec.Command(
-		"go", "list", "-deps",
-		"-f", "{{if not .Standard}}{{.ImportPath}}{{end}}",
-		"./framing/envelope", "./transport/udp",
-	)
+	assertTransitiveNoGRPC(t, "envelope+udp", "./framing/envelope", "./transport/udp")
+}
+
+// TestInvariantTransitiveWholebodyHTTP1NoGRPC is Task 6.3 / §9-2:
+// wholebody + http1 must not transitively depend on gRPC framing, binding,
+// compressor, or genproto (same neutrality gate as envelope+tcp).
+func TestInvariantTransitiveWholebodyHTTP1NoGRPC(t *testing.T) {
+	t.Parallel()
+	assertTransitiveNoGRPC(t, "wholebody+http1", "./framing/wholebody", "./transport/http1")
+}
+
+func assertTransitiveNoGRPC(t *testing.T, label string, patterns ...string) {
+	t.Helper()
+	args := append([]string{"list", "-deps", "-f", "{{if not .Standard}}{{.ImportPath}}{{end}}"}, patterns...)
+	cmd := exec.Command("go", args...)
 	cmd.Dir = moduleRoot(t)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("go list -deps envelope+udp: %v\n%s", err, stderr.String())
+		t.Fatalf("go list -deps %s: %v\n%s", label, err, stderr.String())
 	}
 	forbidden := []string{
 		modulePath + "/framing/grpc",
@@ -345,7 +327,7 @@ func TestInvariantTransitiveEnvelopeUDPNoGenproto(t *testing.T) {
 		}
 		for _, bad := range forbidden {
 			if line == bad || strings.HasPrefix(line, bad+"/") {
-				t.Errorf("envelope+udp transitive deps include %q (§3.1-15)", line)
+				t.Errorf("%s transitive deps include %q (§3.1-15 / §9-2)", label, line)
 			}
 		}
 	}

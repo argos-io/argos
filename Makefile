@@ -20,16 +20,16 @@ lint:
 	@command -v staticcheck >/dev/null && staticcheck ./... || \
 		echo "staticcheck 未安装，跳过（go install honnef.co/go/tools/cmd/staticcheck@latest）"
 
-# Architecture accept gates (§3 / §3.1): root-package Invariant* (and Accept* if added).
-# v2 has no separate TestAccept; invariants_test.go is the accept suite from Task 1.16.
+# Architecture accept gates (§3 / §3.1 / §9): root Invariant*|Accept*|Section9*.
 accept:
-	go test . -run 'Invariant|Accept' -count=1
+	go test . -run 'Invariant|Accept|Section9' -count=1
 
 # example/echo multi-transport end-to-end (binding + five transports).
 test-integration:
 	go test ./example/echo/ -count=1 -timeout 180s
 
-# Transitive dependency gate (§3.1-15 / §9-2): envelope(+tcp/udp) must not pull gRPC/genproto.
+# Transitive dependency gate (§3.1-15 / §9-2): envelope(+tcp/udp) and
+# wholebody+http1 must not pull gRPC/genproto.
 test-deps:
 	go test . -run Transitive -count=1
 

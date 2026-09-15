@@ -15,6 +15,7 @@ import (
 	"github.com/argos-io/argos/framing/envelope"
 	"github.com/argos-io/argos/internal/fake"
 	"github.com/argos-io/argos/metadata"
+	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport"
 	"github.com/argos-io/argos/transport/udp"
 )
@@ -24,6 +25,79 @@ func TestReuseOneCallPerConnOption(t *testing.T) {
 	f := envelope.New(envelope.WithOneCallPerConn())
 	if f.Reuse() != framing.OneCallPerConn {
 		t.Fatalf("Reuse = %v, want OneCallPerConn", f.Reuse())
+	}
+}
+
+// TestDatagramRejectsNonUnary is Task 6.3 / §9-3: UDP/DatagramCarrier streaming
+// shapes are rejected before Filter/handler (OpenCall + Accept).
+func TestDatagramRejectsNonUnary(t *testing.T) {
+	t.Parallel()
+	cliConn, srvConn := fake.DatagramPipe()
+	defer cliConn.Close()
+	defer srvConn.Close()
+
+	fr := envelope.New(envelope.WithOneCallPerConn())
+	spec := framing.SessionSpec{Config: framing.Config{
+		MaxFrameSize:    udp.MaxDatagramSize,
+		MaxMessageSize:  32 << 10,
+		MaxMetadataSize: 8 << 10,
+	}}
+	cliSess, err := fr.NewClientSession(context.Background(), cliConn, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cliSess.Close()
+	srvSess, err := fr.NewServerSession(context.Background(), srvConn, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srvSess.Close()
+
+	stream := descriptor.MustMethod("echo.v1.EchoService.Watch", descriptor.ServerStreaming)
+	cliMD := metadata.New(metadata.RoleInitiator, nil)
+
+	_, err = cliSess.OpenCall(context.Background(), stream, framing.CallSpec{Metadata: cliMD})
+	if status.CodeOf(err) != status.Unimplemented {
+		t.Fatalf("OpenCall(non-unary) CodeOf=%v err=%v, want Unimplemented", status.CodeOf(err), err)
+	}
+	if !strings.Contains(err.Error(), "DatagramCarrier") {
+		t.Fatalf("OpenCall error %q should mention DatagramCarrier", err)
+	}
+
+	// Server Accept path: unary OPEN reaches AcceptCall, then Accept(stream) fails.
+	unary := descriptor.MustMethod("echo.v1.EchoService.Echo", descriptor.Unary)
+	srvMD := metadata.New(metadata.RoleResponder, nil)
+	acceptErr := make(chan error, 1)
+	go func() {
+		sc, err := srvSess.AcceptCall(context.Background(), framing.CallSpec{Metadata: srvMD})
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		defer sc.Close()
+		acceptErr <- sc.Accept(stream)
+	}()
+
+	okMD := metadata.New(metadata.RoleInitiator, nil)
+	call, err := cliSess.OpenCall(context.Background(), unary, framing.CallSpec{Metadata: okMD})
+	if err != nil {
+		t.Fatalf("OpenCall(unary) after reject: %v", err)
+	}
+	if err := call.HalfClose(); err != nil {
+		t.Fatalf("HalfClose: %v", err)
+	}
+	_ = call.Close()
+
+	select {
+	case err := <-acceptErr:
+		if status.CodeOf(err) != status.Unimplemented {
+			t.Fatalf("Accept(non-unary) CodeOf=%v err=%v, want Unimplemented", status.CodeOf(err), err)
+		}
+		if !strings.Contains(err.Error(), "DatagramCarrier") {
+			t.Fatalf("Accept error %q should mention DatagramCarrier", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for Accept(non-unary)")
 	}
 }
 
