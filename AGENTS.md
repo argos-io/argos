@@ -11,7 +11,7 @@
 | | |
 |---|---|
 | 定位 | **验证可组装模型**，不是生产 RPC 框架 |
-| 阶段 | 里程碑 ⓪✅ → ①✅（tag `milestone-1`）→ ② Envelope → ③–⑦ |
+| 阶段 | 里程碑 ⓪✅ → ①✅（`milestone-1`）→ ②✅（`milestone-2`）→ ③ gRPC → ④–⑦ |
 | 探针 | 已删除（① Task 1.17）；价值转入 `internal/fake` 与正式测试 |
 | 真源 | 代码 + 测试 + 本文件；设计/计划/决策记录不入库（勿建 `docs/`） |
 
@@ -19,7 +19,22 @@
 
 ## 落地执行
 
-规格与步骤级计划在 `README.md` §13。每个任务以可测交付物结束，走 TDD，**一个任务一次提交**（祈使句英文 commit）。当前：里程碑 ⓪✅（`milestone-0`）、①✅（`milestone-1`）；下一步 ② Envelope。
+规格与步骤级计划在 `README.md` §13。每个任务以可测交付物结束，走 TDD，**一个任务一次提交**（祈使句英文 commit）。当前：里程碑 ⓪✅、①✅、②✅（`milestone-2`）；下一步 ③ 完整 gRPC。
+
+**②**（已完成）：2.1∥2.3∥2.4 → 2.2 → 2.4b/c/d → 2.5∥2.6∥2.7；交付 `framing/envelope` + `transport/{tcp,ws}`，传递依赖门禁通过。
+
+**③ 的推荐并行切分**（§13.5）：
+
+```
+3.1 httpstatus ──▶ 3.2 transport/http2 ──▶ 3.3/3.4 framing/grpc ──▶ 3.8 TLS/binding
+3.5 compressor   ─┘         │                      │
+                            └─▶ 3.6 压缩协商 · 3.7 status Detail ─┘
+                                                         ▼
+                                              3.9 grpc-go 双向正式矩阵
+```
+
+- **可并行**：3.1∥3.5；http2 与 compressor 就绪后 3.3–3.7 可交叉。
+- **关键路径**：3.2 → 3.3/3.4 → 3.8 → 3.9。
 
 ### 并行 Subagent 规范
 
