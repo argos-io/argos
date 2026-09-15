@@ -21,6 +21,14 @@ import (
 var (
 	ErrSessionBusy       = errors.New("session busy")
 	ErrSessionsExhausted = errors.New("sessions exhausted")
+	// ErrCallRejected：AcceptCall 专用——本次调用非法但连接仍可用。
+	ErrCallRejected = errors.New("call rejected")
+	// ErrDrainExceeded：残余帧丢弃超过 MaxDrainBytes，连接级错误。
+	ErrDrainExceeded = errors.New("max drain bytes exceeded")
+	// ErrInboundIdle：MaxInboundConnIdle 到期。
+	ErrInboundIdle = errors.New("inbound connection idle timeout")
+	// ErrOpenTimeout：读到首字节后 OpenTimeout 到期。
+	ErrOpenTimeout = errors.New("open timeout")
 )
 
 // resourceExhaustedError 模拟 status.ResourceExhausted 包装本地哨兵。
@@ -194,7 +202,13 @@ func (dummyAddr) String() string  { return "script" }
 // SeqFraming 声明 Sequential 复用；握手可注入。
 type SeqFraming struct {
 	HandshakeTimeout time.Duration
-	// Handshake 若非 nil，在 NewClientSession 的握手子 ctx 上调用。
+	// OpenTimeout：服务端 AcceptCall 从本次调用首字节起算（§2.1 义务 b）。
+	OpenTimeout time.Duration
+	// MaxInboundConnIdle：两次调用之间的空闲上限；必须为正（测试可缩短）。
+	MaxInboundConnIdle time.Duration
+	// MaxDrainBytes：AcceptCall 丢弃已结束调用残余帧的上限。
+	MaxDrainBytes int
+	// Handshake 若非 nil，在 NewClientSession / NewServerSession 的握手子 ctx 上调用。
 	Handshake func(ctx context.Context, c net.Conn) error
 	// Hygiene 为 false 时关闭承载卫生（仅 5b 反证用）。
 	Hygiene bool
@@ -204,8 +218,11 @@ type SeqFraming struct {
 
 func NewSeqFraming() *SeqFraming {
 	return &SeqFraming{
-		HandshakeTimeout: 10 * time.Second,
-		Hygiene:          true,
+		HandshakeTimeout:   10 * time.Second,
+		OpenTimeout:        10 * time.Second,
+		MaxInboundConnIdle: 50 * time.Second,
+		MaxDrainBytes:      1 << 20,
+		Hygiene:            true,
 	}
 }
 
@@ -795,3 +812,473 @@ func StartSeqServer(opt SeqServerOpt) (addr string, closeFn func(), err error) {
 	}
 	return ln.Addr().String(), closeFn, nil
 }
+
+// ---------------------------------------------------------------------------
+// 服务端 envelope-lite：长度前缀 + type + callID + payload（Task 0.14）
+// ---------------------------------------------------------------------------
+
+// seqFrame* 与 udp_test 的 frame* 常量区分（探针包内多协议并存）。
+const (
+	seqFrameOpen   byte = 1
+	seqFrameData   byte = 2
+	seqFrameEnd    byte = 3
+	seqFrameStatus byte = 4
+)
+
+func encodeEnvFrame(typ byte, callID uint32, payload []byte) []byte {
+	body := make([]byte, 1+4+len(payload))
+	body[0] = typ
+	binary.BigEndian.PutUint32(body[1:5], callID)
+	copy(body[5:], payload)
+	return body
+}
+
+func writeEnvFrame(w io.Writer, typ byte, callID uint32, payload []byte) error {
+	return writeFrame(w, encodeEnvFrame(typ, callID, payload))
+}
+
+func parseEnvFrame(raw []byte) (typ byte, callID uint32, payload []byte, err error) {
+	if len(raw) < 5 {
+		return 0, 0, nil, io.ErrUnexpectedEOF
+	}
+	typ = raw[0]
+	callID = binary.BigEndian.Uint32(raw[1:5])
+	payload = raw[5:]
+	return typ, callID, payload, nil
+}
+
+func writeStatusFrame(w io.Writer, callID uint32, code uint32, msg string) error {
+	p := make([]byte, 4+len(msg))
+	binary.BigEndian.PutUint32(p[:4], code)
+	copy(p[4:], msg)
+	return writeEnvFrame(w, seqFrameStatus, callID, p)
+}
+
+func parseStatusPayload(p []byte) (code uint32, msg string, err error) {
+	if len(p) < 4 {
+		return 0, "", io.ErrUnexpectedEOF
+	}
+	return binary.BigEndian.Uint32(p[:4]), string(p[4:]), nil
+}
+
+// ServerSeqSession 是一条顺序复用连接上的服务端会话。
+type ServerSeqSession struct {
+	framing *SeqFraming
+	conn    net.Conn
+
+	connCtx    context.Context
+	connCancel context.CancelFunc
+
+	mu         sync.Mutex
+	buf        []byte
+	closed     bool
+	closeCount int
+	lastCallID uint32 // 上一次已结束调用的 ID，用于有界丢弃
+	needDrain  bool
+}
+
+// NewServerSession 在连接 ctx 下完成握手；HandshakeTimeout 只挂在握手子 ctx。
+func (f *SeqFraming) NewServerSession(parent context.Context, c net.Conn) (*ServerSeqSession, error) {
+	connCtx, connCancel := context.WithCancel(parent)
+	s := &ServerSeqSession{
+		framing:    f,
+		conn:       c,
+		connCtx:    connCtx,
+		connCancel: connCancel,
+	}
+	to := f.HandshakeTimeout
+	if to <= 0 {
+		to = 10 * time.Second
+	}
+	hsCtx, hsCancel := context.WithTimeout(connCtx, to)
+	defer hsCancel()
+	if f.Handshake != nil {
+		if err := f.Handshake(hsCtx, c); err != nil {
+			connCancel()
+			return nil, err
+		}
+	} else {
+		select {
+		case <-hsCtx.Done():
+			connCancel()
+			return nil, hsCtx.Err()
+		default:
+		}
+	}
+	return s, nil
+}
+
+func (s *ServerSeqSession) ConnCtx() context.Context { return s.connCtx }
+
+func (s *ServerSeqSession) CloseCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeCount
+}
+
+func (s *ServerSeqSession) Close() error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	s.closeCount++
+	s.mu.Unlock()
+	s.connCancel()
+	return s.conn.Close()
+}
+
+func (s *ServerSeqSession) openTimeout() time.Duration {
+	if s.framing.OpenTimeout > 0 {
+		return s.framing.OpenTimeout
+	}
+	return 10 * time.Second
+}
+
+func (s *ServerSeqSession) idleTimeout() time.Duration {
+	if s.framing.MaxInboundConnIdle > 0 {
+		return s.framing.MaxInboundConnIdle
+	}
+	return 50 * time.Second
+}
+
+func (s *ServerSeqSession) maxDrain() int {
+	if s.framing.MaxDrainBytes > 0 {
+		return s.framing.MaxDrainBytes
+	}
+	return 1 << 20
+}
+
+// wakeOnCancel 在 ctx 取消时用读 deadline 叫醒阻塞中的 Read（AcceptCall / Shutdown）。
+func (s *ServerSeqSession) wakeOnCancel(ctx context.Context) (stop func()) {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = s.conn.SetReadDeadline(time.Now())
+		case <-done:
+		}
+	}()
+	return func() {
+		close(done)
+		_ = s.conn.SetReadDeadline(time.Time{})
+	}
+}
+
+// readRawFrame 读一帧。
+//   idle>0：无缓冲时先按空闲超时等首字节，见到字节后改用 open；
+//   idle==0 && open>0：整段使用 open；
+//   两者皆 0：无超时，仅受 ctx 取消叫醒（在途调用 Recv）。
+// acceptCancelAsEOF：ctx 取消映射为 io.EOF（AcceptCall / Shutdown）；否则返回 ctx.Err()。
+func (s *ServerSeqSession) readRawFrame(ctx context.Context, idle, open time.Duration, acceptCancelAsEOF bool) (raw []byte, err error) {
+	stop := s.wakeOnCancel(ctx)
+	defer stop()
+
+	s.mu.Lock()
+	buf := s.buf
+	s.buf = nil
+	conn := s.conn
+	s.mu.Unlock()
+
+	waitingFirst := idle > 0 && len(buf) == 0
+	if waitingFirst {
+		_ = conn.SetReadDeadline(time.Now().Add(idle))
+	} else if open > 0 {
+		_ = conn.SetReadDeadline(time.Now().Add(open))
+	} else {
+		_ = conn.SetReadDeadline(time.Time{})
+	}
+
+	sawNetwork := false
+	need := func(n int) error {
+		for len(buf) < n {
+			tmp := make([]byte, 4096)
+			nr, e := conn.Read(tmp)
+			if nr > 0 {
+				sawNetwork = true
+				if waitingFirst {
+					waitingFirst = false
+					if open > 0 {
+						_ = conn.SetReadDeadline(time.Now().Add(open))
+					} else {
+						_ = conn.SetReadDeadline(time.Time{})
+					}
+				}
+				buf = append(buf, tmp[:nr]...)
+			}
+			if e != nil {
+				if len(buf) >= n {
+					return nil
+				}
+				if ctx.Err() != nil {
+					if acceptCancelAsEOF {
+						return io.EOF
+					}
+					return ctx.Err()
+				}
+				if ne, ok := e.(net.Error); ok && ne.Timeout() {
+					if idle > 0 && !sawNetwork && len(buf) == 0 {
+						return ErrInboundIdle
+					}
+					if open > 0 {
+						return ErrOpenTimeout
+					}
+					return e
+				}
+				if e == io.EOF && len(buf) == 0 {
+					return io.EOF
+				}
+				if e == io.EOF {
+					return io.ErrUnexpectedEOF
+				}
+				return e
+			}
+		}
+		return nil
+	}
+
+	if err := need(4); err != nil {
+		s.mu.Lock()
+		s.buf = buf
+		s.mu.Unlock()
+		return nil, err
+	}
+	n := int(binary.BigEndian.Uint32(buf[:4]))
+	buf = buf[4:]
+	if err := need(n); err != nil {
+		hdr := make([]byte, 4)
+		binary.BigEndian.PutUint32(hdr, uint32(n))
+		s.mu.Lock()
+		s.buf = append(hdr, buf...)
+		s.mu.Unlock()
+		return nil, err
+	}
+	raw = make([]byte, n)
+	copy(raw, buf[:n])
+	rest := buf[n:]
+	s.mu.Lock()
+	if len(rest) > 0 {
+		cp := make([]byte, len(rest))
+		copy(cp, rest)
+		s.buf = cp
+	} else {
+		s.buf = nil
+	}
+	s.mu.Unlock()
+	_ = conn.SetReadDeadline(time.Time{})
+	return raw, nil
+}
+
+// AcceptCall 取下一个调用。acceptCtx 取消 → io.EOF（优雅关闭叫醒）。
+func (s *ServerSeqSession) AcceptCall(acceptCtx context.Context) (*ServerSeqCall, error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, io.EOF
+	}
+	drainID := s.lastCallID
+	needDrain := s.needDrain
+	s.mu.Unlock()
+
+	drained := 0
+	idle := s.idleTimeout()
+	open := s.openTimeout()
+	seenByte := false
+
+	for {
+		if err := acceptCtx.Err(); err != nil {
+			return nil, io.EOF
+		}
+		var (
+			raw []byte
+			err error
+		)
+		if !seenByte {
+			raw, err = s.readRawFrame(acceptCtx, idle, open, true)
+		} else {
+			raw, err = s.readRawFrame(acceptCtx, 0, open, true)
+		}
+		if err != nil {
+			return nil, err
+		}
+		seenByte = true
+
+		typ, callID, payload, err := parseEnvFrame(raw)
+		if err != nil {
+			return nil, err
+		}
+
+		if needDrain && callID == drainID {
+			frameBytes := 4 + len(raw)
+			drained += frameBytes
+			if drained > s.maxDrain() {
+				return nil, ErrDrainExceeded
+			}
+			continue
+		}
+
+		if typ != seqFrameOpen {
+			return nil, fmt.Errorf("expected OPEN, got type=%d callID=%d", typ, callID)
+		}
+
+		s.mu.Lock()
+		s.needDrain = false
+		s.lastCallID = callID
+		s.mu.Unlock()
+
+		return &ServerSeqCall{
+			sess:   s,
+			callID: callID,
+			method: string(payload),
+		}, nil
+	}
+}
+
+// ServerSeqCall 一次入站调用（顺序 Recv，无独立读 goroutine，避免吃掉残余帧）。
+type ServerSeqCall struct {
+	sess   *ServerSeqSession
+	callID uint32
+	method string
+
+	mu       sync.Mutex
+	finished bool
+	closed   bool
+	sawEnd   bool
+}
+
+func (c *ServerSeqCall) Method() string { return c.method }
+func (c *ServerSeqCall) CallID() uint32 { return c.callID }
+
+// Recv 读一条 DATA；END → io.EOF。在途调用不受 OpenTimeout / Idle 约束。
+func (c *ServerSeqCall) Recv(ctx context.Context) ([]byte, error) {
+	c.mu.Lock()
+	if c.closed || c.sawEnd {
+		c.mu.Unlock()
+		return nil, io.EOF
+	}
+	c.mu.Unlock()
+
+	raw, err := c.sess.readRawFrame(ctx, 0, 0, false)
+	if err != nil {
+		return nil, err
+	}
+	typ, callID, payload, err := parseEnvFrame(raw)
+	if err != nil {
+		return nil, err
+	}
+	if callID != c.callID {
+		// 下一调用帧：写回 Session，本调用视为结束。
+		c.sess.mu.Lock()
+		frame := make([]byte, 4+len(raw))
+		binary.BigEndian.PutUint32(frame[:4], uint32(len(raw)))
+		copy(frame[4:], raw)
+		c.sess.buf = append(frame, c.sess.buf...)
+		c.sess.mu.Unlock()
+		c.mu.Lock()
+		c.sawEnd = true
+		c.mu.Unlock()
+		return nil, io.EOF
+	}
+	switch typ {
+	case seqFrameData:
+		return payload, nil
+	case seqFrameEnd:
+		c.mu.Lock()
+		c.sawEnd = true
+		c.mu.Unlock()
+		return nil, io.EOF
+	default:
+		return nil, fmt.Errorf("unexpected frame type %d in call", typ)
+	}
+}
+
+// Finish 写 STATUS 结束响应方向。
+func (c *ServerSeqCall) Finish(err error) error {
+	c.mu.Lock()
+	if c.finished {
+		c.mu.Unlock()
+		return nil
+	}
+	c.finished = true
+	c.mu.Unlock()
+
+	code := uint32(0)
+	msg := ""
+	if err != nil {
+		code = 2 // Unknown（探针用）；对端用非零判定失败
+		msg = err.Error()
+	}
+	return writeStatusFrame(c.sess.conn, c.callID, code, msg)
+}
+
+// Close 结束本次调用；标记需排空残余帧。不关闭 Conn。
+func (c *ServerSeqCall) Close() error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil
+	}
+	c.closed = true
+	c.mu.Unlock()
+
+	c.sess.mu.Lock()
+	c.sess.lastCallID = c.callID
+	c.sess.needDrain = true
+	c.sess.mu.Unlock()
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 组合层 onConn 骨架（探针）：握手 → AcceptCall 循环 → Session.Close 恰好一次
+// ---------------------------------------------------------------------------
+
+// AcceptLoopStats 供测试断言。
+type AcceptLoopStats struct {
+	OnConnID      atomic.Uint64
+	HandlerCount  atomic.Int64
+	HandlerOnConn atomic.Uint64 // 所有 handler 看到的 onConn 世代
+	SessionCloses atomic.Int64
+	HandshakeFail atomic.Int64
+}
+
+// RunAcceptLoop 模拟 server.onConn：acceptCtx 取消只停止接受，不影响在途调用 ctx。
+func RunAcceptLoop(
+	connCtx context.Context,
+	acceptCtx context.Context,
+	f *SeqFraming,
+	c net.Conn,
+	stats *AcceptLoopStats,
+	handler func(ctx context.Context, call *ServerSeqCall) error,
+) {
+	id := stats.OnConnID.Add(1)
+	sess, err := f.NewServerSession(connCtx, c)
+	if err != nil {
+		stats.HandshakeFail.Add(1)
+		_ = c.Close()
+		return
+	}
+	defer func() {
+		_ = sess.Close()
+		stats.SessionCloses.Add(1)
+	}()
+
+	for {
+		call, err := sess.AcceptCall(acceptCtx)
+		if err != nil {
+			if errors.Is(err, ErrCallRejected) {
+				continue
+			}
+			return
+		}
+		stats.HandlerCount.Add(1)
+		stats.HandlerOnConn.Store(id)
+
+		callCtx, cancel := context.WithCancel(connCtx)
+		herr := handler(callCtx, call)
+		_ = call.Finish(herr)
+		_ = call.Close()
+		cancel()
+	}
+}
+
