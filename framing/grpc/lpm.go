@@ -53,6 +53,8 @@ func ReadLPMLimited(r io.Reader, maxLen int64) (compressed bool, payload []byte,
 	}
 	n := binary.BigEndian.Uint32(hdr[1:])
 	if maxLen > 0 && int64(n) > maxLen {
+		// Drain the claimed payload without allocating it so the peer Send can finish.
+		_, _ = io.Copy(io.Discard, io.LimitReader(r, int64(n)))
 		return false, nil, status.Error(status.ResourceExhausted,
 			fmt.Sprintf("framing/grpc: LPM length %d > max %d", n, maxLen))
 	}

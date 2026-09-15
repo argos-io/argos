@@ -520,6 +520,11 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 			c.mu.Unlock()
 			return nil, nil, io.EOF
 		}
+		// Call-scoped size limits must not Abort the Carrier: the peer may still
+		// be writing the oversize body, and Concurrent streams share a Conn.
+		if status.CodeOf(err) == status.ResourceExhausted {
+			return nil, nil, err
+		}
 		// Non-gRPC HTTP error bodies are not LPM. Before any message, drain and
 		// resolve via trailers / HTTP fallback instead of surfacing a parse error.
 		if c.initiator {
@@ -553,12 +558,13 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 		}
 		decoded, derr := decompressMessage(comp, data, c.maxMsg)
 		if derr != nil {
-			c.markBad()
+			if status.CodeOf(derr) != status.ResourceExhausted {
+				c.markBad()
+			}
 			return nil, nil, derr
 		}
 		data = decoded
 	} else if c.maxMsg > 0 && int64(len(data)) > c.maxMsg {
-		c.markBad()
 		return nil, nil, status.Error(status.ResourceExhausted,
 			fmt.Sprintf("framing/grpc: Recv payload %d > max %d", len(data), c.maxMsg))
 	}
