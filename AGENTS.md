@@ -23,9 +23,9 @@
 
 **⑥**（已完成）：`make verify` = lint + test + test-race + accept + test-generate + test-integration + test-deps；目录表已对齐；**Task 6.3** 全量 §9 核对见根包 `section9_test.go`（`TestSection9Checklist` / `TestSection9VerifyGate`）。
 
-**⑦**（已完成）：`example/resp`（含 SUBSCRIBE）、`example/synth`、零核心接口改动证据、组合层源码扫描、连接抖动负载记录（§6.1 ⚠️ 默认值仍为占位，见 `example/resp/LOAD.md`）。
+**⑦**（已完成）：`example/resp`（含 SUBSCRIBE）、`example/synth`、零核心接口改动证据、组合层源码扫描；**Task 7.5** 已用突发→空闲→再突发压测确认 §6.1 六个连接级默认值（数值未改，⚠️ 已清除；证据见 `example/resp/LOAD.md`）。
 
-后续可选：用 7.5 数据回写 §6.1 确认默认值；补全 §9 未覆盖细格（TLS×全形态×17 码等；见 `section9_test.go` soft-gap 注释）。
+§13 计划验收细项（6.3 / 3.9 矩阵扩展 / 7.5）已补齐；仅剩有意保留的 soft-gap（如 fuzz 单独跑、部分 framing 级断言不在 interop 重复）。
 
 ### 并行 Subagent 规范
 
@@ -112,7 +112,7 @@ make test-deps         # 传递依赖门禁（Transitive*）
 make verify            # §13.1 全集：上列全部
 ```
 
-提交前：`make verify` 全绿。§6.1 标 ⚠️ 的连接级默认值在任务 7.5 前不得当确认值引用。
+提交前：`make verify` 全绿。§6.1 六个连接级默认值已由任务 7.5 确认（见 `example/resp/LOAD.md`）。
 
 本机若 `go` 与 `GOROOT` 版本不一致（gvm），先 `export GOROOT=/data/root/.gvm/1.27.1/go` 且 `PATH` 含 `$GOROOT/bin`。
 
