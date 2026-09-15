@@ -107,6 +107,9 @@ func (t *testTransport) Shutdown(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
+		// Composition layer cancels conn ctx on deadline; still wait for onConn
+		// so Shutdown's contract ("connection done == onConn returned") holds.
+		<-done
 		return ctx.Err()
 	}
 }
@@ -438,8 +441,10 @@ func TestShutdownIdleConnExitsQuickly(t *testing.T) {
 		t.Fatalf("Shutdown: %v", err)
 	}
 	elapsed := time.Since(start)
-	if elapsed > 100*time.Millisecond {
-		t.Fatalf("idle Shutdown took %v; want < 100ms", elapsed)
+	// Keep-alive AcceptCall must wake on accept-ctx cancel, not wait for the
+	// Shutdown deadline (2s here). Allow a little scheduler slack.
+	if elapsed > 50*time.Millisecond {
+		t.Fatalf("idle Shutdown took %v; want < 50ms (accept ctx wake)", elapsed)
 	}
 }
 
