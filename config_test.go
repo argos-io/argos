@@ -93,6 +93,74 @@ func TestReadAheadMessagesMustBeAtLeastOne(t *testing.T) {
 	}
 }
 
+func TestZeroMaxInboundConnIdleRejected(t *testing.T) {
+	_, err := argos.New(argos.WithMaxInboundConnIdle(0))
+	if err == nil {
+		t.Fatal("want error for MaxInboundConnIdle=0")
+	}
+	if !strings.Contains(err.Error(), "MaxInboundConnIdle") {
+		t.Fatalf("error %q should mention MaxInboundConnIdle", err)
+	}
+}
+
+func TestZeroMaxInboundConnAgeRejected(t *testing.T) {
+	_, err := argos.New(argos.WithMaxInboundConnAge(0))
+	if err == nil {
+		t.Fatal("want error for MaxInboundConnAge=0")
+	}
+	if !strings.Contains(err.Error(), "MaxInboundConnAge") {
+		t.Fatalf("error %q should mention MaxInboundConnAge", err)
+	}
+}
+
+func TestAllowedZeroClientSessionLimits(t *testing.T) {
+	cfg, err := argos.New(
+		argos.WithMaxIdleSessions(0),
+		argos.WithSessionIdleTimeout(0),
+		argos.WithMaxSessionLifetime(0),
+	)
+	if err != nil {
+		t.Fatalf("New with allowed zeros: %v", err)
+	}
+	if cfg.MaxIdleSessions != 0 || cfg.SessionIdleTimeout != 0 || cfg.MaxSessionLifetime != 0 {
+		t.Fatalf("zeros not stored: idle=%d sessionIdle=%v lifetime=%v",
+			cfg.MaxIdleSessions, cfg.SessionIdleTimeout, cfg.MaxSessionLifetime)
+	}
+}
+
+// sideOwnershipDoc is a test helper documenting §6: client-only and
+// server-only fields share one Config; New does not reject the mix.
+func sideOwnershipDoc(t *testing.T) *argos.Config {
+	t.Helper()
+	cfg, err := argos.New(
+		// client-only
+		argos.WithMaxSessionsPerEndpoint(16),
+		argos.WithMaxIdleSessions(0),
+		argos.WithSessionIdleTimeout(0),
+		argos.WithMaxSessionLifetime(0),
+		// server-only
+		argos.WithMaxInboundConns(32),
+		argos.WithMaxInboundConnIdle(time.Minute),
+		argos.WithMaxInboundConnAge(time.Hour),
+		argos.WithOpenTimeout(5*time.Second),
+		argos.WithMaxDrainBytes(1<<20),
+	)
+	if err != nil {
+		t.Fatalf("mixed side options must be accepted by New: %v", err)
+	}
+	return cfg
+}
+
+func TestSideOwnershipCoexistsOnOneConfig(t *testing.T) {
+	cfg := sideOwnershipDoc(t)
+	if cfg.MaxSessionsPerEndpoint != 16 {
+		t.Errorf("MaxSessionsPerEndpoint = %d", cfg.MaxSessionsPerEndpoint)
+	}
+	if cfg.MaxInboundConns != 32 {
+		t.Errorf("MaxInboundConns = %d", cfg.MaxInboundConns)
+	}
+}
+
 func TestBudgetProductConflict(t *testing.T) {
 	_, err := argos.New(
 		argos.WithMaxConcurrentCalls(64),

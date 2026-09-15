@@ -1,9 +1,14 @@
 package argos
 
-import "time"
+import (
+	"time"
 
-// Option configures a Config during New. The apply method is unexported so
-// the set is sealed; options take effect only inside New.
+	"github.com/argos-io/argos/filter"
+)
+
+// Option configures a Config during New or Config.With. The apply method is
+// unexported so the set is sealed; options take effect only inside those
+// constructors.
 type Option interface {
 	apply(*Config)
 }
@@ -15,6 +20,51 @@ func (f optionFunc) apply(c *Config) { f(c) }
 // WithBinding stores a BindingFunc. The factory is not invoked by New.
 func WithBinding(fn BindingFunc) Option {
 	return optionFunc(func(c *Config) { c.Binding = fn })
+}
+
+// WithFilter appends a server-side Filter (outermost first when chained later).
+func WithFilter(f filter.Filter) Option {
+	return optionFunc(func(c *Config) {
+		c.Filters = append(c.Filters, f)
+	})
+}
+
+// WithOpenFilter appends a client-side OpenFilter (outermost first when chained later).
+func WithOpenFilter(f filter.OpenFilter) Option {
+	return optionFunc(func(c *Config) {
+		c.OpenFilters = append(c.OpenFilters, f)
+	})
+}
+
+// WithService stores or merges per-service overrides under fullName (IDL full name).
+func WithService(fullName string, opts ...ServiceOption) Option {
+	return optionFunc(func(c *Config) {
+		if c.Services == nil {
+			c.Services = make(map[string]ServiceConfig)
+		}
+		sc := c.Services[fullName]
+		for _, o := range opts {
+			if o != nil {
+				o.applyService(&sc)
+			}
+		}
+		c.Services[fullName] = sc
+	})
+}
+
+// WithCallErrorObserver sets the per-call local transport error observer (§7.5).
+// Nil clears the observer (no-op).
+func WithCallErrorObserver(fn func(CallInfo, error)) Option {
+	return optionFunc(func(c *Config) { c.callErrorObserver = fn })
+}
+
+// WithConnErrorObserver sets the connection-level error observer (§7.5).
+// Nil clears the observer (no-op).
+//
+// Reported errors must not make Transport.Serve return (§3.1-22); that
+// contract is enforced by server, not by this Option.
+func WithConnErrorObserver(fn func(ConnInfo, error)) Option {
+	return optionFunc(func(c *Config) { c.connErrorObserver = fn })
 }
 
 // WithMaxFrameSize sets the single on-wire frame/body limit.

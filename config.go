@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/argos-io/argos/filter"
 )
 
 const (
@@ -18,34 +20,48 @@ const (
 // are applied only during New, and later Option instances cannot reach this
 // value. Treat the returned *Config as read-only.
 //
+// Side ownership (§6): client-only and server-only fields coexist on one
+// Config. New validates field values only; it does not reject mixing sides.
+// client.New / server.New later ignore options that do not apply to that side.
+//
 // Provisional (§6.1 ⚠️) fields: MaxIdleSessions, SessionIdleTimeout,
 // MaxSessionLifetime, MaxInboundConns, MaxInboundConnIdle, MaxInboundConnAge.
 type Config struct {
 	// Call-dimension limits.
-	MaxFrameSize        int64
-	MaxMessageSize      int64
-	MaxMetadataSize     int64
-	MaxHeaderBytes      int64
-	ReadAheadMessages   int
-	MaxConcurrentCalls  int
-	MaxBufferedBytes    int64
-	OpenTimeout         time.Duration
+	MaxFrameSize       int64
+	MaxMessageSize     int64
+	MaxMetadataSize    int64
+	MaxHeaderBytes     int64
+	ReadAheadMessages  int
+	MaxConcurrentCalls int
+	MaxBufferedBytes   int64
+	OpenTimeout        time.Duration
 
 	// Connection-dimension limits.
 	HandshakeTimeout       time.Duration
 	MaxDrainBytes          int64
 	ConnReadBufferSize     int64
 	MaxSessionsPerEndpoint int
-	MaxIdleSessions        int           // provisional ⚠️
-	SessionIdleTimeout     time.Duration // provisional ⚠️; 0 disables
-	MaxSessionLifetime      time.Duration // provisional ⚠️; 0 disables
-	MaxInboundConns        int           // provisional ⚠️
-	MaxInboundConnIdle     time.Duration // provisional ⚠️; must be > 0
-	MaxInboundConnAge      time.Duration // provisional ⚠️; must be > 0
+	MaxIdleSessions        int           // provisional ⚠️; client-only
+	SessionIdleTimeout     time.Duration // provisional ⚠️; client-only; 0 disables
+	MaxSessionLifetime      time.Duration // provisional ⚠️; client-only; 0 disables
+	MaxInboundConns        int           // provisional ⚠️; server-only
+	MaxInboundConnIdle     time.Duration // provisional ⚠️; server-only; must be > 0
+	MaxInboundConnAge      time.Duration // provisional ⚠️; server-only; must be > 0
 
 	// Binding is the optional factory stored by WithBinding.
 	// Nil is allowed until a Client/Server path requires it.
 	Binding BindingFunc
+
+	// Filters are server-side Filter chain entries (WithFilter).
+	Filters []filter.Filter
+	// OpenFilters are client-side OpenFilter chain entries (WithOpenFilter).
+	OpenFilters []filter.OpenFilter
+	// Services holds per-service Binding/Target overrides (WithService).
+	Services map[string]ServiceConfig
+
+	callErrorObserver func(CallInfo, error)
+	connErrorObserver func(ConnInfo, error)
 }
 
 // New builds a Config from defaults, applies opts once, validates, and
@@ -61,8 +77,44 @@ func New(opts ...Option) (*Config, error) {
 	if err := c.validate(); err != nil {
 		return nil, err
 	}
-	out := c
+	out := cloneConfig(c)
 	return &out, nil
+}
+
+// With derives a new immutable Config from c without mutating c.
+func (c *Config) With(opts ...Option) (*Config, error) {
+	if c == nil {
+		return nil, fmt.Errorf("argos: nil Config")
+	}
+	base := cloneConfig(*c)
+	for _, opt := range opts {
+		if opt == nil {
+			return nil, fmt.Errorf("argos: nil Option")
+		}
+		opt.apply(&base)
+	}
+	if err := base.validate(); err != nil {
+		return nil, err
+	}
+	out := cloneConfig(base)
+	return &out, nil
+}
+
+func cloneConfig(c Config) Config {
+	out := c
+	if c.Filters != nil {
+		out.Filters = append([]filter.Filter(nil), c.Filters...)
+	}
+	if c.OpenFilters != nil {
+		out.OpenFilters = append([]filter.OpenFilter(nil), c.OpenFilters...)
+	}
+	if c.Services != nil {
+		out.Services = make(map[string]ServiceConfig, len(c.Services))
+		for k, v := range c.Services {
+			out.Services[k] = v
+		}
+	}
+	return out
 }
 
 func defaults() Config {
