@@ -24,6 +24,7 @@ import (
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/stream"
 	argoshttp2 "github.com/argos-io/argos/transport/http2"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -31,6 +32,7 @@ import (
 	grpcgzip "google.golang.org/grpc/encoding/gzip"
 	grpcmd "google.golang.org/grpc/metadata"
 	grpcstatus "google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	_ "github.com/argos-io/argos/resolver/ip"
 )
@@ -162,6 +164,7 @@ func parseForcedCode(v string) (status.Code, bool) {
 type grpcGoEcho struct {
 	testpb.UnimplementedEchoServer
 	forceTrailersOnly bool
+	forceDetails      bool
 	sawDeadline       chan<- time.Duration
 	lastBin           chan<- []byte
 }
@@ -183,6 +186,14 @@ func (s *grpcGoEcho) Unary(ctx context.Context, req *testpb.EchoMessage) (*testp
 	_ = grpc.SetTrailer(ctx, grpcmd.Pairs("x-grpcgo-trl", "trl-v"))
 	if s.forceTrailersOnly {
 		return nil, grpcstatus.Error(codes.NotFound, "trailers-only")
+	}
+	if s.forceDetails {
+		st := grpcstatus.New(codes.FailedPrecondition, "from details proto")
+		st, err := st.WithDetails(&errdetails.ErrorInfo{Reason: "ARGOS", Domain: "interop"})
+		if err != nil {
+			return nil, err
+		}
+		return nil, st.Err()
 	}
 	if code, ok := parseForcedCode(req.GetValue()); ok {
 		if code == status.OK {
@@ -457,234 +468,250 @@ func argosBidiCall(t *testing.T, cli *client.Client, payloads ...string) ([]stri
 	return out, nil
 }
 
-// --- OK matrix: 4 shapes × both directions on h2c ---
-
-func TestInteropOK_H2C_Shapes(t *testing.T) {
-
-	t.Run("argos_server_grpcgo_client", func(t *testing.T) {
-		as := startArgosEchoServer(t, nil)
-		cc := dialGRPCGo(t, as.addr, nil)
-		cli := testpb.NewEchoClient(cc)
-
-		t.Run("unary", func(t *testing.T) {
-			rsp, err := cli.Unary(context.Background(), &testpb.EchoMessage{Value: "u"})
-			if err != nil {
-				t.Fatalf("Unary: %v", err)
-			}
-			if rsp.GetValue() != "echo:u" {
-				t.Fatalf("got %q", rsp.GetValue())
-			}
-		})
-		t.Run("client_stream", func(t *testing.T) {
-			st, err := cli.ClientStream(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, v := range []string{"a", "b", "c"} {
-				if err := st.Send(&testpb.EchoMessage{Value: v}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			rsp, err := st.CloseAndRecv()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if rsp.GetValue() != "echo:c" {
-				t.Fatalf("got %q", rsp.GetValue())
-			}
-		})
-		t.Run("server_stream", func(t *testing.T) {
-			st, err := cli.ServerStream(context.Background(), &testpb.EchoMessage{Value: "s"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			var got []string
-			for {
-				m, err := st.Recv()
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				if err != nil {
-					t.Fatal(err)
-				}
-				got = append(got, m.GetValue())
-			}
-			want := []string{"s-0", "s-1", "s-2"}
-			if strings.Join(got, ",") != strings.Join(want, ",") {
-				t.Fatalf("got %v want %v", got, want)
-			}
-		})
-		t.Run("bidi", func(t *testing.T) {
-			st, err := cli.Bidi(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, v := range []string{"x", "y"} {
-				if err := st.Send(&testpb.EchoMessage{Value: v}); err != nil {
-					t.Fatal(err)
-				}
-				m, err := st.Recv()
-				if err != nil {
-					t.Fatal(err)
-				}
-				if m.GetValue() != "echo:"+v {
-					t.Fatalf("got %q", m.GetValue())
-				}
-			}
-			if err := st.CloseSend(); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := st.Recv(); !errors.Is(err, io.EOF) {
-				t.Fatalf("final Recv = %v, want EOF", err)
-			}
-		})
-	})
-
-	t.Run("argos_client_grpcgo_server", func(t *testing.T) {
-		addr := startGRPCGoEchoServer(t, nil, &grpcGoEcho{})
-		cli := newArgosClient(t, addr, nil)
-
-		t.Run("unary", func(t *testing.T) {
-			got, _, _, err := argosUnaryCall(t, cli, "u")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != "echo:u" {
-				t.Fatalf("got %q", got)
-			}
-		})
-		t.Run("client_stream", func(t *testing.T) {
-			got, err := argosClientStreamCall(t, cli, "a", "b", "c")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got != "echo:c" {
-				t.Fatalf("got %q", got)
-			}
-		})
-		t.Run("server_stream", func(t *testing.T) {
-			got, err := argosServerStreamCall(t, cli, "s")
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := []string{"s-0", "s-1", "s-2"}
-			if strings.Join(got, ",") != strings.Join(want, ",") {
-				t.Fatalf("got %v want %v", got, want)
-			}
-		})
-		t.Run("bidi", func(t *testing.T) {
-			got, err := argosBidiCall(t, cli, "x", "y")
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := []string{"echo:x", "echo:y"}
-			if strings.Join(got, ",") != strings.Join(want, ",") {
-				t.Fatalf("got %v want %v", got, want)
-			}
-		})
-	})
+// interopTransport is one cell of the §9-6 transport axis (h2c or TLS/ALPN).
+// Subtests sharing a listener are sequential; do not t.Parallel() siblings
+// that dial the same server.
+type interopTransport struct {
+	name   string
+	srvTLS *tls.Config // nil → h2c
+	cliTLS *tls.Config
 }
 
-// --- TLS unary both directions ---
-
-func TestInteropOK_TLS_Unary(t *testing.T) {
+func interopTransports(t *testing.T) []interopTransport {
+	t.Helper()
 	srvTLS, cliTLS := selfSigned(t)
+	return []interopTransport{
+		{name: "h2c"},
+		{name: "tls", srvTLS: srvTLS, cliTLS: cliTLS},
+	}
+}
 
-	t.Run("argos_server_grpcgo_client", func(t *testing.T) {
-		as := startArgosEchoServer(t, []grpcbinding.Option{grpcbinding.WithServerTLS(srvTLS)})
-		cc := dialGRPCGo(t, as.addr, cliTLS)
-		rsp, err := testpb.NewEchoClient(cc).Unary(context.Background(), &testpb.EchoMessage{Value: "tls"})
+func (tr interopTransport) argosServerOpts() []grpcbinding.Option {
+	if tr.srvTLS == nil {
+		return nil
+	}
+	return []grpcbinding.Option{grpcbinding.WithServerTLS(tr.srvTLS)}
+}
+
+func (tr interopTransport) argosClientOpts() []grpcbinding.Option {
+	if tr.cliTLS == nil {
+		return nil
+	}
+	return []grpcbinding.Option{
+		grpcbinding.WithClientTLS(tr.cliTLS),
+		grpcbinding.WithAuthority("127.0.0.1"),
+	}
+}
+
+func assertGRPCGoClientShapes(t *testing.T, cli testpb.EchoClient) {
+	t.Helper()
+	t.Run("unary", func(t *testing.T) {
+		rsp, err := cli.Unary(context.Background(), &testpb.EchoMessage{Value: "u"})
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("Unary: %v", err)
 		}
-		if rsp.GetValue() != "echo:tls" {
+		if rsp.GetValue() != "echo:u" {
 			t.Fatalf("got %q", rsp.GetValue())
 		}
 	})
-
-	t.Run("argos_client_grpcgo_server", func(t *testing.T) {
-		addr := startGRPCGoEchoServer(t, srvTLS, &grpcGoEcho{})
-		cli := newArgosClient(t, addr, []grpcbinding.Option{
-			grpcbinding.WithClientTLS(cliTLS),
-			grpcbinding.WithAuthority("127.0.0.1"),
-		})
-		got, _, _, err := argosUnaryCall(t, cli, "tls")
+	t.Run("client_stream", func(t *testing.T) {
+		st, err := cli.ClientStream(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got != "echo:tls" {
-			t.Fatalf("got %q", got)
+		for _, v := range []string{"a", "b", "c"} {
+			if err := st.Send(&testpb.EchoMessage{Value: v}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		rsp, err := st.CloseAndRecv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rsp.GetValue() != "echo:c" {
+			t.Fatalf("got %q", rsp.GetValue())
+		}
+	})
+	t.Run("server_stream", func(t *testing.T) {
+		st, err := cli.ServerStream(context.Background(), &testpb.EchoMessage{Value: "s"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for {
+			m, err := st.Recv()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, m.GetValue())
+		}
+		want := []string{"s-0", "s-1", "s-2"}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	})
+	t.Run("bidi", func(t *testing.T) {
+		st, err := cli.Bidi(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range []string{"x", "y"} {
+			if err := st.Send(&testpb.EchoMessage{Value: v}); err != nil {
+				t.Fatal(err)
+			}
+			m, err := st.Recv()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if m.GetValue() != "echo:"+v {
+				t.Fatalf("got %q", m.GetValue())
+			}
+		}
+		if err := st.CloseSend(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.Recv(); !errors.Is(err, io.EOF) {
+			t.Fatalf("final Recv = %v, want EOF", err)
 		}
 	})
 }
 
-// --- 17 status codes × both directions (h2c unary) ---
+func assertArgosClientShapes(t *testing.T, cli *client.Client) {
+	t.Helper()
+	t.Run("unary", func(t *testing.T) {
+		got, _, _, err := argosUnaryCall(t, cli, "u")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "echo:u" {
+			t.Fatalf("got %q", got)
+		}
+	})
+	t.Run("client_stream", func(t *testing.T) {
+		got, err := argosClientStreamCall(t, cli, "a", "b", "c")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "echo:c" {
+			t.Fatalf("got %q", got)
+		}
+	})
+	t.Run("server_stream", func(t *testing.T) {
+		got, err := argosServerStreamCall(t, cli, "s")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"s-0", "s-1", "s-2"}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	})
+	t.Run("bidi", func(t *testing.T) {
+		got, err := argosBidiCall(t, cli, "x", "y")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"echo:x", "echo:y"}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	})
+}
 
-func TestInteropStatusCodes_H2C_Unary(t *testing.T) {
+// --- OK matrix: 4 shapes × both directions × h2c/TLS ---
 
+func TestInteropOK_Shapes(t *testing.T) {
+	for _, tr := range interopTransports(t) {
+		tr := tr
+		t.Run(tr.name, func(t *testing.T) {
+			t.Run("argos_server_grpcgo_client", func(t *testing.T) {
+				as := startArgosEchoServer(t, tr.argosServerOpts())
+				cc := dialGRPCGo(t, as.addr, tr.cliTLS)
+				assertGRPCGoClientShapes(t, testpb.NewEchoClient(cc))
+			})
+			t.Run("argos_client_grpcgo_server", func(t *testing.T) {
+				addr := startGRPCGoEchoServer(t, tr.srvTLS, &grpcGoEcho{})
+				cli := newArgosClient(t, addr, tr.argosClientOpts())
+				assertArgosClientShapes(t, cli)
+			})
+		})
+	}
+}
+
+// --- 17 status codes × both directions × h2c/TLS (unary) ---
+
+func TestInteropStatusCodes_Unary(t *testing.T) {
 	codesTable := make([]status.Code, 17)
 	for i := range codesTable {
 		codesTable[i] = status.Code(i)
 	}
 
-	t.Run("argos_server_grpcgo_client", func(t *testing.T) {
-		as := startArgosEchoServer(t, nil)
-		cc := dialGRPCGo(t, as.addr, nil)
-		cli := testpb.NewEchoClient(cc)
+	for _, tr := range interopTransports(t) {
+		tr := tr
+		t.Run(tr.name, func(t *testing.T) {
+			t.Run("argos_server_grpcgo_client", func(t *testing.T) {
+				as := startArgosEchoServer(t, tr.argosServerOpts())
+				cc := dialGRPCGo(t, as.addr, tr.cliTLS)
+				cli := testpb.NewEchoClient(cc)
 
-		for _, code := range codesTable {
-			code := code
-			t.Run(fmt.Sprintf("code_%d", code), func(t *testing.T) {
-				rsp, err := cli.Unary(context.Background(), &testpb.EchoMessage{Value: fmt.Sprintf("code:%d", code)})
-				if code == status.OK {
-					if err != nil {
-						t.Fatalf("OK path err: %v", err)
-					}
-					if rsp.GetValue() != "echo:code:0" {
-						t.Fatalf("got %q", rsp.GetValue())
-					}
-					return
-				}
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				st, ok := grpcstatus.FromError(err)
-				if !ok {
-					t.Fatalf("not a grpc status: %v", err)
-				}
-				if uint32(st.Code()) != uint32(code) {
-					t.Fatalf("wire code = %d (%v), want %d", st.Code(), st.Code(), code)
+				for _, code := range codesTable {
+					code := code
+					t.Run(fmt.Sprintf("code_%d", code), func(t *testing.T) {
+						rsp, err := cli.Unary(context.Background(), &testpb.EchoMessage{Value: fmt.Sprintf("code:%d", code)})
+						if code == status.OK {
+							if err != nil {
+								t.Fatalf("OK path err: %v", err)
+							}
+							if rsp.GetValue() != "echo:code:0" {
+								t.Fatalf("got %q", rsp.GetValue())
+							}
+							return
+						}
+						if err == nil {
+							t.Fatal("expected error")
+						}
+						st, ok := grpcstatus.FromError(err)
+						if !ok {
+							t.Fatalf("not a grpc status: %v", err)
+						}
+						if uint32(st.Code()) != uint32(code) {
+							t.Fatalf("wire code = %d (%v), want %d", st.Code(), st.Code(), code)
+						}
+					})
 				}
 			})
-		}
-	})
 
-	t.Run("argos_client_grpcgo_server", func(t *testing.T) {
-		addr := startGRPCGoEchoServer(t, nil, &grpcGoEcho{})
-		cli := newArgosClient(t, addr, nil)
+			t.Run("argos_client_grpcgo_server", func(t *testing.T) {
+				addr := startGRPCGoEchoServer(t, tr.srvTLS, &grpcGoEcho{})
+				cli := newArgosClient(t, addr, tr.argosClientOpts())
 
-		for _, code := range codesTable {
-			code := code
-			t.Run(fmt.Sprintf("code_%d", code), func(t *testing.T) {
-				got, _, _, err := argosUnaryCall(t, cli, fmt.Sprintf("code:%d", code))
-				if code == status.OK {
-					if err != nil {
-						t.Fatalf("OK path err: %v", err)
-					}
-					if got != "echo:code:0" {
-						t.Fatalf("got %q", got)
-					}
-					return
-				}
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				if uint32(status.CodeOf(err)) != uint32(code) {
-					t.Fatalf("CodeOf = %d, want %d; err=%v", status.CodeOf(err), code, err)
+				for _, code := range codesTable {
+					code := code
+					t.Run(fmt.Sprintf("code_%d", code), func(t *testing.T) {
+						got, _, _, err := argosUnaryCall(t, cli, fmt.Sprintf("code:%d", code))
+						if code == status.OK {
+							if err != nil {
+								t.Fatalf("OK path err: %v", err)
+							}
+							if got != "echo:code:0" {
+								t.Fatalf("got %q", got)
+							}
+							return
+						}
+						if err == nil {
+							t.Fatal("expected error")
+						}
+						if uint32(status.CodeOf(err)) != uint32(code) {
+							t.Fatalf("CodeOf = %d, want %d; err=%v", status.CodeOf(err), code, err)
+						}
+					})
 				}
 			})
-		}
-	})
+		})
+	}
 }
 
 // --- Metadata: binary -bin + trailing ---
@@ -795,25 +822,181 @@ func TestInteropTrailersOnly(t *testing.T) {
 	}
 }
 
-// --- gzip smoke (one direction: grpc-go client → argos server) ---
+// --- Zero-message client-streaming (cardinality / EOF after HalfClose) ---
+
+func TestInteropZeroMessageClientStream(t *testing.T) {
+	t.Run("argos_server_grpcgo_client", func(t *testing.T) {
+		as := startArgosEchoServer(t, nil)
+		cc := dialGRPCGo(t, as.addr, nil)
+		st, err := testpb.NewEchoClient(cc).ClientStream(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		rsp, err := st.CloseAndRecv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rsp.GetValue() != "echo:" {
+			t.Fatalf("got %q, want echo: (empty last)", rsp.GetValue())
+		}
+	})
+
+	t.Run("argos_client_grpcgo_server", func(t *testing.T) {
+		addr := startGRPCGoEchoServer(t, nil, &grpcGoEcho{})
+		cli := newArgosClient(t, addr, nil)
+		got, err := argosClientStreamCall(t, cli)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "echo:" {
+			t.Fatalf("got %q, want echo: (empty last)", got)
+		}
+	})
+}
+
+// --- Half-close timing: client HalfClose / CloseAndRecv then read response ---
+
+func TestInteropHalfCloseTiming(t *testing.T) {
+	// Client finishes the send half, then reads the aggregated response.
+	// Peer must observe EOF and still produce OK (not hang waiting for more).
+	t.Run("argos_server_grpcgo_client", func(t *testing.T) {
+		as := startArgosEchoServer(t, nil)
+		cc := dialGRPCGo(t, as.addr, nil)
+		st, err := testpb.NewEchoClient(cc).ClientStream(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Send(&testpb.EchoMessage{Value: "late"}); err != nil {
+			t.Fatal(err)
+		}
+		rsp, err := st.CloseAndRecv()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rsp.GetValue() != "echo:late" {
+			t.Fatalf("got %q", rsp.GetValue())
+		}
+	})
+
+	t.Run("argos_client_grpcgo_server", func(t *testing.T) {
+		addr := startGRPCGoEchoServer(t, nil, &grpcGoEcho{})
+		cli := newArgosClient(t, addr, nil)
+		cs, err := cli.Open(context.Background(), descriptor.MustMethod(methodClientStream, descriptor.ClientStreaming))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cs.Close()
+		if err := cs.Send(&testpb.EchoMessage{Value: "late"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := cs.HalfClose(); err != nil {
+			t.Fatal(err)
+		}
+		var got testpb.EchoMessage
+		if err := cs.Recv(&got); err != nil {
+			t.Fatal(err)
+		}
+		drainRecv(cs)
+		if got.GetValue() != "echo:late" {
+			t.Fatalf("got %q", got.GetValue())
+		}
+	})
+}
+
+// --- Details protobuf path (e2e with grpc-go; conflict/corrupt in framing/grpc) ---
+
+func TestInteropDetailsAdoptMessage(t *testing.T) {
+	info := &errdetails.ErrorInfo{Reason: "ARGOS", Domain: "interop"}
+	detailVal, err := proto.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	detailType := "type.googleapis.com/google.rpc.ErrorInfo"
+
+	t.Run("argos_server_grpcgo_client", func(t *testing.T) {
+		as := startArgosEchoServer(t, nil, argos.WithFilter(func(ctx context.Context, m descriptor.Method, st stream.Stream, next filter.Handler) error {
+			if m.Name() != "Unary" {
+				return next(ctx, m, st)
+			}
+			return status.WithDetails(
+				status.Error(status.FailedPrecondition, "from details proto"),
+				status.Detail{TypeURL: detailType, Value: detailVal},
+			)
+		}))
+		cc := dialGRPCGo(t, as.addr, nil)
+		_, err := testpb.NewEchoClient(cc).Unary(context.Background(), &testpb.EchoMessage{Value: "d"})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		st, ok := grpcstatus.FromError(err)
+		if !ok {
+			t.Fatalf("not grpc status: %v", err)
+		}
+		if st.Code() != codes.FailedPrecondition {
+			t.Fatalf("code = %v", st.Code())
+		}
+		if st.Message() != "from details proto" {
+			t.Fatalf("message = %q", st.Message())
+		}
+		if len(st.Details()) == 0 {
+			t.Fatal("expected details on grpc-go status")
+		}
+	})
+
+	t.Run("argos_client_grpcgo_server", func(t *testing.T) {
+		addr := startGRPCGoEchoServer(t, nil, &grpcGoEcho{forceDetails: true})
+		cli := newArgosClient(t, addr, nil)
+		_, _, _, err := argosUnaryCall(t, cli, "d")
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if status.CodeOf(err) != status.FailedPrecondition {
+			t.Fatalf("CodeOf = %v, want FailedPrecondition; err=%v", status.CodeOf(err), err)
+		}
+		if err.Error() != "from details proto" {
+			t.Fatalf("message = %q, want details message", err.Error())
+		}
+		ds := status.DetailsOf(err)
+		if len(ds) == 0 {
+			t.Fatal("expected details attached to argos error")
+		}
+	})
+}
+
+// --- gzip smoke both directions ---
 
 func TestInteropGzipSmoke(t *testing.T) {
 	compOpts := []grpcbinding.Option{
 		grpcbinding.WithCompressor(gzip.New()),
 		grpcbinding.WithSendCompressor(gzip.Name),
 	}
-	as := startArgosEchoServer(t, compOpts)
-	cc := dialGRPCGo(t, as.addr, nil)
-	cli := testpb.NewEchoClient(cc)
 
-	rsp, err := cli.Unary(context.Background(), &testpb.EchoMessage{Value: "gz"},
-		grpc.UseCompressor(grpcgzip.Name))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rsp.GetValue() != "echo:gz" {
-		t.Fatalf("got %q", rsp.GetValue())
-	}
+	t.Run("argos_server_grpcgo_client", func(t *testing.T) {
+		as := startArgosEchoServer(t, compOpts)
+		cc := dialGRPCGo(t, as.addr, nil)
+		cli := testpb.NewEchoClient(cc)
+
+		rsp, err := cli.Unary(context.Background(), &testpb.EchoMessage{Value: "gz"},
+			grpc.UseCompressor(grpcgzip.Name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rsp.GetValue() != "echo:gz" {
+			t.Fatalf("got %q", rsp.GetValue())
+		}
+	})
+
+	t.Run("argos_client_grpcgo_server", func(t *testing.T) {
+		addr := startGRPCGoEchoServer(t, nil, &grpcGoEcho{})
+		cli := newArgosClient(t, addr, compOpts)
+		got, _, _, err := argosUnaryCall(t, cli, "gz")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "echo:gz" {
+			t.Fatalf("got %q", got)
+		}
+	})
 }
 
 // --- deadline / timeout propagation ---
