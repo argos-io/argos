@@ -114,11 +114,15 @@ func ParseRequestHeaders(target string, hs transport.Headers) (RequestInfo, erro
 	return info, nil
 }
 
-// EncodeResponseHeaders builds initial response headers: content-type plus
-// encoded user metadata (reserved keys stripped).
-func EncodeResponseHeaders(contentSubtype string, md metadata.Metadata) transport.Headers {
+// EncodeResponseHeaders builds initial response headers: content-type,
+// optional grpc-encoding for non-identity send compression, plus encoded
+// user metadata (reserved keys stripped).
+func EncodeResponseHeaders(contentSubtype string, md metadata.Metadata, sendEncoding string) transport.Headers {
 	hs := transport.Headers{
 		{Name: "content-type", Value: ContentType(contentSubtype)},
+	}
+	if sendEncoding != "" && sendEncoding != "identity" {
+		hs = append(hs, transport.Header{Name: "grpc-encoding", Value: sendEncoding})
 	}
 	return append(hs, EncodeMetadata(md)...)
 }

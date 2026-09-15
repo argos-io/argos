@@ -16,6 +16,16 @@ import (
 	"github.com/argos-io/argos/transport"
 )
 
+
+func newTestFraming(t *testing.T, opts ...grpcframing.Option) framing.Framing {
+	t.Helper()
+	f, err := grpcframing.New(opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
 func TestFourShapesSmokeHTTPLoopback(t *testing.T) {
 	t.Parallel()
 	shapes := []descriptor.Shape{
@@ -53,7 +63,7 @@ func runShapeSmoke(t *testing.T, shape descriptor.Shape) {
 	cli, lis := fake.HTTPLoopback()
 	t.Cleanup(func() { _ = cli.Close() })
 
-	f := grpcframing.New()
+	f := newTestFraming(t)
 	method := descriptor.MustMethod("echo.v1.Echo.Echo", shape)
 	spec := framing.SessionSpec{CodecName: "proto"}
 
@@ -260,7 +270,7 @@ func TestTrailersOnlyError(t *testing.T) {
 	t.Parallel()
 	cli, lis := fake.HTTPLoopback()
 	t.Cleanup(func() { _ = cli.Close() })
-	f := grpcframing.New()
+	f := newTestFraming(t)
 	method := descriptor.MustMethod("echo.v1.Echo.Echo", descriptor.Unary)
 	spec := framing.SessionSpec{CodecName: "proto"}
 
@@ -339,7 +349,7 @@ func TestHTTPFallbackMissingGrpcStatus(t *testing.T) {
 		_ = car.Finish(404, nil, nil)
 	}()
 
-	f := grpcframing.New()
+	f := newTestFraming(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cs, err := f.NewClientSession(ctx, cli, framing.SessionSpec{CodecName: "proto"})
@@ -386,7 +396,7 @@ func TestHTTPFallback200WithoutGrpcStatus(t *testing.T) {
 		_ = car.Finish(200, nil, nil) // no grpc-status
 	}()
 
-	f := grpcframing.New()
+	f := newTestFraming(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cs, err := f.NewClientSession(ctx, cli, framing.SessionSpec{})
@@ -415,7 +425,7 @@ func TestEmptyLPMMessageOnCall(t *testing.T) {
 	t.Parallel()
 	cli, lis := fake.HTTPLoopback()
 	t.Cleanup(func() { _ = cli.Close() })
-	f := grpcframing.New()
+	f := newTestFraming(t)
 	method := descriptor.MustMethod("echo.v1.Echo.Echo", descriptor.Unary)
 	spec := framing.SessionSpec{CodecName: "proto"}
 
@@ -498,7 +508,7 @@ func TestPercentEncodedStatusMessage(t *testing.T) {
 	t.Parallel()
 	cli, lis := fake.HTTPLoopback()
 	t.Cleanup(func() { _ = cli.Close() })
-	f := grpcframing.New()
+	f := newTestFraming(t)
 	method := descriptor.MustMethod("echo.v1.Echo.Echo", descriptor.Unary)
 
 	go func() {

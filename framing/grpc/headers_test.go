@@ -18,7 +18,10 @@ import (
 
 func TestReuseConcurrent(t *testing.T) {
 	t.Parallel()
-	f := grpcframing.New()
+	f, err := grpcframing.New()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := f.Reuse(); got != framing.Concurrent {
 		t.Fatalf("Reuse() = %v, want Concurrent", got)
 	}
@@ -455,7 +458,7 @@ func TestEncodeDecodeResponseHeadersAndTrailers(t *testing.T) {
 		"x-bin-bin":   {string([]byte{0xde, 0xad})},
 		"grpc-status": {"0"}, // stripped
 	}
-	hs := grpcframing.EncodeResponseHeaders("json", md)
+	hs := grpcframing.EncodeResponseHeaders("json", md, "")
 	byName := headersByName(hs)
 	if byName["content-type"][0] != "application/grpc+json" {
 		t.Fatalf("content-type = %v", byName["content-type"])

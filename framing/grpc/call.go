@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/argos-io/argos/compressor"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/metadata"
@@ -17,10 +18,12 @@ import (
 
 // clientSession is a Concurrent gRPC client session over StreamConn.
 type clientSession struct {
-	framing *Framing
-	conn    transport.StreamConn
-	cfg     framing.Config
-	subtype string
+	framing     *Framing
+	conn        transport.StreamConn
+	cfg         framing.Config
+	subtype     string
+	compressors []compressor.Compressor
+	sendName    string
 
 	mu       sync.Mutex
 	closed   bool
@@ -90,11 +93,18 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 		outgoing = spec.Metadata.OutgoingHeaders()
 		_ = metadata.FreezeOutgoingHeaders(spec.Metadata)
 	}
+	sendComp := resolveSendCompressor(s.compressors, s.sendName, nil, false)
+	sendEnc := ""
+	if sendComp.Name() != compressor.Identity.Name() {
+		sendEnc = sendComp.Name()
+	}
 	preface := BuildRequestPreface(PrefaceOptions{
-		Method:         m,
-		Outgoing:       outgoing,
-		Timeout:        timeout,
-		ContentSubtype: s.subtype,
+		Method:            m,
+		Outgoing:          outgoing,
+		Timeout:           timeout,
+		ContentSubtype:    s.subtype,
+		SendCompressor:    sendEnc,
+		AcceptCompressors: acceptNames(s.compressors),
 	})
 
 	car, err := s.conn.OpenStream(ctx, preface)
@@ -111,17 +121,19 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 	}
 
 	c := &call{
-		client:   s,
-		carrier:  car,
-		body:     bs,
-		method:   m.FullName(),
-		md:       spec.Metadata,
-		shape:    m.Shape(),
-		subtype:  s.subtype,
-		cfg:      s.cfg,
-		maxMsg:   s.cfg.MaxMessageSize,
-		localCar: true,
-		initiator: true,
+		client:      s,
+		carrier:     car,
+		body:        bs,
+		method:      m.FullName(),
+		md:          spec.Metadata,
+		shape:       m.Shape(),
+		subtype:     s.subtype,
+		cfg:         s.cfg,
+		maxMsg:      s.cfg.MaxMessageSize,
+		localCar:    true,
+		initiator:   true,
+		compressors: s.compressors,
+		sendComp:    sendComp,
 	}
 	if timeout > 0 {
 		c.deadline = time.Now().Add(timeout)
@@ -132,11 +144,13 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 
 // serverSession wraps one HTTP request CarrierConn. AcceptCall succeeds once.
 type serverSession struct {
-	framing *Framing
-	conn    transport.CarrierConn
-	carrier transport.Carrier
-	cfg     framing.Config
-	subtype string // default from SessionSpec; overridden by request content-type
+	framing     *Framing
+	conn        transport.CarrierConn
+	carrier     transport.Carrier
+	cfg         framing.Config
+	subtype     string // default from SessionSpec; overridden by request content-type
+	compressors []compressor.Compressor
+	sendName    string
 
 	mu       sync.Mutex
 	closed   bool
@@ -198,24 +212,30 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 		subtype = s.subtype
 	}
 
+	peerAccept := parseAcceptEncoding(info.AcceptEncoding)
+	sendComp := resolveSendCompressor(s.compressors, s.sendName, peerAccept, true)
+	peerEnc := info.Encoding
+	if peerEnc == compressor.Identity.Name() {
+		peerEnc = ""
+	}
+
 	c := &call{
-		server:    s,
-		carrier:   s.carrier,
-		body:      bs,
-		method:    fullName,
-		md:        spec.Metadata,
-		subtype:   subtype,
-		cfg:       s.cfg,
-		maxMsg:    s.cfg.MaxMessageSize,
-		initiator: false,
+		server:       s,
+		carrier:      s.carrier,
+		body:         bs,
+		method:       fullName,
+		md:           spec.Metadata,
+		subtype:      subtype,
+		cfg:          s.cfg,
+		maxMsg:       s.cfg.MaxMessageSize,
+		initiator:    false,
+		compressors:  s.compressors,
+		sendComp:     sendComp,
+		peerEncoding: peerEnc,
 	}
 	if info.HasTimeout {
 		c.deadline = time.Now().Add(info.Timeout)
 		c.hasDeadline = true
-	}
-	if info.Encoding != "" && info.Encoding != "identity" {
-		// Compression negotiate is Task 3.6; reject non-identity for now.
-		c.peerEncoding = info.Encoding
 	}
 	return &serverCall{call: c}, nil
 }
@@ -234,11 +254,13 @@ type call struct {
 	cfg     framing.Config
 	maxMsg  int64
 
-	initiator     bool
-	localCar      bool
-	peerEncoding  string // inbound grpc-encoding; non-identity rejected on Recv
-	deadline      time.Time
-	hasDeadline   bool
+	compressors  []compressor.Compressor
+	sendComp     compressor.Compressor
+	initiator    bool
+	localCar     bool
+	peerEncoding string // inbound grpc-encoding (empty means identity)
+	deadline     time.Time
+	hasDeadline  bool
 
 	mu sync.Mutex
 
@@ -299,7 +321,7 @@ func (c *call) SendHeaders() error {
 	if c.md != nil {
 		md = c.md.OutgoingHeaders()
 	}
-	if err := rw.WriteHeaders(httpOK, EncodeResponseHeaders(c.subtype, md)); err != nil {
+	if err := rw.WriteHeaders(httpOK, EncodeResponseHeaders(c.subtype, md, c.sendEncodingHeader())); err != nil {
 		c.markBad()
 		return err
 	}
@@ -363,7 +385,15 @@ func (c *call) Send(payload []byte) error {
 	}
 	// Copy so caller may reuse the buffer after return.
 	cp := append([]byte(nil), data...)
-	if err := WriteLPM(c.body, false, cp); err != nil {
+	compressed, wire, err := compressMessage(c.sendComp, cp)
+	if err != nil {
+		c.markBad()
+		return err
+	}
+	if c.cfg.MaxFrameSize > 0 && int64(len(wire)) > c.cfg.MaxFrameSize {
+		return fmt.Errorf("framing/grpc: Send wire payload %d > max frame %d", len(wire), c.cfg.MaxFrameSize)
+	}
+	if err := WriteLPM(c.body, compressed, wire); err != nil {
 		c.markBad()
 		return err
 	}
@@ -435,7 +465,7 @@ func (c *call) Finish(err error) error {
 		if c.md != nil {
 			hdrMD = c.md.OutgoingHeaders()
 		}
-		initial = EncodeResponseHeaders(c.subtype, hdrMD)
+		initial = EncodeResponseHeaders(c.subtype, hdrMD, c.sendEncodingHeader())
 	}
 
 	if werr := rw.Finish(httpOK, initial, trailers); werr != nil {
@@ -499,16 +529,30 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 		c.markBad()
 		return nil, nil, err
 	}
-	if compressed || c.peerEncoding != "" {
-		enc := c.peerEncoding
-		if enc == "" {
-			enc = "unknown"
+	if enc := c.peerEncoding; enc != "" && enc != compressor.Identity.Name() {
+		if _, ok := compressor.Find(enc, c.compressors); !ok {
+			c.markBad()
+			return nil, nil, unsupportedEncoding(enc)
 		}
-		c.markBad()
-		return nil, nil, status.Error(status.Unimplemented,
-			fmt.Sprintf("framing/grpc: compressed LPM / encoding %q not supported (Task 3.6)", enc))
 	}
-	if c.maxMsg > 0 && int64(len(data)) > c.maxMsg {
+	if compressed {
+		enc := c.peerEncoding
+		if enc == "" || enc == compressor.Identity.Name() {
+			c.markBad()
+			return nil, nil, unsupportedEncoding(enc)
+		}
+		comp, ok := compressor.Find(enc, c.compressors)
+		if !ok {
+			c.markBad()
+			return nil, nil, unsupportedEncoding(enc)
+		}
+		decoded, derr := decompressMessage(comp, data, c.maxMsg)
+		if derr != nil {
+			c.markBad()
+			return nil, nil, derr
+		}
+		data = decoded
+	} else if c.maxMsg > 0 && int64(len(data)) > c.maxMsg {
 		c.markBad()
 		return nil, nil, fmt.Errorf("framing/grpc: Recv payload %d > max %d", len(data), c.maxMsg)
 	}
@@ -539,7 +583,7 @@ func (c *call) ensureResponseHeaders() error {
 	// applied when DecodeResponseHeaders succeeds.
 	md, _, encoding, err := DecodeResponseHeaders(hs)
 	if err == nil {
-		if encoding != "" && encoding != "identity" {
+		if encoding != "" && encoding != compressor.Identity.Name() {
 			c.mu.Lock()
 			c.peerEncoding = encoding
 			c.mu.Unlock()
@@ -641,6 +685,14 @@ func (c *call) wakeRead() {
 	if d, ok := c.carrier.(both); ok {
 		_ = d.SetDeadline(time.Now())
 	}
+}
+
+
+func (c *call) sendEncodingHeader() string {
+	if c.sendComp == nil || c.sendComp.Name() == compressor.Identity.Name() {
+		return ""
+	}
+	return c.sendComp.Name()
 }
 
 type serverCall struct {
