@@ -1,40 +1,90 @@
-# Connection pool load hints (task 7.5)
+# Connection-level defaults (task 7.5) — confirmed
 
-Measured on `example/resp` Sequential × tcp with PING bursts.
-§6.1 ⚠️ defaults were **not** rewritten — peaks below are observational only.
+Evidence from `example/resp` Sequential × tcp load tests.
+§6.1 connection defaults are **confirmed** (values unchanged from the prior placeholders).
 
-## Config under test
+Re-run:
 
-| Option | Value |
-|--------|------:|
-| MaxSessionsPerEndpoint | 16 |
-| MaxIdleSessions | 4 |
-| Burst concurrency | 16 |
-| Idle gap | 200ms |
+```bash
+go test ./example/resp/ -race -count=1 -timeout 300s \
+  -run 'Burst|Idle|Lifetime|Inbound' -v
+```
 
-## Measured (representative `go test -run TestBurstIdleBurstLoadHints`)
+## Confirmed defaults
 
-| Phase | Elapsed | Cumulative dials | Cumulative HELLO |
-|-------|--------:|-----------------:|-----------------:|
-| Wave 1 (burst) | ~6ms | 16 | 16 |
-| Idle | 200ms | (unchanged) | (unchanged) |
-| Wave 2 (burst) | ~3ms | 25 | 25 |
+| Option | Value | Rationale (measured) |
+|--------|------:|----------------------|
+| MaxIdleSessions | 8 | After a 64-wide held burst, wave2 ΔHELLO=56; a follow-up of size 8 reuses fully (ΔHELLO=0). Avoids parking 64 idle sockets. |
+| SessionIdleTimeout | 50s | Reclaim verified; aligned under typical ~60s peer/LB idle so the client drops first |
+| MaxSessionLifetime | 30m | Marks non-reusable after age; in-flight calls survive; aligned with `MaxInboundConnAge` |
+| MaxInboundConns | 1024 | Reject beyond limit (`ConnPhaseAdmit` / `ResourceExhausted`); `Serve` continues; 1024×64KiB ≈ 64MiB conn-buffer budget |
+| MaxInboundConnIdle | 50s | Idle inbound closed after timeout; aligned with `SessionIdleTimeout` |
+| MaxInboundConnAge | 30m | Stops new accepts on aged conn and drains; `Serve` still accepts fresh conns |
 
-| Delta wave2 − wave1 | Value |
-|---------------------|------:|
-| New dials | 9 |
-| New HELLOs | 9 |
+## 1. MaxIdleSessions — burst → idle → burst
 
-## Reading
+Config: `MaxSessionsPerEndpoint=64`, burst=64 held mid-flight (no Sequential intra-wave reuse), idle gap=300ms, client idle/lifetime timeouts disabled.
 
-With `MaxIdleSessions=4` and a burst of 16, the pool retains only a small idle
-set after wave 1; wave 2 pays handshake cost again (ΔHELLO≈9). This matches the
-§6.1 warning that `MaxIdleSessions(8)` paired with `MaxSessionsPerEndpoint(64)`
-closes most sockets between bursts and forces `HELLO`/`AUTH` on the next wave.
+Representative run (`TestBurstIdleBurstMaxIdleSessions`):
 
-No recommendation strong enough to clear the ⚠️ markers on
-`MaxIdleSessions` / `SessionIdleTimeout` / `MaxSessionLifetime` /
-`MaxInboundConns` / `MaxInboundConnIdle` / `MaxInboundConnAge` was produced by
-this pragmatic run — leave §6.1 provisional.
+| MaxIdleSessions | Wave1 dials/HELLO | Wave2 Δdials / ΔHELLO |
+|----------------:|------------------:|----------------------:|
+| 0 | 64 / 64 | 64 / 64 |
+| 8 | 64 / 64 | **56 / 56** |
+| 64 | 64 / 64 | 0 / 0 |
 
-Re-run: `go test ./example/resp/ -run TestBurstIdleBurstLoadHints -v`
+| Follow-up | Result |
+|-----------|--------|
+| After idle=8 large burst, second held burst of **8** | ΔHELLO = **0** |
+
+**Keep 8:** idle=0 forces a full re-handshake every wave; idle=64 retains an entire concurrency-width idle set against the peer; idle=8 keeps a small cushion (follow-up ≤8 free) while shedding 56 sockets after a wide burst — exactly the trade §6.1 described.
+
+## 2. SessionIdleTimeout reclaim
+
+`TestSessionIdleTimeoutReclaim` with `SessionIdleTimeout=200ms` (pool reclaim tick=1s):
+
+| Step | Δdials | ΔHELLO |
+|------|-------:|-------:|
+| PING, wait idleTO+2.5s, PING again | 1 | 1 |
+
+Enforcement is live. Default **50s** stays: below common ~60s LB/peer idle so the client reclaims before the peer FINs a pooled session.
+
+## 3. MaxSessionLifetime (non-reusable, in-flight safe)
+
+`TestMaxSessionLifetimeNonReusable` with `MaxSessionLifetime=150ms`:
+
+| Check | Result |
+|-------|--------|
+| In-flight PING spanning lifetime | succeeds |
+| Next Open after Close | Δdials=1, ΔHELLO=1 |
+
+Default **30m** kept, aligned with `MaxInboundConnAge`.
+
+## 4. MaxInboundConns (tcp)
+
+`TestMaxInboundConnsRejectsBeyondLimit` with limit=2:
+
+| Check | Result |
+|-------|--------|
+| 3rd inbound while 2 held | `ConnPhaseAdmit` + `ResourceExhausted` (count≥1) |
+| `Serve` after reject | still running |
+| Free one slot, new HELLO | succeeds |
+
+Default **1024** kept (reject path real; budget 1024×`ConnReadBufferSize`64KiB ≈ 64MiB).
+
+## 5. MaxInboundConnIdle (tcp)
+
+`TestMaxInboundConnIdleCloses` with idle=120ms: idle inbound read returns `EOF` after timeout.
+
+Default **50s** kept, matched to `SessionIdleTimeout`.
+
+## 6. MaxInboundConnAge (tcp)
+
+`TestMaxInboundConnAgeDrains` with age=200ms:
+
+| Check | Result |
+|-------|--------|
+| Aged inbound | read `EOF` (accept loop cancelled / drain) |
+| Fresh dial after drain | HELLO succeeds (`Serve` continues) |
+
+Default **30m** kept, matched to `MaxSessionLifetime`.

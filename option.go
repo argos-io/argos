@@ -127,36 +127,36 @@ func WithMaxSessionsPerEndpoint(n int) Option {
 	return optionFunc(func(c *Config) { c.MaxSessionsPerEndpoint = n })
 }
 
-// WithMaxIdleSessions sets idle sessions retained per endpoint (provisional ⚠️).
+// WithMaxIdleSessions sets idle sessions retained per endpoint.
 // Zero means keep no idle sessions.
 func WithMaxIdleSessions(n int) Option {
 	return optionFunc(func(c *Config) { c.MaxIdleSessions = n })
 }
 
-// WithSessionIdleTimeout sets idle session lifetime (provisional ⚠️).
+// WithSessionIdleTimeout sets idle session lifetime.
 // Zero disables the limit.
 func WithSessionIdleTimeout(d time.Duration) Option {
 	return optionFunc(func(c *Config) { c.SessionIdleTimeout = d })
 }
 
-// WithMaxSessionLifetime sets session lifetime from creation (provisional ⚠️).
+// WithMaxSessionLifetime sets session lifetime from creation.
 // Zero disables the limit.
 func WithMaxSessionLifetime(d time.Duration) Option {
 	return optionFunc(func(c *Config) { c.MaxSessionLifetime = d })
 }
 
-// WithMaxInboundConns sets server in-use connections per Binding (provisional ⚠️).
+// WithMaxInboundConns sets server in-use connections per Binding.
 func WithMaxInboundConns(n int) Option {
 	return optionFunc(func(c *Config) { c.MaxInboundConns = n })
 }
 
-// WithMaxInboundConnIdle sets server idle time between calls (provisional ⚠️).
+// WithMaxInboundConnIdle sets server idle time between calls.
 // Must be positive; there is no disable value.
 func WithMaxInboundConnIdle(d time.Duration) Option {
 	return optionFunc(func(c *Config) { c.MaxInboundConnIdle = d })
 }
 
-// WithMaxInboundConnAge sets server inbound connection age (provisional ⚠️).
+// WithMaxInboundConnAge sets server inbound connection age.
 // Must be positive; there is no disable value.
 func WithMaxInboundConnAge(d time.Duration) Option {
 	return optionFunc(func(c *Config) { c.MaxInboundConnAge = d })

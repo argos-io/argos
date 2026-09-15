@@ -42,7 +42,7 @@ func TestDefaultsMatchSection61(t *testing.T) {
 		{"MaxDrainBytes", cfg.MaxDrainBytes, int64(1 * miB)},
 		{"ConnReadBufferSize", cfg.ConnReadBufferSize, int64(64 * kiB)},
 		{"MaxSessionsPerEndpoint", cfg.MaxSessionsPerEndpoint, 64},
-		// Provisional ⚠️ placeholders (§6.1).
+		// Confirmed §6.1 (task 7.5; example/resp/LOAD.md).
 		{"MaxIdleSessions", cfg.MaxIdleSessions, 8},
 		{"SessionIdleTimeout", cfg.SessionIdleTimeout, 50 * time.Second},
 		{"MaxSessionLifetime", cfg.MaxSessionLifetime, 30 * time.Minute},

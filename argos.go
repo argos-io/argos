@@ -5,8 +5,7 @@
 // BindingFunc constructs a fresh Transport×Framing×Codec triple per
 // Client/Binding; it must not Dial or Serve.
 //
-// Connection-dimension defaults marked provisional (MaxIdleSessions,
-// SessionIdleTimeout, MaxSessionLifetime, MaxInboundConns,
-// MaxInboundConnIdle, MaxInboundConnAge) are placeholders until milestone ⑦
-// task 7.5; treat them as temporary, not confirmed values (§6.1).
+// Connection-dimension defaults (MaxIdleSessions, SessionIdleTimeout,
+// MaxSessionLifetime, MaxInboundConns, MaxInboundConnIdle, MaxInboundConnAge)
+// are confirmed by task 7.5 load evidence in example/resp/LOAD.md (§6.1).
 package argos

@@ -21,11 +21,11 @@
 
 规格与步骤级计划在 `README.md` §13。每个任务以可测交付物结束，走 TDD，**一个任务一次提交**。当前：**里程碑 ⓪–⑦ 全部完成**（最新 tag `milestone-7`）。
 
-**⑥**（已完成）：`make verify` = lint + test + test-race + accept + test-generate + test-integration + test-deps；目录表已对齐。
+**⑥**（已完成）：`make verify` = lint + test + test-race + accept + test-generate + test-integration + test-deps；目录表已对齐；**Task 6.3** 全量 §9 核对见根包 `section9_test.go`（`TestSection9Checklist` / `TestSection9VerifyGate`）。
 
 **⑦**（已完成）：`example/resp`（含 SUBSCRIBE）、`example/synth`、零核心接口改动证据、组合层源码扫描、连接抖动负载记录（§6.1 ⚠️ 默认值仍为占位，见 `example/resp/LOAD.md`）。
 
-后续可选：用 7.5 数据回写 §6.1 确认默认值；补全 §9 未覆盖细格（TLS×全形态×17 码等）。
+后续可选：用 7.5 数据回写 §6.1 确认默认值；补全 §9 未覆盖细格（TLS×全形态×17 码等；见 `section9_test.go` soft-gap 注释）。
 
 ### 并行 Subagent 规范
 
@@ -105,7 +105,7 @@ Makefile · .github/workflows/ci.yml · invariants_test.go
 make test              # go test ./...
 make test-race         # go test -race ./...
 make lint              # go vet + 有则 staticcheck
-make accept            # 根包 Invariant|Accept（§3 / §3.1）
+make accept            # 根包 Invariant|Accept|Section9（§3 / §3.1 / §9）
 make test-generate     # stub --check vs example/echo
 make test-integration  # example/echo multi-transport
 make test-deps         # 传递依赖门禁（Transitive*）

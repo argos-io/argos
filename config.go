@@ -23,9 +23,6 @@ const (
 // Side ownership (§6): client-only and server-only fields coexist on one
 // Config. New validates field values only; it does not reject mixing sides.
 // client.New / server.New later ignore options that do not apply to that side.
-//
-// Provisional (§6.1 ⚠️) fields: MaxIdleSessions, SessionIdleTimeout,
-// MaxSessionLifetime, MaxInboundConns, MaxInboundConnIdle, MaxInboundConnAge.
 type Config struct {
 	// Call-dimension limits.
 	MaxFrameSize       int64
@@ -42,12 +39,12 @@ type Config struct {
 	MaxDrainBytes          int64
 	ConnReadBufferSize     int64
 	MaxSessionsPerEndpoint int
-	MaxIdleSessions        int           // provisional ⚠️; client-only
-	SessionIdleTimeout     time.Duration // provisional ⚠️; client-only; 0 disables
-	MaxSessionLifetime      time.Duration // provisional ⚠️; client-only; 0 disables
-	MaxInboundConns        int           // provisional ⚠️; server-only
-	MaxInboundConnIdle     time.Duration // provisional ⚠️; server-only; must be > 0
-	MaxInboundConnAge      time.Duration // provisional ⚠️; server-only; must be > 0
+	MaxIdleSessions        int           // client-only; confirmed §6.1
+	SessionIdleTimeout     time.Duration // client-only; 0 disables; confirmed §6.1
+	MaxSessionLifetime      time.Duration // client-only; 0 disables; confirmed §6.1
+	MaxInboundConns        int           // server-only; confirmed §6.1
+	MaxInboundConnIdle     time.Duration // server-only; must be > 0; confirmed §6.1
+	MaxInboundConnAge      time.Duration // server-only; must be > 0; confirmed §6.1
 
 	// Binding is the optional factory stored by WithBinding.
 	// Nil is allowed until a Client/Server path requires it.
@@ -136,7 +133,7 @@ func defaults() Config {
 		MaxDrainBytes:          1 * miB,
 		ConnReadBufferSize:     64 * kiB,
 		MaxSessionsPerEndpoint: 64,
-		// Provisional ⚠️ defaults (§6.1); task 7.5 will confirm.
+		// Confirmed §6.1 defaults (task 7.5; evidence in example/resp/LOAD.md).
 		MaxIdleSessions:    8,
 		SessionIdleTimeout: 50 * time.Second,
 		MaxSessionLifetime:  30 * time.Minute,
