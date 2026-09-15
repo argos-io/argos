@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,16 +39,19 @@ type session struct {
 
 	writeMu sync.Mutex
 
-	mu       sync.Mutex
-	closed   bool
-	reusable bool
-	busy     bool // one in-flight call
-	readBuf  []byte
-	readErr  error
-	readWait chan struct{} // closed+replaced when new data/err arrives
+	mu        sync.Mutex
+	closed    bool
+	reusable  bool
+	exclusive bool // SUBSCRIBE (or other exclusive protocol state)
+	busy      bool // one in-flight call
+	readBuf   []byte
+	readErr   error
+	readWait  chan struct{} // closed+replaced when new data/err arrives
 
 	readerDone chan struct{}
 	closeCh    chan struct{}
+	peerGone   chan struct{} // closed once when the carrier read fails or session closes
+	peerOnce   sync.Once
 }
 
 func assertByteStream(c transport.Conn) (transport.ByteStreamCarrier, error) {
@@ -75,13 +80,19 @@ func newSession(f *Framing, conn transport.Conn, car transport.ByteStreamCarrier
 		readWait:    make(chan struct{}),
 		readerDone:  make(chan struct{}),
 		closeCh:     make(chan struct{}),
+		peerGone:    make(chan struct{}),
 	}
 	go s.readLoop()
 	return s
 }
 
+func (s *session) tripPeerGone() {
+	s.peerOnce.Do(func() { close(s.peerGone) })
+}
+
 func (s *session) readLoop() {
 	defer close(s.readerDone)
+	defer s.tripPeerGone()
 	tmp := make([]byte, 4096)
 	for {
 		n, err := s.carrier.Read(tmp)
@@ -110,11 +121,18 @@ func (s *session) broadcastReadLocked() {
 func (s *session) Reusable() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.reusable && !s.closed
+	return s.reusable && !s.closed && !s.exclusive
 }
 
 func (s *session) markBad() {
 	s.mu.Lock()
+	s.reusable = false
+	s.mu.Unlock()
+}
+
+func (s *session) markExclusive() {
+	s.mu.Lock()
+	s.exclusive = true
 	s.reusable = false
 	s.mu.Unlock()
 }
@@ -130,6 +148,7 @@ func (s *session) closeSession() error {
 	close(s.closeCh)
 	s.broadcastReadLocked()
 	s.mu.Unlock()
+	s.tripPeerGone()
 	err := s.conn.Close()
 	<-s.readerDone
 	return err
@@ -362,7 +381,7 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, _ fra
 	default:
 	}
 	s.mu.Lock()
-	if s.closed || !s.reusable {
+	if s.closed || !s.reusable || s.exclusive {
 		s.mu.Unlock()
 		return nil, status.Error(status.Unavailable, "resp: session not reusable")
 	}
@@ -373,7 +392,11 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, _ fra
 	s.busy = true
 	s.mu.Unlock()
 
-	return newCall(s.session, m.FullName(), m.Name(), true), nil
+	c := newCall(s.session, m.FullName(), m.Name(), true)
+	if c.streaming {
+		s.markExclusive()
+	}
+	return c, nil
 }
 
 func (s *clientSession) Close() error { return s.closeSession() }
@@ -437,7 +460,7 @@ func (s *serverSession) AcceptCall(ctx context.Context, _ framing.CallSpec) (fra
 	}
 	cmdUp := strings.ToUpper(cmd)
 	switch cmdUp {
-	case "PING", "GET", "SET":
+	case "PING", "GET", "SET", "PUBLISH", "SUBSCRIBE":
 		// ok
 	default:
 		_ = s.writeRaw(EncodeError("ERR unknown command '" + cmd + "'"))
@@ -448,6 +471,12 @@ func (s *serverSession) AcceptCall(ctx context.Context, _ framing.CallSpec) (fra
 	full := methodFullName(s.service, cmdUp)
 	c := newCall(s.session, full, cmdUp, false)
 	c.args = args
+	if c.streaming {
+		s.markExclusive()
+		// Sequential accept goroutine == handleCall goroutine; hand off peerGone
+		// so SUBSCRIBE can unblock when the client closes the TCP connection.
+		bindPeerGone(goroutineID(), s.peerGone)
+	}
 	releaseBusy = false
 	return &serverCall{call: c}, nil
 }
@@ -455,12 +484,48 @@ func (s *serverSession) AcceptCall(ctx context.Context, _ framing.CallSpec) (fra
 func (s *serverSession) Close() error { return s.closeSession() }
 
 // endCall releases the in-flight slot. poison marks the session non-reusable
-// (carrier hygiene: closed without reading a terminal reply).
+// (carrier hygiene: closed without reading a terminal reply). Exclusive
+// sessions (SUBSCRIBE) stay non-reusable so the pool closes the connection.
 func (s *session) endCall(poison bool) {
 	s.mu.Lock()
 	s.busy = false
-	if poison {
+	if poison || s.exclusive {
 		s.reusable = false
 	}
 	s.mu.Unlock()
+	clearPeerGone(goroutineID())
+}
+
+// peerGoneHandoff lets the SUBSCRIBE handler observe carrier death without a
+// core API change (Sequential: accept and handle share one goroutine).
+var peerGoneHandoff sync.Map // goid → <-chan struct{}
+
+func bindPeerGone(goid uint64, ch chan struct{}) {
+	peerGoneHandoff.Store(goid, ch)
+}
+
+func clearPeerGone(goid uint64) {
+	peerGoneHandoff.Delete(goid)
+}
+
+// PeerGone returns a channel closed when the current Sequential accept
+// goroutine's carrier read fails or the session closes. Only set during
+// an in-flight SUBSCRIBE on the server.
+func PeerGone() <-chan struct{} {
+	if v, ok := peerGoneHandoff.Load(goroutineID()); ok {
+		return v.(chan struct{})
+	}
+	return nil
+}
+
+func goroutineID() uint64 {
+	var buf [32]byte
+	n := runtime.Stack(buf[:], false)
+	s := string(buf[:n])
+	s = strings.TrimPrefix(s, "goroutine ")
+	if i := strings.IndexByte(s, ' '); i > 0 {
+		s = s[:i]
+	}
+	id, _ := strconv.ParseUint(s, 10, 64)
+	return id
 }

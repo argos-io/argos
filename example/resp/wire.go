@@ -57,6 +57,30 @@ func EncodeArgs(args ...string) []byte {
 	return EncodeArray(args...)
 }
 
+// EncodeSubscribeAck encodes a Redis SUBSCRIBE confirmation:
+// *3\r\n$9\r\nsubscribe\r\n$…\r\n<channel>\r\n:<n>\r\n
+func EncodeSubscribeAck(channel string, n int) []byte {
+	var b bytes.Buffer
+	b.WriteString("*3\r\n")
+	b.Write(EncodeBulk("subscribe"))
+	b.Write(EncodeBulk(channel))
+	b.WriteByte(':')
+	b.WriteString(strconv.Itoa(n))
+	b.WriteString("\r\n")
+	return b.Bytes()
+}
+
+// EncodePushMessage encodes a Redis pub/sub message push:
+// *3\r\n$7\r\nmessage\r\n$…\r\n<channel>\r\n$…\r\n<payload>\r\n
+func EncodePushMessage(channel, payload string) []byte {
+	var b bytes.Buffer
+	b.WriteString("*3\r\n")
+	b.Write(EncodeBulk("message"))
+	b.Write(EncodeBulk(channel))
+	b.Write(EncodeBulk(payload))
+	return b.Bytes()
+}
+
 // DecodeArgs parses a RESP array of bulk strings into Go strings.
 func DecodeArgs(b []byte) ([]string, error) {
 	v, n, err := parseValue(b)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,8 +21,9 @@ var (
 type call struct {
 	sess      *session
 	method    string // full name
-	cmd       string // Redis command (PING/GET/SET)
+	cmd       string // Redis command (PING/GET/SET/SUBSCRIBE/…)
 	initiator bool
+	streaming bool // server-streaming (SUBSCRIBE): multiple Recv/Send
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -32,10 +34,10 @@ type call struct {
 	argsSent   bool     // server Recv delivered
 	reqSent    bool     // client Write done
 	halfClosed bool
-	replySent  bool // server wrote a reply via Send
+	replySent  bool // server wrote at least one reply via Send
 	finished   bool
 	closed     bool
-	terminal   bool // client read a reply
+	terminal   bool // client saw stream end (unary reply or cancel/EOF)
 
 	sending atomic.Bool
 	recving atomic.Bool
@@ -43,11 +45,13 @@ type call struct {
 
 func newCall(s *session, fullMethod, cmd string, initiator bool) *call {
 	ctx, cancel := context.WithCancel(context.Background())
+	streaming := strings.EqualFold(cmd, "SUBSCRIBE")
 	return &call{
 		sess:      s,
 		method:    fullMethod,
 		cmd:       cmd,
 		initiator: initiator,
+		streaming: streaming,
 		ctx:       ctx,
 		cancel:    cancel,
 	}
@@ -95,10 +99,15 @@ func (c *call) recvServer() ([]byte, func(), error) {
 
 func (c *call) recvClient() ([]byte, func(), error) {
 	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, nil, errCallClosed
+	}
 	if c.terminal {
 		c.mu.Unlock()
 		return nil, nil, io.EOF
 	}
+	streaming := c.streaming
 	c.mu.Unlock()
 
 	v, err := c.sess.readValue(c.ctx)
@@ -113,9 +122,11 @@ func (c *call) recvClient() ([]byte, func(), error) {
 		c.sess.markBad()
 		return nil, nil, err
 	}
-	c.mu.Lock()
-	c.terminal = true
-	c.mu.Unlock()
+	if !streaming {
+		c.mu.Lock()
+		c.terminal = true
+		c.mu.Unlock()
+	}
 	if v.Type == '-' {
 		return nil, nil, status.Error(status.Unknown, v.Str)
 	}
@@ -137,7 +148,11 @@ func (c *call) Send(payload []byte) error {
 		c.mu.Unlock()
 		return errSendFinished
 	}
-	if !c.initiator && (c.replySent || c.finished) {
+	if !c.initiator && !c.streaming && (c.replySent || c.finished) {
+		c.mu.Unlock()
+		return errSendFinished
+	}
+	if !c.initiator && c.streaming && c.finished {
 		c.mu.Unlock()
 		return errSendFinished
 	}
@@ -245,9 +260,18 @@ func (c *call) Close() error {
 	c.closed = true
 	poison := false
 	if c.initiator {
-		poison = !c.terminal
+		if c.streaming {
+			// Exclusive long-lived call: never return the connection to the pool.
+			poison = true
+			c.terminal = true
+		} else {
+			poison = !c.terminal
+		}
 	} else {
 		poison = !c.replySent && !c.finished
+		if c.streaming {
+			poison = true
+		}
 	}
 	c.mu.Unlock()
 	c.cancel()
@@ -260,9 +284,13 @@ type serverCall struct {
 }
 
 func (c *serverCall) Accept(m descriptor.Method) error {
-	if m.Shape() != descriptor.Unary {
+	want := descriptor.Unary
+	if c.streaming {
+		want = descriptor.ServerStreaming
+	}
+	if m.Shape() != want {
 		return status.Error(status.Unimplemented,
-			"resp: shape "+shapeName(m.Shape())+" unsupported (Framing=resp); need Unary")
+			"resp: shape "+shapeName(m.Shape())+" unsupported (Framing=resp); need "+shapeName(want))
 	}
 	if m.FullName() != c.method {
 		return status.Error(status.Internal, "resp: Accept method mismatch")

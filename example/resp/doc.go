@@ -9,6 +9,9 @@
 //     before any business OpenCall.
 //  3. Missing capability without a kernel hole — SendHeaders returns
 //     status.Unimplemented and subsequent calls on the same session still work.
+//  4. Exclusive long stream — SUBSCRIBE is server-streaming; Reusable() is
+//     false for the call lifetime and the connection is closed (not pooled)
+//     when the call ends; pushes arrive as subsequent Recv messages.
 //
 // This package is a test asset, not a production Redis client/server.
 // Task 7.2b: no transport/, framing/ (root), client/, or server/ public

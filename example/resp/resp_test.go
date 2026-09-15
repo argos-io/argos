@@ -248,7 +248,9 @@ func TestSendHeadersUnimplementedNextCallWorks(t *testing.T) {
 			}
 			return st.Send(resp.EncodeBulkNull())
 		}
-		return srv.Register(resp.ServiceDescriptor(), map[string]filter.Handler{
+		return srv.Register(descriptor.MustService(svcName,
+			resp.MethodPING, resp.MethodGET, resp.MethodSET,
+		), map[string]filter.Handler{
 			"PING": func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
 				var raw []byte
 				_ = st.Recv(&raw)
@@ -287,6 +289,73 @@ func TestSendHeadersUnimplementedNextCallWorks(t *testing.T) {
 	}
 	if h.dials.Load() != 1 {
 		t.Fatalf("dials=%d, want 1", h.dials.Load())
+	}
+}
+
+func TestSUBSCRIBEServerStreamingExclusive(t *testing.T) {
+	h := startRESP(t, nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	st, err := h.cli.Open(ctx, resp.MethodSUBSCRIBE)
+	if err != nil {
+		t.Fatalf("Open(SUBSCRIBE): %v", err)
+	}
+
+	if err := st.Send(resp.EncodeArgs("news")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := st.HalfClose(); err != nil {
+		t.Fatalf("HalfClose: %v", err)
+	}
+
+	var ack []byte
+	if err := st.Recv(&ack); err != nil {
+		t.Fatalf("Recv ack: %v", err)
+	}
+	wantAck := resp.EncodeSubscribeAck("news", 1)
+	if string(ack) != string(wantAck) {
+		t.Fatalf("ack = %q, want %q", ack, wantAck)
+	}
+
+	if got := h.dials.Load(); got != 1 {
+		t.Fatalf("dials during SUBSCRIBE = %d, want 1", got)
+	}
+	if got := h.fr.ClientHellos(); got != 1 {
+		t.Fatalf("HELLO during SUBSCRIBE = %d, want 1", got)
+	}
+
+	// Inject a push without opening another client call (avoids pooling a
+	// second session that would mask the exclusive-close assertion).
+	if n := h.store.Publish("news", "hello-push"); n != 1 {
+		t.Fatalf("Publish recipients = %d, want 1", n)
+	}
+
+	var push []byte
+	if err := st.Recv(&push); err != nil {
+		t.Fatalf("Recv push: %v", err)
+	}
+	wantPush := resp.EncodePushMessage("news", "hello-push")
+	if string(push) != string(wantPush) {
+		t.Fatalf("push = %q, want %q", push, wantPush)
+	}
+
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close SUBSCRIBE: %v", err)
+	}
+
+	// After the exclusive call ends the connection is closed, not returned:
+	// the next unary call must HELLO again on a fresh dial.
+	out := doCall(t, h, resp.MethodPING, resp.EncodeArgs())
+	if string(out) != string(resp.EncodeSimple("PONG")) {
+		t.Fatalf("PING after SUBSCRIBE: %q", out)
+	}
+	if got := h.fr.ClientHellos(); got != 2 {
+		t.Fatalf("HELLO after SUBSCRIBE end = %d, want 2 (connection not pooled)", got)
+	}
+	if got := h.dials.Load(); got != 2 {
+		t.Fatalf("dials after SUBSCRIBE end = %d, want 2", got)
 	}
 }
 
