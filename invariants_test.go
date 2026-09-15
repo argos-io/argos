@@ -510,3 +510,117 @@ func TestInvariantNotifyConnError(t *testing.T) {
 		t.Fatal("server production sources never call NotifyConnError; §3.1-22 requires the server path to report conn-level errors")
 	}
 }
+
+// TestInvariantCompositionNoConcreteProtocolNames is task 7.6 / §3.1-12 / §3.1-19:
+// client, server, and internal/sessionpool production sources must not name
+// concrete Framing/Transport protocols or example gate packages.
+func TestInvariantCompositionNoConcreteProtocolNames(t *testing.T) {
+	t.Parallel()
+	root := moduleRoot(t)
+	dirs := []string{
+		filepath.Join(root, "client"),
+		filepath.Join(root, "server"),
+		filepath.Join(root, "internal", "sessionpool"),
+	}
+	// Word-boundary tokens: avoid matching "Response" for "resp", etc.
+	forbidden := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\benvelope\b`),
+		regexp.MustCompile(`(?i)\bgrpc\b`),
+		regexp.MustCompile(`(?i)\bwholebody\b`),
+		regexp.MustCompile(`(?i)\bresp\b`),
+		regexp.MustCompile(`(?i)\bsynth\b`),
+		regexp.MustCompile(`(?i)\bhttp2\b`),
+		regexp.MustCompile(`example/resp`),
+		regexp.MustCompile(`example/synth`),
+	}
+	fset := token.NewFileSet()
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			path := filepath.Join(dir, name)
+			src, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Scan identifiers and string literals via AST (not comments).
+			file, err := parser.ParseFile(fset, path, src, 0)
+			if err != nil {
+				t.Fatalf("parse %s: %v", path, err)
+			}
+			ast.Inspect(file, func(n ast.Node) bool {
+				var text string
+				switch x := n.(type) {
+				case *ast.Ident:
+					text = x.Name
+				case *ast.BasicLit:
+					if x.Kind == token.STRING {
+						text = x.Value
+					}
+				case *ast.ImportSpec:
+					if x.Path != nil {
+						text = x.Path.Value
+					}
+				default:
+					return true
+				}
+				if text == "" {
+					return true
+				}
+				for _, re := range forbidden {
+					if re.MatchString(text) {
+						pos := fset.Position(n.Pos())
+						t.Errorf("%s: composition layer must not reference %q (matched %s)", pos, text, re.String())
+					}
+				}
+				return true
+			})
+		}
+	}
+}
+
+// TestInvariantCorePackagesNoExampleImport restates §3.1-19 via go list
+// (also covered inside TestInvariantDependencyTable; kept explicit for 7.6).
+func TestInvariantCorePackagesNoExampleImport(t *testing.T) {
+	t.Parallel()
+	pkgs := repoPackages(t)
+	for pkg, imports := range pkgs {
+		if !isCorePackage(pkg) {
+			continue
+		}
+		for _, imp := range imports {
+			if strings.HasPrefix(imp, modulePath+"/example") {
+				t.Errorf("%s imports %q; core packages must not import example/* (§3.1-19 / 7.6)", pkg, imp)
+			}
+		}
+	}
+}
+
+// TestZeroCoreAPIChangesEvidence ensures the assembly-gate packages keep a
+// committed 7.2b evidence note (zero core public-interface changes).
+func TestZeroCoreAPIChangesEvidence(t *testing.T) {
+	t.Parallel()
+	root := moduleRoot(t)
+	for _, rel := range []string{
+		"example/resp/ASSEMBLY.md",
+		"example/synth/ASSEMBLY.md",
+	} {
+		path := filepath.Join(root, rel)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("missing 7.2b evidence file %s: %v", rel, err)
+		}
+		body := string(data)
+		for _, need := range []string{"Zero core API", "transport/", "framing/", "client/", "server/"} {
+			if !strings.Contains(body, need) {
+				t.Errorf("%s: missing required evidence phrase %q", rel, need)
+			}
+		}
+	}
+}
