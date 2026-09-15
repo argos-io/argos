@@ -6,38 +6,54 @@ import (
 	"github.com/argos-io/argos/descriptor"
 )
 
-func TestValidateNamesRejectsGeneratedCollisions(t *testing.T) {
+func TestValidateNamesRejectsMethodSymbolCollisionWithMessage(t *testing.T) {
 	file := File{
-		GoPackage: "example.com/service;service",
+		GoPackage: "service",
 		InputBase: "service",
-		Services: []Service{
-			{GoName: "AlphaService", Methods: []Method{{
-				GoName: "Call", InputType: "Request", OutputType: "Response",
-			}}},
-			{GoName: "Alpha", Methods: []Method{{
-				GoName: "Other", InputType: "Request", OutputType: "Response",
-			}}},
-		},
+		Messages:  []Message{{GoName: "EchoService_Echo"}},
+		Services: []Service{{
+			GoName: "EchoService",
+			Methods: []Method{{
+				GoName: "Echo", InputType: "Request", OutputType: "Response",
+			}},
+		}},
 	}
 	if err := ValidateNames(&file); err == nil {
-		t.Fatal("ValidateNames succeeded for colliding service prefixes")
+		t.Fatal("ValidateNames succeeded for method descriptor colliding with message")
 	}
 }
 
-func TestValidateNamesRejectsConcatenatedGeneratedCollision(t *testing.T) {
+func TestValidateNamesRejectsServiceDescCollisionWithMessage(t *testing.T) {
 	file := File{
 		GoPackage: "service",
-		Services: []Service{
-			{GoName: "FooService", Methods: []Method{{
+		Messages:  []Message{{GoName: "FooServiceDesc"}},
+		Services: []Service{{
+			GoName: "FooService",
+			Methods: []Method{{
 				GoName: "Bar", InputType: "Request", OutputType: "Response",
+			}},
+		}},
+	}
+	if err := ValidateNames(&file); err == nil {
+		t.Fatal("ValidateNames succeeded for service descriptor colliding with message")
+	}
+}
+
+func TestValidateNamesAllowsSameMethodNameAcrossServices(t *testing.T) {
+	file := File{
+		GoPackage: "service",
+		InputBase: "service",
+		Services: []Service{
+			{GoName: "AlphaService", Methods: []Method{{
+				GoName: "Echo", InputType: "Request", OutputType: "Response",
 			}}},
-			{GoName: "FooBService", Methods: []Method{{
-				GoName: "ar", InputType: "Request", OutputType: "Response",
+			{GoName: "BetaService", Methods: []Method{{
+				GoName: "Echo", InputType: "Request", OutputType: "Response",
 			}}},
 		},
 	}
-	if err := ValidateNames(&file); err == nil {
-		t.Fatal("ValidateNames succeeded for colliding generated method constants")
+	if err := ValidateNames(&file); err != nil {
+		t.Fatalf("ValidateNames: %v", err)
 	}
 }
 
@@ -106,8 +122,8 @@ func TestNormalizeFillsFullNameAndShape(t *testing.T) {
 
 func TestShapeAlignedWithDescriptor(t *testing.T) {
 	cases := []struct {
-		ir  Shape
-		d   descriptor.Shape
+		ir Shape
+		d  descriptor.Shape
 	}{
 		{Unary, descriptor.Unary},
 		{ServerStreaming, descriptor.ServerStreaming},

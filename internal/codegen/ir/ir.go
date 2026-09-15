@@ -236,7 +236,6 @@ func ValidateNames(f *File) error {
 	}
 
 	seenServices := make(map[string]struct{}, len(f.Services))
-	seenPrefixes := make(map[string]string, len(f.Services))
 	for _, service := range f.Services {
 		if err := requireIdentifier("service", service.GoName); err != nil {
 			return err
@@ -245,11 +244,6 @@ func ValidateNames(f *File) error {
 			return fmt.Errorf("ir: duplicate service name %q", service.GoName)
 		}
 		seenServices[service.GoName] = struct{}{}
-		prefix := lowerFirst(strings.TrimSuffix(service.GoName, "Service"))
-		if previous, exists := seenPrefixes[prefix]; exists {
-			return fmt.Errorf("ir: services %q and %q generate the same Go prefix %q", previous, service.GoName, prefix)
-		}
-		seenPrefixes[prefix] = service.GoName
 
 		if service.FullName != "" {
 			if err := requireProtobufFullName("service", service.FullName); err != nil {
@@ -304,23 +298,23 @@ func validateGeneratedSymbols(f *File) error {
 		}
 	}
 	for _, service := range f.Services {
-		prefix := lowerFirst(strings.TrimSuffix(service.GoName, "Service"))
 		for _, symbol := range []struct {
 			name string
 			kind string
 		}{
 			{service.GoName, "server interface"},
+			{service.GoName + "Desc", "service descriptor"},
 			{"Register" + service.GoName, "register function"},
 			{service.GoName + "Client", "client interface"},
 			{"New" + service.GoName + "Client", "client constructor"},
-			{prefix + "Client", "client implementation"},
+			{lowerFirst(service.GoName) + "Client", "client implementation"},
 		} {
 			if err := declare(symbol.name, symbol.kind); err != nil {
 				return err
 			}
 		}
 		for _, method := range service.Methods {
-			if err := declare(prefix+method.GoName, "method constant"); err != nil {
+			if err := declare(service.GoName+"_"+method.GoName, "method descriptor"); err != nil {
 				return err
 			}
 			if !method.ClientStream && !method.ServerStream {
