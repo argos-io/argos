@@ -56,10 +56,12 @@ type ByteConn struct {
 // BytePipe returns a connected client/server ByteConn pair (net.Pipe).
 func BytePipe() (client, server *ByteConn) {
 	a, b := net.Pipe()
-	return newByteConn(a), newByteConn(b)
+	return NewByteConn(a), NewByteConn(b)
 }
 
-func newByteConn(nc net.Conn) *ByteConn {
+// NewByteConn wraps an existing net.Conn as a ByteStream CarrierConn.
+// Prefer this over BytePipe when tests need a buffered transport (e.g. TCP).
+func NewByteConn(nc net.Conn) *ByteConn {
 	c := &ByteConn{nc: nc}
 	c.reentry.R = nc
 	return c

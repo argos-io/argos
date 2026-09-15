@@ -648,6 +648,45 @@ func (c *netCarrier) CloseSend() error                  { return nil }
 func (c *netCarrier) SetReadDeadline(t time.Time) error { return c.nc.SetReadDeadline(t) }
 func (c *netCarrier) SetDeadline(t time.Time) error     { return c.nc.SetDeadline(t) }
 
+// tcpBytePair returns a connected ByteConn pair over loopback TCP.
+// Prefer this over fake.BytePipe when both peers write concurrently — net.Pipe
+// is unbuffered and deadlocks if AcceptCall/Finish ordering leaves one side
+// blocked on Write while the other is not yet Reading.
+func tcpBytePair(t *testing.T) (cli, srv *fake.ByteConn) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	type dialResult struct {
+		c   net.Conn
+		err error
+	}
+	ch := make(chan dialResult, 1)
+	go func() {
+		c, err := net.Dial("tcp", ln.Addr().String())
+		ch <- dialResult{c, err}
+	}()
+	srvNC, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dr := <-ch
+	if dr.err != nil {
+		_ = srvNC.Close()
+		t.Fatal(dr.err)
+	}
+	cli = fake.NewByteConn(dr.c)
+	srv = fake.NewByteConn(srvNC)
+	t.Cleanup(func() {
+		_ = cli.Close()
+		_ = srv.Close()
+	})
+	return cli, srv
+}
+
 func containsDrain(err error) bool {
 	return err != nil && (errors.Is(err, io.EOF) == false) &&
 		(stringContains(err.Error(), "MaxDrainBytes"))
@@ -666,19 +705,24 @@ func stringContains(s, sub string) bool {
 }
 
 func TestCrossCallBufferPreservedOnClose(t *testing.T) {
-	cliConn, srvConn := fake.BytePipe()
-	defer cliConn.Close()
-	defer srvConn.Close()
+	// TCP: injecting the next OPEN while call1 is closing must not drop bytes
+	// from the Session read buffer. net.Pipe deadlocks under the same race.
+	cliConn, srvConn := tcpBytePair(t)
 
 	fr := envelope.New()
-	cliSess, _ := fr.NewClientSession(context.Background(), cliConn, framing.SessionSpec{})
+	cliSess, err := fr.NewClientSession(context.Background(), cliConn, framing.SessionSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer cliSess.Close()
-	srvSess, _ := fr.NewServerSession(context.Background(), srvConn, framing.SessionSpec{})
+	srvSess, err := fr.NewServerSession(context.Background(), srvConn, framing.SessionSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer srvSess.Close()
 
 	method := descriptor.MustMethod("svc.Sticky", descriptor.Unary)
 
-	// Build call2 OPEN bytes to inject in the same segment as call1's trailing data.
 	open2, err := envelope.MarshalFrame(envelope.Frame{
 		Type:   envelope.TypeOpen,
 		CallID: 2,
@@ -689,20 +733,31 @@ func TestCrossCallBufferPreservedOnClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	accepted := make(chan string, 2)
+	call1Done := make(chan struct{})
+	accepted2 := make(chan string, 1)
 	go func() {
-		for i := 0; i < 2; i++ {
-			md := metadata.New(metadata.RoleResponder, nil)
-			sc, err := srvSess.AcceptCall(context.Background(), framing.CallSpec{Metadata: md})
-			if err != nil {
-				t.Errorf("AcceptCall %d: %v", i, err)
-				return
-			}
-			accepted <- sc.Method()
-			_, _, _ = sc.Recv()
-			_ = sc.Finish(nil)
-			_ = sc.Close()
+		md := metadata.New(metadata.RoleResponder, nil)
+		sc, err := srvSess.AcceptCall(context.Background(), framing.CallSpec{Metadata: md})
+		if err != nil {
+			t.Errorf("AcceptCall 0: %v", err)
+			return
 		}
+		_, _, _ = sc.Recv()
+		_ = sc.Finish(nil)
+		_ = sc.Close()
+		close(call1Done)
+
+		sc2, err := srvSess.AcceptCall(context.Background(), framing.CallSpec{
+			Metadata: metadata.New(metadata.RoleResponder, nil),
+		})
+		if err != nil {
+			t.Errorf("AcceptCall 1: %v", err)
+			return
+		}
+		accepted2 <- sc2.Method()
+		_, _, _ = sc2.Recv()
+		_ = sc2.Finish(nil)
+		_ = sc2.Close()
 	}()
 
 	c1, err := cliSess.OpenCall(context.Background(), method, framing.CallSpec{
@@ -714,7 +769,7 @@ func TestCrossCallBufferPreservedOnClose(t *testing.T) {
 	_ = c1.HalfClose()
 	_, _, _ = c1.Recv()
 	_ = c1.Close()
-	<-accepted
+	<-call1Done
 
 	// Inject next OPEN via the carrier; session readBuf must not drop it on Close.
 	if _, err := cliConn.Write(open2); err != nil {
@@ -722,7 +777,7 @@ func TestCrossCallBufferPreservedOnClose(t *testing.T) {
 	}
 
 	select {
-	case m := <-accepted:
+	case m := <-accepted2:
 		if m != method.FullName() {
 			t.Fatalf("call2 method %q", m)
 		}
@@ -732,15 +787,19 @@ func TestCrossCallBufferPreservedOnClose(t *testing.T) {
 }
 
 func TestReadNeverConcurrent(t *testing.T) {
-	cliConn, srvConn := fake.BytePipe()
+	cliConn, srvConn := tcpBytePair(t)
 	cliConn.DetectReentry = true
-	defer cliConn.Close()
-	defer srvConn.Close()
 
 	fr := envelope.New()
-	cliSess, _ := fr.NewClientSession(context.Background(), cliConn, framing.SessionSpec{})
+	cliSess, err := fr.NewClientSession(context.Background(), cliConn, framing.SessionSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer cliSess.Close()
-	srvSess, _ := fr.NewServerSession(context.Background(), srvConn, framing.SessionSpec{})
+	srvSess, err := fr.NewServerSession(context.Background(), srvConn, framing.SessionSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer srvSess.Close()
 
 	method := descriptor.MustMethod("svc.Reentry", descriptor.Unary)
