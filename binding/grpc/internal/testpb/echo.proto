@@ -1,0 +1,14 @@
+syntax = "proto3";
+package echo.v1;
+option go_package = "github.com/argos-io/argos/binding/grpc/internal/testpb";
+
+message EchoMessage {
+  string value = 1;
+}
+
+service Echo {
+  rpc Unary(EchoMessage) returns (EchoMessage);
+  rpc ClientStream(stream EchoMessage) returns (EchoMessage);
+  rpc ServerStream(EchoMessage) returns (stream EchoMessage);
+  rpc Bidi(stream EchoMessage) returns (stream EchoMessage);
+}

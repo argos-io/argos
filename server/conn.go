@@ -105,7 +105,13 @@ func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry
 				continue
 			}
 			if errors.Is(err, io.EOF) {
-				connCancel(ErrPeerGone)
+				// Normal AcceptCall end: peer closed a Sequential/OneCall
+				// session, or a one-shot Concurrent CarrierConn (gRPC×HTTP/2)
+				// has no further calls. Do not cancel in-flight Concurrent
+				// handlers with ErrPeerGone — that races Finish into
+				// Unavailable while the handler is still completing.
+				// defer callWG.Wait() drains in-flight; defer connCancel(nil)
+				// releases the connection context afterward.
 				return
 			}
 			// acceptCtx / idle / age / shutdown wake — clean loop exit.

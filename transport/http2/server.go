@@ -69,7 +69,8 @@ func (c *serverCarrier) Read(p []byte) (int, error) {
 }
 
 // Write writes response body bytes. Implicitly sends 200 if headers were not
-// written yet (net/http behavior).
+// written yet (net/http behavior). Flushes so streaming peers (e.g. grpc-go
+// bidi) observe DATA without waiting for the handler to return.
 func (c *serverCarrier) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	if c.aborted || c.finished {
@@ -80,7 +81,11 @@ func (c *serverCarrier) Write(p []byte) (int, error) {
 		c.headersWritten = true
 	}
 	c.mu.Unlock()
-	return c.w.Write(p)
+	n, err := c.w.Write(p)
+	if f, ok := c.w.(http.Flusher); ok {
+		f.Flush()
+	}
+	return n, err
 }
 
 // WriteHeaders submits and flushes initial response headers.
