@@ -20,6 +20,15 @@ import (
 //
 // KNOWN FAILING - skipped, not fixed. A green package run is not proof.
 //
+// This test is the instrument for the fix: 2000 rounds makes one run a verdict
+// rather than a sample (a wedge is a ~0.2%-per-round event, so 300 rounds caught
+// it in under half of runs). Measured with it:
+//
+//	unfixed baseline        wedges at round 0-2,   5/5 runs
+//	fixes 1+2+3+generation  wedges at round 1198,  still not clean
+//
+// A clean run must complete all 2000 rounds.
+//
 // Run it without the skip to observe:
 //
 //	go test ./framing/envelope/ -run EarlyStatusCallDoesNotWedgeNextAccept -count=1
@@ -115,7 +124,6 @@ import (
 // except for callers whose ctx carries no deadline.
 func TestEarlyStatusCallDoesNotWedgeNextAccept(t *testing.T) {
 	t.Skip("known defects in the accept/demux handshake; see the comment above")
-	t.Parallel()
 	cliConn, srvConn := tcpBytePair(t)
 	fr := envelope.New()
 
@@ -144,7 +152,13 @@ func TestEarlyStatusCallDoesNotWedgeNextAccept(t *testing.T) {
 		}
 	}
 
-	const rounds = 300
+	// 2000 rounds is the instrument's sensitivity. A wedge is a per-round event
+	// at roughly 0.2%, so 300 rounds caught it in well under half of runs and a
+	// fix could look clean by luck; at 2000 the detection probability is ~98%
+	// for one run, which is what makes a single run a verdict instead of a
+	// sample. A clean run costs a few seconds because non-wedged rounds are
+	// sub-millisecond.
+	const rounds = 2000
 	for i := 0; i < rounds; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		badID := uint64(i*2 + 1)
@@ -163,7 +177,8 @@ func TestEarlyStatusCallDoesNotWedgeNextAccept(t *testing.T) {
 		})
 		if errors.Is(err, context.DeadlineExceeded) {
 			cancel()
-			t.Fatalf("round %d: AcceptCall wedged serving the rejected call", i)
+			t.Fatalf("WEDGED at round %d of %d (rejected call); a clean run must "+
+				"complete all %d rounds", i, rounds, rounds)
 		}
 		if !errors.Is(err, framing.ErrCallRejected) {
 			cancel()
@@ -186,8 +201,9 @@ func TestEarlyStatusCallDoesNotWedgeNextAccept(t *testing.T) {
 		})
 		if errors.Is(err, context.DeadlineExceeded) {
 			cancel()
-			t.Fatalf("round %d: AcceptCall wedged after an early-status call "+
-				"(lost wakeup: the recvLoop is parked while AcceptCall waits)", i)
+			t.Fatalf("WEDGED at round %d of %d (after an early-status call): the "+
+				"recvLoop is parked while AcceptCall waits; a clean run must "+
+				"complete all %d rounds", i, rounds, rounds)
 		}
 		if err != nil {
 			cancel()
