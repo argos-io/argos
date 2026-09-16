@@ -107,17 +107,19 @@ func New(cfg *argos.Config, service string, opts ...argos.Option) (*Client, erro
 		MaxSessionsPerEndpoint: cfg.MaxSessionsPerEndpoint,
 		MaxIdleSessions:        cfg.MaxIdleSessions,
 		SessionIdleTimeout:     cfg.SessionIdleTimeout,
-		MaxSessionLifetime:      cfg.MaxSessionLifetime,
+		MaxSessionLifetime:     cfg.MaxSessionLifetime,
 		HandshakeTimeout:       cfg.HandshakeTimeout,
 		SessionSpec: framing.SessionSpec{
 			CodecName: codecName,
 			Config: framing.Config{
-				MaxMessageSize:    cfg.MaxMessageSize,
-				MaxFrameSize:      cfg.MaxFrameSize,
-				MaxMetadataSize:   cfg.MaxMetadataSize,
-				ReadAheadMessages: cfg.ReadAheadMessages,
-				OpenTimeout:       cfg.OpenTimeout,
-				MaxDrainBytes:     cfg.MaxDrainBytes,
+				MaxMessageSize:  cfg.MaxMessageSize,
+				MaxFrameSize:    cfg.MaxFrameSize,
+				MaxMetadataSize: cfg.MaxMetadataSize,
+
+				MaxInboundMetadataSize: cfg.MaxInboundMetadataSize,
+				ReadAheadMessages:      cfg.ReadAheadMessages,
+				OpenTimeout:            cfg.OpenTimeout,
+				MaxDrainBytes:          cfg.MaxDrainBytes,
 			},
 		},
 	})
@@ -240,17 +242,38 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 		return stream.Wrap(call, c.binding.Codec), nil
 	}
 
+	// abandonOpen unwinds a call the filter chain opened but will not return.
+	// Dropping it here used to leak the framing.Call and pin the borrowed
+	// session forever: the pool only reclaims entries whose refcount is zero,
+	// and the entry kept counting against MaxSessionsPerEndpoint until the
+	// client could no longer open anything.
+	abandonOpen := func() {
+		stopBridge()
+		callCancel()
+		if gotCall != nil {
+			_ = gotCall.Close()
+		}
+		if gotSess != nil && c.pool != nil {
+			c.pool.Release(gotSess)
+		}
+	}
+
 	open := filter.ChainOpen(c.cfg.OpenFilters, terminus)
 	st, err := open(callCtx, m)
 	if err != nil {
-		stopBridge()
-		callCancel()
+		abandonOpen()
 		return nil, err
 	}
 	if gotCall == nil {
-		stopBridge()
-		callCancel()
+		abandonOpen()
 		return nil, fmt.Errorf("client: OpenFilter returned stream without opening a call")
+	}
+	if st == nil {
+		// (nil, nil) after next: ChainOpen cannot see it, and every later
+		// operation would call a method on a nil Stream inside a goroutine —
+		// an unrecoverable process panic rather than a call error.
+		abandonOpen()
+		return nil, fmt.Errorf("%w: OpenFilter returned a nil stream after opening the call", filter.ErrOpenFilterMisuse)
 	}
 
 	cs := &CallStream{

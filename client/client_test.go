@@ -48,10 +48,10 @@ func (bytesCodec) Unmarshal(b []byte, v any) error {
 
 // loopTransport dials via a callback; Serve is unused on the client path.
 type loopTransport struct {
-	dial    func(ctx context.Context, endpoint string) (transport.Conn, error)
-	dials   atomic.Int64
-	closed  atomic.Bool
-	closeN  atomic.Int64
+	dial   func(ctx context.Context, endpoint string) (transport.Conn, error)
+	dials  atomic.Int64
+	closed atomic.Bool
+	closeN atomic.Int64
 }
 
 func (t *loopTransport) Dial(ctx context.Context, spec transport.DialSpec, _ ...transport.ClientOption) (transport.Conn, error) {

@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	"errors"
+	"io"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -9,6 +11,7 @@ import (
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/metadata"
+	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/stream"
 )
 
@@ -42,39 +45,32 @@ type leakState struct {
 	info   argos.CallInfo
 }
 
-// Send delegates to the decorated stream, aborted when the call ctx is done.
+// Send delegates to the decorated stream.
+//
+// There is no per-operation goroutine: that design returned s.callCtx.Err()
+// while abandoning the operation, so a call that had already delivered its
+// message was reported as a failure and the abandoned goroutine could still
+// write into the caller's memory after Send/Recv had returned. Blocking is
+// bounded instead by the call ctx: CallStream.Close closes the framing.Call,
+// and stopWatch does the same as soon as callCtx is done (installed in Open
+// before any operation can run), so a blocked Send/Recv is always unblocked.
 func (s *CallStream) Send(v any) error {
 	if err := s.callCtx.Err(); err != nil {
 		return err
 	}
-	errCh := make(chan error, 1)
-	go func() { errCh <- s.stream.Send(v) }()
-	select {
-	case err := <-errCh:
-		return err
-	case <-s.callCtx.Done():
-		return s.callCtx.Err()
-	}
+	return s.interrupted(s.stream.Send(v))
 }
 
 // Recv delegates to the decorated stream. First successful or terminal Recv
 // marks empty initial metadata arrived (fake Framing has no HEADERS frame).
-// Honors call ctx cancel even when the underlying Recv stays blocked.
 func (s *CallStream) Recv(v any) error {
 	if err := s.callCtx.Err(); err != nil {
 		s.markHeadersReady()
 		return err
 	}
-	errCh := make(chan error, 1)
-	go func() { errCh <- s.stream.Recv(v) }()
-	select {
-	case err := <-errCh:
-		s.markHeadersReady()
-		return err
-	case <-s.callCtx.Done():
-		s.markHeadersReady()
-		return s.callCtx.Err()
-	}
+	err := s.stream.Recv(v)
+	s.markHeadersReady()
+	return s.interrupted(err)
 }
 
 // HalfClose delegates to the decorated stream.
@@ -82,14 +78,26 @@ func (s *CallStream) HalfClose() error {
 	if err := s.callCtx.Err(); err != nil {
 		return err
 	}
-	errCh := make(chan error, 1)
-	go func() { errCh <- s.stream.HalfClose() }()
-	select {
-	case err := <-errCh:
+	return s.interrupted(s.stream.HalfClose())
+}
+
+// interrupted maps an operation that was unblocked by cancelation onto the call
+// context's error. A resolved result is never rewritten (§2.4): a delivered
+// message (nil), a normal receive end (io.EOF) and an already-parsed remote
+// status all win over a ctx that fired at the same moment. stream.ErrSendClosed
+// is likewise preserved — it ends only the send direction.
+func (s *CallStream) interrupted(err error) error {
+	if err == nil || errors.Is(err, io.EOF) {
 		return err
-	case <-s.callCtx.Done():
-		return s.callCtx.Err()
 	}
+	var se *status.StatusError
+	if errors.As(err, &se) {
+		return err
+	}
+	if ctxErr := s.callCtx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return err
 }
 
 // Header waits until response initial metadata is available (or implied by
