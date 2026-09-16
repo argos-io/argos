@@ -58,8 +58,18 @@ import (
 //     observes that past deadline, and readFrameAccepting classifies the
 //     resulting "read: i/o timeout" as a hard I/O fault (it is a net.Error,
 //     not context.DeadlineExceeded) and delivers it as the accept's result.
-//     Start from: who clears the deadline wakeRead set, and whether a wakeRead
-//     can land between an accept's ctx check and its read.
+//     Instrumented evidence: "readFrame err=... i/o timeout openTimeout=10s
+//     ctx=true" - the read started under a fresh 10s OpenTimeout and expired at
+//     once, because a wakeRead() from the previous call's Close landed while it
+//     was in flight and this accept's ctx was already done.
+//     A naive fix was tried and REGRESSED the wedge (7/10 fail, back at random
+//     rounds): checking ctx before waitFirstByte's buffered-byte shortcut, and
+//     reporting a wake-induced expiry as ctx.Err(), feeds a cancelled accept's
+//     error into the handoff path and parks the reader there again.
+//     The structural problem is that the accept ctx outlives its accept and is
+//     reused by a read the reader starts afterwards. A per-attempt lifecycle
+//     for it - or an idle state the reader returns to when no accept owns the
+//     connection - is where this lands, not another classification tweak.
 //
 // Defects 1-3 are what make the failure deterministic today (round 0, 3/3);
 // with them fixed the wedge is gone and only defect 4 remains, intermittently.
