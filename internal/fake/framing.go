@@ -332,6 +332,7 @@ func (s *ClientSession) OpenCall(ctx context.Context, m descriptor.Method, _ fra
 		localCar: local,
 		hygiene:  s.framing.Hygiene,
 		inbox:    make(chan recvItem, 8),
+		done:     make(chan struct{}),
 	}
 	call.startRecv()
 	return call, nil
@@ -343,10 +344,6 @@ func (s *ClientSession) endFlight() {
 		s.inFlight--
 	}
 	s.mu.Unlock()
-}
-
-func (s *ClientSession) noteAbort() {
-	s.MarkBad()
 }
 
 type recvItem struct {
@@ -371,7 +368,16 @@ type Call struct {
 	recvDone chan struct{}
 	stopRecv context.CancelFunc
 	half     bool
+
+	// done is closed by Close. recvLoop never closes inbox, so a Recv parked on
+	// it would otherwise stay blocked forever — Close must unblock in-flight
+	// Recv/Send (framing.Call).
+	done chan struct{}
 }
+
+// errCallClosed is a local, non-status error: a resolved remote status must
+// stay distinguishable from a read unblocked by Close.
+var errCallClosed = errors.New("fake: call closed")
 
 func (c *Call) startRecv() {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -461,7 +467,23 @@ func (c *Call) SendHeaders() error {
 
 // Recv implements framing.Call.
 func (c *Call) Recv() (payload []byte, release func(), err error) {
-	it, ok := <-c.inbox
+	// A buffered item wins over the close signal so an already-delivered
+	// message is never dropped; the close signal then guarantees Close unblocks
+	// a parked Recv, since recvLoop never closes inbox.
+	select {
+	case it, ok := <-c.inbox:
+		return c.handleRecvItem(it, ok)
+	default:
+	}
+	select {
+	case it, ok := <-c.inbox:
+		return c.handleRecvItem(it, ok)
+	case <-c.done:
+		return nil, nil, errCallClosed
+	}
+}
+
+func (c *Call) handleRecvItem(it recvItem, ok bool) (payload []byte, release func(), err error) {
 	if !ok {
 		return nil, nil, io.EOF
 	}
@@ -541,6 +563,14 @@ func (c *Call) Close() error {
 	c.closed = true
 	terminal := c.terminal
 	c.mu.Unlock()
+
+	// Unblock a parked Recv before waiting for the receive goroutine, which
+	// exits without closing inbox.
+	select {
+	case <-c.done:
+	default:
+		close(c.done)
+	}
 
 	if c.stopRecv != nil {
 		c.stopRecv()
@@ -735,12 +765,13 @@ func (s *ServerSession) AcceptCall(ctx context.Context, _ framing.CallSpec) (fra
 	}
 
 	call := &Call{
-		server:   s,
-		carrier:  s.carrier,
-		callID:   res.id,
-		method:   string(res.payload),
-		hygiene:  s.framing.Hygiene,
-		inbox:    make(chan recvItem, 8),
+		server:  s,
+		carrier: s.carrier,
+		callID:  res.id,
+		method:  string(res.payload),
+		hygiene: s.framing.Hygiene,
+		inbox:   make(chan recvItem, 8),
+		done:    make(chan struct{}),
 	}
 	// Promote to ServerCall wrapper.
 	sc := &ServerCall{Call: call}

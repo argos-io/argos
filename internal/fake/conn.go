@@ -30,14 +30,14 @@ var (
 	_ transport.Conn       = (*HTTPClientConn)(nil)
 	_ transport.StreamConn = (*HTTPClientConn)(nil)
 
-	_ transport.Conn                 = (*HTTPServerConn)(nil)
-	_ transport.CarrierConn          = (*HTTPServerConn)(nil)
-	_ transport.ByteStreamCarrier    = (*httpCarrier)(nil)
-	_ transport.RequestHeaderReader  = (*httpCarrier)(nil)
-	_ transport.ResponseHeaderReader = (*httpCarrier)(nil)
+	_ transport.Conn                  = (*HTTPServerConn)(nil)
+	_ transport.CarrierConn           = (*HTTPServerConn)(nil)
+	_ transport.ByteStreamCarrier     = (*httpCarrier)(nil)
+	_ transport.RequestHeaderReader   = (*httpCarrier)(nil)
+	_ transport.ResponseHeaderReader  = (*httpCarrier)(nil)
 	_ transport.ResponseTrailerReader = (*httpCarrier)(nil)
-	_ transport.ResponseWriter       = (*httpCarrier)(nil)
-	_ transport.SendCloser           = (*httpCarrier)(nil)
+	_ transport.ResponseWriter        = (*httpCarrier)(nil)
+	_ transport.SendCloser            = (*httpCarrier)(nil)
 )
 
 // ---------------------------------------------------------------------------
@@ -342,6 +342,32 @@ type HTTPClientConn struct {
 	mu     sync.Mutex
 	closed bool
 	closes int64
+
+	// writeFailErr arms a request-body write failure for streams this handle
+	// opens (FailClientWrites).
+	writeFailErr  error
+	writeFailOpen bool
+}
+
+// FailClientWrites makes every request-body write on streams this handle opens
+// fail with a transport.SendError, the way an HTTP transport reports a body the
+// peer stopped accepting. Reads are untouched, so the response stays readable —
+// the case the contract is about. A nil err disarms the hook; receiveOpen
+// mirrors SendError.ReceiveOpen, where false models a dead exchange.
+func (c *HTTPClientConn) FailClientWrites(receiveOpen bool, err error) {
+	c.mu.Lock()
+	c.writeFailErr, c.writeFailOpen = err, receiveOpen
+	c.mu.Unlock()
+}
+
+// pendingWriteFailure reports the armed request-body failure, if any.
+func (c *HTTPClientConn) pendingWriteFailure() (open, armed bool, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.writeFailErr == nil {
+		return false, false, nil
+	}
+	return c.writeFailOpen, true, c.writeFailErr
 }
 
 // HTTPListener accepts server-side per-request CarrierConns.
@@ -354,29 +380,31 @@ type HTTPListener struct {
 type HTTPServerConn struct {
 	carrier *httpCarrier
 
-	closed  atomic.Bool
-	closes  atomic.Int64
-	aborted atomic.Bool
+	closed atomic.Bool
+	closes atomic.Int64
 }
 
 type httpCarrier struct {
 	role string // "client" or "server"
+	// own is the client endpoint handle this stream belongs to, nil on the
+	// server side. Request-body write failures are armed on the handle.
+	own *HTTPClientConn
 
 	pr *io.PipeReader
 	pw *io.PipeWriter
 
 	preface transport.RequestPreface
 
-	mu         sync.Mutex
-	hdrDone    chan struct{}
-	trailersMu sync.Mutex
-	status     int
-	headers    transport.Headers
-	trailers   transport.Headers
+	mu             sync.Mutex
+	hdrDone        chan struct{}
+	trailersMu     sync.Mutex
+	status         int
+	headers        transport.Headers
+	trailers       transport.Headers
 	headersWritten bool
-	hdrErr     error
-	aborted    atomic.Bool
-	peer       *httpCarrier // opposite direction for header signaling
+	hdrErr         error
+	aborted        atomic.Bool
+	peer           *httpCarrier // opposite direction for header signaling
 }
 
 // HTTPLoopback returns a client StreamConn and a listener for server Conns.
@@ -432,6 +460,7 @@ func (c *HTTPClientConn) OpenStream(ctx context.Context, p transport.RequestPref
 
 	clientCar := &httpCarrier{
 		role:    "client",
+		own:     c,
 		pr:      s2cR,
 		pw:      c2sW,
 		preface: p,
@@ -516,12 +545,23 @@ func (h *httpCarrier) Abort() error {
 	return nil
 }
 
-func (h *httpCarrier) Read(p []byte) (int, error)  { return h.pr.Read(p) }
-func (h *httpCarrier) Write(p []byte) (int, error) { return h.pw.Write(p) }
+func (h *httpCarrier) Read(p []byte) (int, error) { return h.pr.Read(p) }
+
+// Write writes the request body (client) or the response body (server). A
+// client-side failure is classified as a transport.SendError when the endpoint
+// handle armed one, matching what an HTTP transport reports.
+func (h *httpCarrier) Write(p []byte) (int, error) {
+	if h.own != nil {
+		if open, armed, err := h.own.pendingWriteFailure(); armed {
+			return 0, transport.WrapSendError(err, open)
+		}
+	}
+	return h.pw.Write(p)
+}
 
 func (h *httpCarrier) CloseSend() error { return h.pw.Close() }
 
-func (h *httpCarrier) RequestTarget() string           { return h.preface.RequestTarget }
+func (h *httpCarrier) RequestTarget() string             { return h.preface.RequestTarget }
 func (h *httpCarrier) RequestHeaders() transport.Headers { return h.preface.Headers }
 
 func (h *httpCarrier) ResponseStatus() (int, error) {
