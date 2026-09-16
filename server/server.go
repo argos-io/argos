@@ -19,8 +19,9 @@ import (
 // Server is the composition-layer server: Transport.Serve → AcceptCall loop →
 // admit → route → Accept → Filter → Finish/Close (§4.1 / §5.2).
 type Server struct {
-	cfg   *argos.Config
-	admit *admitGate
+	cfg    *argos.Config
+	cfgErr error // option set New rejected; returned by AddBinding and Run
+	admit  *admitGate
 
 	mu             sync.Mutex
 	bindings       []bindingReg
@@ -64,17 +65,27 @@ type liveBinding struct {
 	sessSpec framing.SessionSpec
 }
 
-// New constructs a Server from an immutable Config snapshot.
-func New(cfg *argos.Config) *Server {
-	if cfg == nil {
-		cfg, _ = argos.New()
-	}
-	perCall, err := cfg.PerCall()
+// New constructs a Server from options only: the Config it starts from is the
+// one named by argos.WithConfig, or the process default.
+//
+// New does not return an error so that a Server value is always usable as a
+// receiver. A rejected option set is remembered and returned by AddBinding and
+// Run, which is the first point where it can matter.
+func New(opts ...argos.ServerOption) *Server {
+	cfg, err := argos.ServerConfig(opts...)
 	if err != nil {
+		// Keep a valid Config so the admission gate and every later method
+		// have real numbers to work with; the error is what callers see.
+		fallback := argos.Defaults()
+		cfg = &fallback
+	}
+	perCall, cerr := cfg.PerCall()
+	if cerr != nil {
 		perCall = 0
 	}
 	return &Server{
 		cfg:           cfg,
+		cfgErr:        err,
 		admit:         newAdmitGate(cfg.MaxConcurrentCalls, cfg.MaxBufferedBytes, perCall),
 		routes:        make(map[string]map[string]routeEntry),
 		acceptCancels: make(map[*uint64]context.CancelFunc),
@@ -84,7 +95,10 @@ func New(cfg *argos.Config) *Server {
 
 // AddBinding registers a BindingFunc. Options overlay the server Config for
 // this binding. Must be called before Run.
-func (s *Server) AddBinding(fn argos.BindingFunc, opts ...argos.Option) error {
+func (s *Server) AddBinding(fn argos.BindingFunc, opts ...argos.ServerOption) error {
+	if s.cfgErr != nil {
+		return s.cfgErr
+	}
 	if fn == nil {
 		return fmt.Errorf("server: nil BindingFunc")
 	}
@@ -98,8 +112,11 @@ func (s *Server) AddBinding(fn argos.BindingFunc, opts ...argos.Option) error {
 	}
 	cfg := s.cfg
 	if len(opts) > 0 {
+		// WithConfig names the base wherever it appears, so prepending the
+		// server Config keeps a per-binding WithConfig in charge if the caller
+		// passes one.
 		var err error
-		cfg, err = s.cfg.With(opts...)
+		cfg, err = argos.ServerConfig(append([]argos.ServerOption{argos.WithConfig(s.cfg)}, opts...)...)
 		if err != nil {
 			return err
 		}
@@ -154,6 +171,9 @@ func (s *Server) Register(d descriptor.Service, handlers map[string]filter.Handl
 // Run starts all bindings (factory once each) and blocks until they exit or
 // ctx is canceled. Only one successful Run is allowed.
 func (s *Server) Run(ctx context.Context) error {
+	if s.cfgErr != nil {
+		return s.cfgErr
+	}
 	if ctx == nil {
 		return fmt.Errorf("server: nil context")
 	}
@@ -172,7 +192,6 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	bindings := append([]bindingReg(nil), s.bindings...)
 	routes := cloneRoutes(s.routes)
-	filters := append([]filter.Filter(nil), s.cfg.Filters...)
 	s.running = true
 	s.ran = true
 	runCtx, runCancel := context.WithCancelCause(ctx)
@@ -270,7 +289,7 @@ func (s *Server) Run(ctx context.Context) error {
 			serveOpts = append(serveOpts, transport.WithHTTPTimeouts(
 				lb.cfg.HTTPReadHeaderTimeout, lb.cfg.HTTPIdleTimeout))
 			err := lb.tr.Serve(runCtx, func(_ context.Context, c transport.Conn) {
-				s.onConn(lb, routes, filters, c)
+				s.onConn(lb, routes, c)
 			}, serveOpts...)
 			if err != nil && runCtx.Err() == nil {
 				// CompareAndSwap, not Store: two bindings can fail in the same

@@ -3,6 +3,7 @@ package server_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,12 +31,8 @@ func TestBindingFuncOncePerServerStart(t *testing.T) {
 		return st.Send(req)
 	}
 
-	cfg, err := argos.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := server.New(cfg)
-	err = srv.AddBinding(func() (argos.Binding, error) {
+	srv := server.New()
+	err := srv.AddBinding(func() (argos.Binding, error) {
 		calls.Add(1)
 		return argos.Binding{Transport: tr, Framing: fr, Codec: rawCodec{}}, nil
 	})
@@ -155,11 +152,7 @@ func TestFactoryIsolationAcrossBindings(t *testing.T) {
 	tr1, tr2 := newTestTransport(), newTestTransport()
 	fr1, fr2 := fake.NewFraming(framing.Sequential), fake.NewFraming(framing.Sequential)
 
-	cfg, err := argos.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := server.New(cfg)
+	srv := server.New()
 
 	mk := func(tr transport.Transport, fr framing.Framing) argos.BindingFunc {
 		return func() (argos.Binding, error) {
@@ -186,5 +179,28 @@ func TestFactoryIsolationAcrossBindings(t *testing.T) {
 
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("BindingFunc calls = %d, want 2 (once per binding)", got)
+	}
+}
+
+// New has no error return, so a rejected option set must be remembered and
+// reported by the first call where it can matter: AddBinding and Run. A Server
+// that silently ran with the built-in defaults instead would hide the misuse.
+func TestRejectedOptionsSurfaceFromAddBindingAndRun(t *testing.T) {
+	tr := newTestTransport()
+	fr := fake.NewFraming(framing.Sequential)
+	srv := server.New(argos.WithMaxConcurrentCalls(-5))
+	t.Cleanup(func() { _ = srv.Close() })
+
+	addErr := srv.AddBinding(func() (argos.Binding, error) {
+		return argos.Binding{Transport: tr, Framing: fr, Codec: rawCodec{}}, nil
+	})
+	if addErr == nil {
+		t.Fatal("AddBinding succeeded on a Server built from a rejected option set")
+	}
+	if !strings.Contains(addErr.Error(), "MaxConcurrentCalls") {
+		t.Fatalf("AddBinding: %v, want the error to name MaxConcurrentCalls", addErr)
+	}
+	if err := srv.Run(context.Background()); !errors.Is(err, addErr) {
+		t.Fatalf("Run: %v, want the same rejection AddBinding reported (%v)", err, addErr)
 	}
 }

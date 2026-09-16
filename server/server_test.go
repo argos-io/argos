@@ -174,14 +174,10 @@ func echoService() descriptor.Service {
 	return descriptor.MustService(svcName, m)
 }
 
-func startServer(t *testing.T, tr *testTransport, fr framing.Framing, h filter.Handler, opts ...argos.Option) *server.Server {
+func startServer(t *testing.T, tr *testTransport, fr framing.Framing, h filter.Handler, opts ...argos.ServerOption) *server.Server {
 	t.Helper()
-	cfg, err := argos.New(opts...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := server.New(cfg)
-	err = srv.AddBinding(func() (argos.Binding, error) {
+	srv := server.New(opts...)
+	err := srv.AddBinding(func() (argos.Binding, error) {
 		return argos.Binding{
 			Transport: tr,
 			Framing:   fr,
@@ -288,6 +284,60 @@ func TestUnaryRegisterAndRun(t *testing.T) {
 		t.Fatalf("handler calls = %d", got.Load())
 	}
 	_ = srv
+}
+
+// A Filter passed to AddBinding was stored on the per-binding Config and then
+// never used: dispatch chained the server-level slice, so a per-binding filter
+// silently did nothing.
+func TestAddBindingFilterRunsForThatBinding(t *testing.T) {
+	tr := newTestTransport()
+	srvFr := fake.NewFraming(framing.Sequential)
+	cliFr := fake.NewFraming(framing.Sequential)
+
+	var serverLevel, perBinding atomic.Int64
+	count := func(n *atomic.Int64) filter.Filter {
+		return func(ctx context.Context, m descriptor.Method, st stream.Stream, next filter.Handler) error {
+			n.Add(1)
+			return next(ctx, m, st)
+		}
+	}
+	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
+		var req []byte
+		if err := st.Recv(&req); err != nil {
+			return err
+		}
+		drainRecv(st)
+		return st.Send([]byte("pong:" + string(req)))
+	}
+
+	srv := server.New(argos.WithFilter(count(&serverLevel)))
+	err := srv.AddBinding(func() (argos.Binding, error) {
+		return argos.Binding{Transport: tr, Framing: srvFr, Codec: rawCodec{}}, nil
+	}, argos.WithFilter(count(&perBinding)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: h}); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Run(context.Background()) }()
+	time.Sleep(10 * time.Millisecond)
+	t.Cleanup(func() { _ = srv.Close() })
+
+	client, serverConn := fake.BytePipe()
+	tr.Offer(serverConn)
+	call := openClientCall(t, client, cliFr, descriptor.MustMethod(fullMethod, descriptor.Unary))
+	if out := unaryRoundTrip(t, call, "hi"); out != "pong:hi" {
+		t.Fatalf("got %q", out)
+	}
+	_ = call.Close()
+
+	if serverLevel.Load() != 1 {
+		t.Errorf("server-level filter ran %d times, want 1", serverLevel.Load())
+	}
+	if perBinding.Load() != 1 {
+		t.Errorf("per-binding filter ran %d times, want 1", perBinding.Load())
+	}
 }
 
 func TestTenSequentialCallsOneConn(t *testing.T) {
@@ -407,11 +457,7 @@ func TestShutdownIdleConnExitsQuickly(t *testing.T) {
 		drainRecv(st)
 		return st.Send(req)
 	}
-	cfg, err := argos.New(argos.WithMaxInboundConnIdle(30 * time.Second))
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := server.New(cfg)
+	srv := server.New(argos.WithMaxInboundConnIdle(30 * time.Second))
 	if err := srv.AddBinding(func() (argos.Binding, error) {
 		return argos.Binding{Transport: tr, Framing: fr, Codec: rawCodec{}}, nil
 	}); err != nil {

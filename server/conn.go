@@ -19,7 +19,7 @@ import (
 	"github.com/argos-io/argos/transport"
 )
 
-func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry, filters []filter.Filter, c transport.Conn) {
+func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry, c transport.Conn) {
 	cfg := lb.cfg
 	maxConns := int64(cfg.MaxInboundConns)
 	if n := lb.active.Add(1); maxConns > 0 && n > maxConns {
@@ -137,10 +137,10 @@ func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry
 			callWG.Add(1)
 			go func(call framing.ServerCall, md metadata.CallMetadata) {
 				defer callWG.Done()
-				s.handleCall(connCtx, lb, routes, filters, call, md)
+				s.handleCall(connCtx, lb, routes, call, md)
 			}(call, md)
 		default: // Sequential, OneCallPerConn
-			s.handleCall(connCtx, lb, routes, filters, call, md)
+			s.handleCall(connCtx, lb, routes, call, md)
 		}
 	}
 }
@@ -161,7 +161,6 @@ func (s *Server) handleCall(
 	connCtx context.Context,
 	lb *liveBinding,
 	routes map[string]map[string]routeEntry,
-	filters []filter.Filter,
 	call framing.ServerCall,
 	md metadata.CallMetadata,
 ) {
@@ -211,7 +210,10 @@ func (s *Server) handleCall(
 	}
 
 	st := stream.Wrap(call, lb.codec)
-	chain := filter.Chain(filters, entry.handler)
+	// lb.cfg, not s.cfg: the per-binding Config already carries the server's
+	// filters plus any that AddBinding appended for this binding. Chaining
+	// s.cfg.Filters here dropped the per-binding ones silently.
+	chain := filter.Chain(lb.cfg.Filters, entry.handler)
 	herr := chain(callCtx, entry.method, st)
 	ferr := finishError(callCtx, herr)
 	if err := call.Finish(ferr); err != nil {
