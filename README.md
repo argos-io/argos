@@ -2,7 +2,7 @@
 
 可组装的 RPC 运行时内核：**Transport × Framing × Codec** 三轴组成协议；**连接（`Conn` / `Session`）是一等事实**。定位是验证可组装模型，不是生产级通用 RPC 框架。
 
-本文件是整体设计与用法说明。代理约定见 `AGENTS.md`；实现以代码与测试为准。
+本文件是整体设计与用法说明。代理约定见 `AGENTS.md`；**新传输/分帧/codec 接入**见 [`docs/`](docs/README.md)。实现以代码与测试为准。
 
 ---
 
@@ -201,6 +201,8 @@ st, err := cli.Open(ctx, echov1.EchoService_Echo)
 
 自定义组合：在 `WithService` 里分别 `ServiceTransport` / `ServiceFraming` / `ServiceCodec`，不必改 `client`/`server`。
 
+**扩展接入（实现侧）**：各轴须实现的接口、Carrier 能力配对、检查单与内置组合矩阵见 [`docs/`](docs/README.md)（[`transport.md`](docs/transport.md)、[`framing.md`](docs/framing.md)、[`codec-and-wiring.md`](docs/codec-and-wiring.md)、[`compatibility-matrix.md`](docs/compatibility-matrix.md)）。
+
 ### 4.4 调用收尾（用法约定）
 
 - 客户端读完业务消息后须读到**终态**（STATUS / trailers）再 `Close`，未读终态的会话不得回池。
@@ -339,6 +341,8 @@ make verify          # 上列全部
 ---
 
 ## 附录：Carrier 能力（查阅）
+
+完整矩阵与 assert 清单见 [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md)。摘要：
 
 | Conn / Carrier | 典型组合 | 要点 |
 |---|---|---|
