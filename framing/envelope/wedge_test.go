@@ -29,6 +29,29 @@ import (
 //
 // A clean run must complete all 2000 rounds.
 //
+// Seventh attempt: the three-phase rewrite the notes below call for (explicit
+// accept / demux / idle phases, each owning its own errors, with every wait
+// latched on the epoch). Measured: WEDGED at round 181 of 2000. The split alone
+// does not close it either, so the remaining cause is not "which phase
+// classifies this error" - that hypothesis has now been tested and falsified.
+//
+// What the seven attempts have established, in order:
+//
+//	epoch+broadcast alone      -> worse (3/3 timeouts)
+//	+ identity predicate       -> wedge moves round 0 -> round 1
+//	+ OPEN handback            -> wedge gone, gap 4 exposed
+//	+ accept generation        -> best rate seen (2/8), still fails
+//	+ wake reclassification    -> regresses (5/10)
+//	+ accept phase extraction  -> 3/10
+//	+ full three-phase split   -> round 181 of 2000
+//
+// Next hypothesis to test, not another classification: the accept handoff
+// itself. deliver()/ensureImpliedHeaders and the residual drain both run on the
+// reader's goroutine while AcceptCall runs on another, and the wedge reproduces
+// only when an early-status call precedes. Instrument the handoff (what
+// AcceptCall observes vs. what the reader has published) rather than the error
+// path - every error-path hypothesis has now been ruled out.
+//
 // Run it without the skip to observe:
 //
 //	go test ./framing/envelope/ -run EarlyStatusCallDoesNotWedgeNextAccept -count=1
