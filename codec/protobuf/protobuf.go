@@ -36,7 +36,7 @@ func (codecImpl) Unmarshal(b []byte, v any) error {
 func asMessage(v any) (proto.Message, error) {
 	m, ok := v.(proto.Message)
 	if !ok {
-		return nil, fmt.Errorf("codec/protobuf: value is not proto.Message")
+		return nil, fmt.Errorf("codec/protobuf: %T is not a proto.Message; the binding Codec does not match the message model of these generated types", v)
 	}
 	return m, nil
 }

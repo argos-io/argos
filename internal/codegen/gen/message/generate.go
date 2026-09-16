@@ -4,6 +4,7 @@ package message
 import (
 	"fmt"
 	"go/format"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -13,10 +14,14 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-// Generate returns Go source for message types in file.
-func Generate(file ir.File) ([]byte, error) {
-	if !file.GenerateMessages() {
+// GenerateUnits returns one protobuf message file and its declared symbols.
+func GenerateUnits(file ir.File) ([]ir.Unit, error) {
+	if file.EffectiveMessageModel() != ir.MessageModelProtobuf || !file.GenerateMessages() {
 		return nil, fmt.Errorf("message: nothing to generate for %s", file.StubName())
+	}
+	name := file.MessagesName()
+	if name == "" {
+		return nil, fmt.Errorf("message: missing output name")
 	}
 	fd, err := fileDescriptor(file)
 	if err != nil {
@@ -25,7 +30,9 @@ func Generate(file ir.File) ([]byte, error) {
 	if fd.Syntax() != protoreflect.Proto3 {
 		return nil, fmt.Errorf("message: syntax %s is not supported; use proto3", fd.Syntax())
 	}
-	if err := validateDescriptor(newDescriptorInfo(fd)); err != nil {
+	info := newDescriptorInfo(fd)
+	symbols, err := validateDescriptor(info)
+	if err != nil {
 		return nil, err
 	}
 	source, err := render(fd, file)
@@ -36,7 +43,16 @@ func Generate(file ir.File) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("message: format generated source: %w", err)
 	}
-	return formatted, nil
+	return []ir.Unit{{Name: name, Source: formatted, Symbols: symbols}}, nil
+}
+
+// Generate returns Go source for message types in file.
+func Generate(file ir.File) ([]byte, error) {
+	units, err := GenerateUnits(file)
+	if err != nil {
+		return nil, err
+	}
+	return units[0].Source, nil
 }
 
 func render(fd protoreflect.FileDescriptor, file ir.File) ([]byte, error) {
@@ -89,7 +105,7 @@ func render(fd protoreflect.FileDescriptor, file ir.File) ([]byte, error) {
 	return []byte(strings.TrimRight(b.String(), "\n") + "\n"), nil
 }
 
-func validateDescriptor(info *descriptorInfo) error {
+func validateDescriptor(info *descriptorInfo) ([]string, error) {
 	declarations := make(map[string]string)
 	declare := func(name, kind string) error {
 		if !ir.IsGoIdentifier(name) {
@@ -118,28 +134,28 @@ func validateDescriptor(info *descriptorInfo) error {
 		{"file_" + ident + "_init", "file initializer"},
 	} {
 		if err := declare(symbol.name, symbol.kind); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	for _, enum := range info.enums {
 		if err := declare(info.enumGoName[enum], "enum type"); err != nil {
-			return err
+			return nil, err
 		}
 		if err := declare(info.enumGoName[enum]+"_name", "enum name map"); err != nil {
-			return err
+			return nil, err
 		}
 		if err := declare(info.enumGoName[enum]+"_value", "enum value map"); err != nil {
-			return err
+			return nil, err
 		}
 		for n := 0; n < enum.Values().Len(); n++ {
 			if err := declare(enumConstantName(enum, enum.Values().Get(n), info), "enum constant"); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 	for _, msg := range info.generatedMessages() {
 		if err := declare(info.messageGoName[msg], "message type"); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	for _, msg := range info.messages {
@@ -151,27 +167,27 @@ func validateDescriptor(info *descriptorInfo) error {
 		for i := 0; i < msg.Fields().Len(); i++ {
 			field := msg.Fields().Get(i)
 			if oneof := field.ContainingOneof(); oneof != nil && !oneof.IsSynthetic() {
-				return fmt.Errorf("message: oneof field %q is not supported", field.FullName())
+				return nil, fmt.Errorf("message: oneof field %q is not supported", field.FullName())
 			}
 			fieldName := exportGoName(string(field.Name()))
 			if !ir.IsGoIdentifier(fieldName) {
-				return fmt.Errorf("message: field %q generates invalid Go identifier %q", field.FullName(), fieldName)
+				return nil, fmt.Errorf("message: field %q generates invalid Go identifier %q", field.FullName(), fieldName)
 			}
 			if _, exists := fieldNames[fieldName]; exists {
-				return fmt.Errorf("message: fields in %q generate duplicate Go name %q", msg.FullName(), fieldName)
+				return nil, fmt.Errorf("message: fields in %q generate duplicate Go name %q", msg.FullName(), fieldName)
 			}
 			fieldNames[fieldName] = struct{}{}
 			getterName := "Get" + fieldName
 			if _, exists := getterNames[getterName]; exists {
-				return fmt.Errorf("message: fields in %q generate duplicate getter %q", msg.FullName(), getterName)
+				return nil, fmt.Errorf("message: fields in %q generate duplicate getter %q", msg.FullName(), getterName)
 			}
 			getterNames[getterName] = struct{}{}
 			switch fieldName {
 			case "String", "Reset", "ProtoMessage", "ProtoReflect", "Descriptor":
-				return fmt.Errorf("message: field %q conflicts with generated method %s", field.FullName(), fieldName)
+				return nil, fmt.Errorf("message: field %q conflicts with generated method %s", field.FullName(), fieldName)
 			}
 			if _, err := goFieldType(field, info); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
@@ -180,14 +196,19 @@ func validateDescriptor(info *descriptorInfo) error {
 		for j := 0; j < service.Methods().Len(); j++ {
 			method := service.Methods().Get(j)
 			if _, err := info.localMessageType(method.Input()); err != nil {
-				return fmt.Errorf("message: RPC %q input: %w", method.FullName(), err)
+				return nil, fmt.Errorf("message: RPC %q input: %w", method.FullName(), err)
 			}
 			if _, err := info.localMessageType(method.Output()); err != nil {
-				return fmt.Errorf("message: RPC %q output: %w", method.FullName(), err)
+				return nil, fmt.Errorf("message: RPC %q output: %w", method.FullName(), err)
 			}
 		}
 	}
-	return nil
+	symbols := make([]string, 0, len(declarations))
+	for name := range declarations {
+		symbols = append(symbols, name)
+	}
+	slices.Sort(symbols)
+	return symbols, nil
 }
 
 func writeMessage(b *strings.Builder, msg protoreflect.MessageDescriptor, info *descriptorInfo) {

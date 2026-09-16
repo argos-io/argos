@@ -19,7 +19,7 @@ import (
 	"github.com/argos-io/argos/internal/codegen/frontend/execplugin"
 	"github.com/argos-io/argos/internal/codegen/frontend/irjson"
 	"github.com/argos-io/argos/internal/codegen/frontend/proto"
-	"github.com/argos-io/argos/internal/codegen/gen/message"
+	"github.com/argos-io/argos/internal/codegen/gen/msgmodel"
 	"github.com/argos-io/argos/internal/codegen/gen/stubgen"
 	"github.com/argos-io/argos/internal/codegen/ir"
 )
@@ -108,17 +108,20 @@ func writeFileOutputs(opts Options, inputs []string, file ir.File) error {
 }
 
 func generateFileOutputs(opts Options, inputs []string, file ir.File) ([]generatedOutput, error) {
+	units, err := msgmodel.Generate(file)
+	if err != nil {
+		return nil, err
+	}
+	if err := ir.CheckStubMessageCollision(stubgen.Symbols(file), msgmodel.MessageSymbols(units)); err != nil {
+		return nil, err
+	}
 	var outputs []generatedOutput
-	if file.GenerateMessages() {
-		msgSrc, err := message.Generate(file)
+	for _, unit := range units {
+		msgPath, err := outputPath(opts, inputs, file, unit.Name)
 		if err != nil {
 			return nil, err
 		}
-		msgPath, err := outputPath(opts, inputs, file, file.MessagesName())
-		if err != nil {
-			return nil, err
-		}
-		outputs = append(outputs, generatedOutput{path: msgPath, source: msgSrc})
+		outputs = append(outputs, generatedOutput{path: msgPath, source: unit.Source})
 	}
 	stubSrc, err := stubgen.Generate(file)
 	if err != nil {

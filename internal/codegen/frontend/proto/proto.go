@@ -137,6 +137,7 @@ func fileToIR(file linker.File, inputBase string, descriptorSet []byte) (ir.File
 	out := ir.File{
 		IRVersion:         ir.Version2,
 		Source:            ir.SourceProto,
+		MessageModel:      ir.MessageModelProtobuf,
 		GoPackage:         goPackage,
 		ProtoPackage:      protoPkg,
 		InputBase:         inputBase,

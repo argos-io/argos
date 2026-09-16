@@ -303,6 +303,22 @@ go run ./cmd/argos generate stub --from proto --proto-path . example/echo/echo.p
 - 单次 RPC 只关 CallStream，不关 Client。
 - RPC 不得取名 `Close`：会与客户端接口的 `Close() error` 撞名，生成器直接报错。
 
+### 消息模型（message model）
+
+生成流水线：`frontend → IR → message model + stub`。`*.argos.go` 与具体 IDL 无关；消息文件由 **message model** 决定。
+
+| `message_model` | 行为 |
+|---|---|
+| `protobuf`（默认，有 descriptor 时推断） | 内置生成 `*.pb.go` / `*.msg.go`（proto3） |
+| `none` | 只生成 stub；消息由外部工具产出 |
+| 其他（如 `flatbuffers`） | IR 须带 `message_files`（预渲染 Go + `symbols`）；`emit-ir` 插件一次输出 |
+
+**Codec 与消息模型**：内置 `codec/protobuf`、`codec/json` 要求 `proto.Message`。`binding/grpc`、`binding/envelope` 默认 protobuf codec；`binding/wholebody` 默认 JSON（仍走 protojson）。非 protobuf 消息须 `WithCodec` 自定义 codec。错配在**首次调用**失败，错误文本会标明类型与 codec 不匹配（不做启动期校验）。
+
+**插件 IR**：`{plugin} emit-ir -- files...` → JSON；除 services 外可含 `message_model`、`message_files`（与 stub 同一次原子写入）。
+
+**符号冲突**：stub 与 message 生成器的包级标识符在写盘前交叉校验（含 enum 与 `XxxServiceDesc` 等同名情况）。
+
 ---
 
 ## 8. 工具链

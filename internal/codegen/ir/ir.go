@@ -30,10 +30,25 @@ const (
 	SourceIR     = "ir"
 )
 
+const (
+	// MessageModelProtobuf is the built-in protobuf message generator.
+	MessageModelProtobuf = "protobuf"
+	// MessageModelNone skips message file generation.
+	MessageModelNone = "none"
+)
+
+// Unit is one generated message file and the package-level names it declares.
+type Unit struct {
+	Name    string   `json:"name"`
+	Source  []byte   `json:"source,omitempty"`
+	Symbols []string `json:"symbols,omitempty"`
+}
+
 // File describes generated Go units (*.pb.go / *.msg.go + *.argos.go).
 type File struct {
 	IRVersion    int       `json:"ir_version,omitempty"`
 	Source       string    `json:"source,omitempty"`
+	MessageModel string    `json:"message_model,omitempty"`
 	GoPackage    string    `json:"go_package"`
 	GoModule     string    `json:"go_module,omitempty"`
 	ProtoPackage string    `json:"proto_package,omitempty"`
@@ -41,6 +56,7 @@ type File struct {
 	Outputs      Outputs   `json:"outputs,omitempty"`
 	OutputName   string    `json:"output_name,omitempty"` // legacy stub output name
 	Messages     []Message `json:"messages,omitempty"`
+	MessageFiles []Unit    `json:"message_files,omitempty"`
 	Services     []Service `json:"services"`
 	// FileDescriptor is a serialized google.protobuf.FileDescriptorProto (proto frontend).
 	FileDescriptor []byte `json:"file_descriptor,omitempty"`
@@ -169,9 +185,35 @@ func (f *File) MessagesName() string {
 	}
 }
 
+// HasProtobufPayload reports whether protobuf message generation has inputs.
+func (f *File) HasProtobufPayload() bool {
+	return len(f.Messages) > 0 || len(f.FileDescriptor) > 0 || len(f.FileDescriptorSet) > 0
+}
+
+// EffectiveMessageModel returns the message generation strategy for file.
+func (f *File) EffectiveMessageModel() string {
+	if f.MessageModel != "" {
+		return f.MessageModel
+	}
+	if f.HasProtobufPayload() {
+		return MessageModelProtobuf
+	}
+	if len(f.MessageFiles) > 0 {
+		return "attached"
+	}
+	return MessageModelNone
+}
+
 // GenerateMessages reports whether message output should be produced.
 func (f *File) GenerateMessages() bool {
-	return f.MessagesName() != "" && (len(f.Messages) > 0 || len(f.FileDescriptor) > 0 || len(f.FileDescriptorSet) > 0)
+	switch f.EffectiveMessageModel() {
+	case MessageModelNone:
+		return false
+	case MessageModelProtobuf:
+		return f.MessagesName() != "" && f.HasProtobufPayload()
+	default:
+		return len(f.MessageFiles) > 0
+	}
 }
 
 // Validate checks IR consistency for generation.
@@ -191,12 +233,68 @@ func (f *File) Validate(fromPlugin bool) error {
 	if err := ValidateNames(f); err != nil {
 		return err
 	}
-	if fromPlugin && f.Version() >= Version2 && len(f.Messages) == 0 && len(f.FileDescriptor) == 0 && len(f.FileDescriptorSet) == 0 {
-		return fmt.Errorf("ir: plugin IR v2 must include messages, file_descriptor, or file_descriptor_set")
+	if err := validateMessageModelFields(f); err != nil {
+		return err
 	}
-	if f.GenerateMessages() {
+	if fromPlugin && f.Version() >= Version2 {
+		if err := validatePluginMessagePayload(f); err != nil {
+			return err
+		}
+	}
+	if f.EffectiveMessageModel() == MessageModelProtobuf && f.GenerateMessages() {
 		if err := validateMessageRefs(f); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func validateMessageModelFields(f *File) error {
+	model := f.EffectiveMessageModel()
+	if model != MessageModelProtobuf && len(f.Messages) > 0 {
+		return fmt.Errorf("ir: messages field is only valid with message_model %q", MessageModelProtobuf)
+	}
+	if model == MessageModelProtobuf || model == MessageModelNone {
+		return nil
+	}
+	if len(f.FileDescriptor) > 0 || len(f.FileDescriptorSet) > 0 {
+		return fmt.Errorf("ir: file_descriptor fields require message_model %q", MessageModelProtobuf)
+	}
+	return nil
+}
+
+func validatePluginMessagePayload(f *File) error {
+	switch f.EffectiveMessageModel() {
+	case MessageModelNone:
+		return nil
+	case MessageModelProtobuf:
+		if !f.HasProtobufPayload() {
+			return fmt.Errorf("ir: plugin IR v2 with message_model %q must include messages, file_descriptor, or file_descriptor_set", MessageModelProtobuf)
+		}
+		return nil
+	default:
+		if len(f.MessageFiles) == 0 {
+			return fmt.Errorf("ir: plugin IR v2 with message_model %q must include message_files", f.MessageModel)
+		}
+		return validateMessageFiles(f)
+	}
+}
+
+func validateMessageFiles(f *File) error {
+	for i, unit := range f.MessageFiles {
+		if unit.Name == "" {
+			return fmt.Errorf("ir: message_files[%d]: missing name", i)
+		}
+		if len(unit.Source) == 0 {
+			return fmt.Errorf("ir: message_files[%d]: missing source", i)
+		}
+		if len(unit.Symbols) == 0 {
+			return fmt.Errorf("ir: message_files[%d]: missing symbols", i)
+		}
+		for _, sym := range unit.Symbols {
+			if !IsGoIdentifier(sym) {
+				return fmt.Errorf("ir: message_files[%d]: invalid symbol %q", i, sym)
+			}
 		}
 	}
 	return nil
@@ -221,7 +319,7 @@ func ValidateNames(f *File) error {
 			if err := requireIdentifier("field", field.GoName); err != nil {
 				return err
 			}
-			if field.Number <= 0 {
+			if f.EffectiveMessageModel() == MessageModelProtobuf && field.Number <= 0 {
 				return fmt.Errorf("ir: field %q has invalid number %d", field.GoName, field.Number)
 			}
 			if _, exists := seenFields[field.GoName]; exists {
@@ -273,66 +371,6 @@ func ValidateNames(f *File) error {
 				return fmt.Errorf("ir: service %q has duplicate method %q", service.GoName, method.GoName)
 			}
 			seenMethods[method.GoName] = struct{}{}
-		}
-	}
-	return validateGeneratedSymbols(f)
-}
-
-// validateGeneratedSymbols protects the package-level names emitted by the
-// stub generator. Distinct IDL names can otherwise concatenate into the same
-// Go identifier and produce either uncompilable output or a dispatcher that
-// routes two methods through one constant.
-func validateGeneratedSymbols(f *File) error {
-	seen := make(map[string]string)
-	declare := func(name, kind string) error {
-		if previous, exists := seen[name]; exists {
-			return fmt.Errorf("ir: generated %s %q conflicts with %s", kind, name, previous)
-		}
-		seen[name] = kind
-		return nil
-	}
-
-	for _, message := range f.Messages {
-		if err := declare(message.GoName, "message type"); err != nil {
-			return err
-		}
-	}
-	for _, service := range f.Services {
-		for _, symbol := range []struct {
-			name string
-			kind string
-		}{
-			{service.GoName, "server interface"},
-			{service.GoName + "Desc", "service descriptor"},
-			{"Register" + service.GoName, "register function"},
-			{service.GoName + "Client", "client interface"},
-			{"New" + service.GoName + "Client", "client constructor"},
-			{lowerFirst(service.GoName) + "Client", "client implementation"},
-		} {
-			if err := declare(symbol.name, symbol.kind); err != nil {
-				return err
-			}
-		}
-		for _, method := range service.Methods {
-			if err := declare(service.GoName+"_"+method.GoName, "method descriptor"); err != nil {
-				return err
-			}
-			if !method.ClientStream && !method.ServerStream {
-				continue
-			}
-			for _, symbol := range []struct {
-				name string
-				kind string
-			}{
-				{service.GoName + "_" + method.GoName + "Server", "stream server interface"},
-				{lowerFirst(service.GoName) + method.GoName + "Server", "stream server implementation"},
-				{service.GoName + "_" + method.GoName + "Client", "stream client interface"},
-				{lowerFirst(service.GoName) + method.GoName + "Client", "stream client implementation"},
-			} {
-				if err := declare(symbol.name, symbol.kind); err != nil {
-					return err
-				}
-			}
 		}
 	}
 	return nil
@@ -395,14 +433,6 @@ func isGoKeyword(name string) bool {
 	default:
 		return false
 	}
-}
-
-func lowerFirst(name string) string {
-	runes := []rune(name)
-	if len(runes) != 0 {
-		runes[0] = unicode.ToLower(runes[0])
-	}
-	return string(runes)
 }
 
 // PackageName returns the Go package identifier represented by go_package.
@@ -475,7 +505,12 @@ func (f *File) Normalize(fromPlugin bool) {
 	if f.OutputName == "" {
 		f.OutputName = f.StubName()
 	}
-	if f.GenerateMessages() && f.Outputs.Messages == "" && f.InputBase != "" {
+	if f.MessageModel == "" && f.HasProtobufPayload() {
+		f.MessageModel = MessageModelProtobuf
+	} else if f.MessageModel == "" && len(f.MessageFiles) == 0 {
+		f.MessageModel = MessageModelNone
+	}
+	if f.EffectiveMessageModel() == MessageModelProtobuf && f.GenerateMessages() && f.Outputs.Messages == "" && f.InputBase != "" {
 		if f.Source == SourceProto {
 			f.Outputs.Messages = f.InputBase + ".pb.go"
 		} else {
