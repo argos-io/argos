@@ -55,10 +55,24 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 	}
 	c.mu.Unlock()
 
+	// Buffered items win over the completion signal. recvLoop pushes the final
+	// item and only then closes done, so a select over both would pick at
+	// random and silently drop an already-delivered message.
+	select {
+	case it, ok := <-c.recvCh:
+		return c.recvItem(it, ok)
+	default:
+	}
+
 	select {
 	case <-c.ctx.Done():
 		return nil, nil, c.ctx.Err()
+	case it, ok := <-c.recvCh:
+		return c.recvItem(it, ok)
 	case <-c.done:
+		if err := c.ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		c.mu.Lock()
 		err := c.recvErr
 		c.mu.Unlock()
@@ -66,21 +80,22 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 			err = io.EOF
 		}
 		return nil, nil, err
-	case it, ok := <-c.recvCh:
-		if !ok {
-			return nil, nil, io.EOF
-		}
-		if it.err != nil {
-			if it.err == io.EOF {
-				c.mu.Lock()
-				c.gotTerminal = true
-				c.mu.Unlock()
-			}
-			return nil, nil, it.err
-		}
-		rel := func() {}
-		return it.payload, rel, nil
 	}
+}
+
+func (c *call) recvItem(it recvItem, ok bool) ([]byte, func(), error) {
+	if !ok {
+		return nil, nil, io.EOF
+	}
+	if it.err != nil {
+		if it.err == io.EOF {
+			c.mu.Lock()
+			c.gotTerminal = true
+			c.mu.Unlock()
+		}
+		return nil, nil, it.err
+	}
+	return it.payload, func() {}, nil
 }
 
 func (c *call) Send(payload []byte) error {

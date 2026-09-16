@@ -104,6 +104,13 @@ func (s *session) readLoop() {
 			if s.readErr == nil {
 				s.readErr = err
 			}
+			// The carrier is gone for good: no further byte can arrive and no
+			// further broadcast is coming. Terminate the session for waiters
+			// here — otherwise a reader that parks after this broadcast waits
+			// on a wake channel nothing will ever close again, holding the
+			// accept goroutine and its buffers — and clear reusable so a pool
+			// stops handing out a session that can never carry another call.
+			s.reusable = false
 			s.broadcastReadLocked()
 			s.mu.Unlock()
 			return
@@ -180,6 +187,20 @@ func (s *session) readValue(ctx context.Context) (Value, error) {
 				s.reusable = false
 				s.mu.Unlock()
 				return Value{}, err
+			}
+			// The buffer holds only part of a value. Only more bytes can
+			// complete it, and none can arrive once the read loop has failed or
+			// the session is closing: surface the failure instead of parking on
+			// a wake channel that broadcastReadLocked replaces on every read
+			// and, with the loop gone, would never be closed again.
+			if s.readErr != nil {
+				err := s.readErr
+				s.mu.Unlock()
+				return Value{}, err
+			}
+			if s.closed {
+				s.mu.Unlock()
+				return Value{}, io.EOF
 			}
 		}
 		if s.readErr != nil && len(s.readBuf) == 0 {
@@ -392,7 +413,10 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, _ fra
 	s.busy = true
 	s.mu.Unlock()
 
-	c := newCall(s.session, m.FullName(), m.Name(), true)
+	// Initiator: the ctx handed to OpenCall carries the caller's deadline and
+	// cancellation. Inheriting it is what keeps a call from outliving the
+	// deadline its caller set and parking forever on a peer that never replies.
+	c := newCall(s.session, m.FullName(), m.Name(), true, ctx)
 	if c.streaming {
 		s.markExclusive()
 	}
@@ -469,7 +493,11 @@ func (s *serverSession) AcceptCall(ctx context.Context, _ framing.CallSpec) (fra
 	}
 
 	full := methodFullName(s.service, cmdUp)
-	c := newCall(s.session, full, cmdUp, false)
+	// Responder: parent the call ctx on Background rather than on the accept ctx
+	// — the composition layer cancels that one as soon as AcceptCall returns
+	// (server/conn.go waitCancel), so inheriting it would cancel the handler at
+	// birth — and RESP2 has no inbound deadline channel to carry one instead.
+	c := newCall(s.session, full, cmdUp, false, context.Background())
 	c.args = args
 	if c.streaming {
 		s.markExclusive()

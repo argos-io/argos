@@ -156,11 +156,14 @@ func TestGreetingReceivedBeforeCall(t *testing.T) {
 				return
 			}
 			defer sess.Close()
+			// Bounded: an unbounded AcceptCall turns a failure into a hang.
+			acceptCtx, acceptCancel := context.WithTimeout(ctx, 5*time.Second)
+			defer acceptCancel()
 			for {
 				md := metadata.New(metadata.RoleResponder, func(metadata.Metadata) error {
 					return status.Error(status.Unimplemented, "unused")
 				})
-				sc, err := sess.AcceptCall(context.Background(), framing.CallSpec{Metadata: md})
+				sc, err := sess.AcceptCall(acceptCtx, framing.CallSpec{Metadata: md})
 				if err != nil {
 					return
 				}
@@ -311,22 +314,45 @@ func TestCustomMethodFieldRouting(t *testing.T) {
 	}
 }
 
+// TestSendHeadersUnimplemented pins the contract for a carrier with no
+// explicit headers channel: CallMetadata.SendHeaders reports the stable
+// status.Unimplemented, leaves outgoing headers unfrozen, and the call itself
+// still completes. The handler records what it saw and the test goroutine
+// asserts on it after the RPC finished — an assertion that only lives inside
+// the handler cannot tell a completed call from one that never ran.
 func TestSendHeadersUnimplemented(t *testing.T) {
 	t.Parallel()
+
+	type sendHeadersObs struct {
+		called bool
+		code   status.Code
+		err    error
+	}
+	var observed atomic.Value
+	observed.Store(sendHeadersObs{})
+
 	handlers := map[string]filter.Handler{
 		"Ping": func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
 			md, ok := metadata.FromContext(ctx)
 			if !ok {
-				t.Error("missing CallMetadata")
-				return status.Error(status.Internal, "no md")
+				return status.Error(status.Internal, "synth: missing CallMetadata in handler ctx")
 			}
 			err := md.SendHeaders()
-			if status.CodeOf(err) != status.Unimplemented {
-				t.Errorf("SendHeaders = %v, want Unimplemented", err)
+			observed.Store(sendHeadersObs{called: true, code: status.CodeOf(err), err: err})
+			if err == nil {
+				return status.Error(status.Internal, "synth: SendHeaders succeeded on a carrier with no header channel")
+			}
+			// Unimplemented must not freeze outgoing headers.
+			if addErr := md.AddOutgoingHeader("x-synth", "1"); addErr != nil {
+				return status.Error(status.Internal, "synth: AddOutgoingHeader after unimplemented SendHeaders: "+addErr.Error())
 			}
 			var in []byte
-			_ = st.Recv(&in)
-			_ = st.Recv(&in)
+			if err := st.Recv(&in); err != nil {
+				return err
+			}
+			if err := st.Recv(&in); !errors.Is(err, io.EOF) {
+				return status.Error(status.Internal, "synth: want io.EOF after client half-close")
+			}
 			return st.Send([]byte("ok"))
 		},
 		"Echo":      func(context.Context, descriptor.Method, stream.Stream) error { return nil },
@@ -338,14 +364,35 @@ func TestSendHeadersUnimplemented(t *testing.T) {
 	defer cancel()
 	cs, err := cli.Open(ctx, descriptor.MustMethod(MethodPing, descriptor.Unary))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Open: %v", err)
 	}
-	_ = cs.Send([]byte("x"))
-	_ = cs.HalfClose()
+	if err := cs.Send([]byte("x")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := cs.HalfClose(); err != nil {
+		t.Fatalf("HalfClose: %v", err)
+	}
 	var out []byte
-	_ = cs.Recv(&out)
-	_ = cs.Recv(&out)
-	_ = cs.Close()
+	if err := cs.Recv(&out); err != nil {
+		t.Fatalf("Recv: %v (unimplemented SendHeaders must not fail the call)", err)
+	}
+	if string(out) != "ok" {
+		t.Fatalf("payload = %q, want ok", out)
+	}
+	if err := cs.Recv(&out); !errors.Is(err, io.EOF) {
+		t.Fatalf("terminal Recv = %v, want io.EOF (call must reach a clean terminal)", err)
+	}
+	if err := cs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	obs, _ := observed.Load().(sendHeadersObs)
+	if !obs.called {
+		t.Fatal("handler never saw CallMetadata.SendHeaders (Ping was not routed to the handler)")
+	}
+	if obs.code != status.Unimplemented {
+		t.Fatalf("handler SendHeaders = %v (code %v), want Unimplemented", obs.err, obs.code)
+	}
 }
 
 func TestConnStateFromContext(t *testing.T) {
@@ -517,6 +564,12 @@ func TestExclusiveKeepsConnectionOutOfPool(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// The client dials lazily, so the count is still zero here: every dial
+	// counted below belongs to the exclusive call.
+	if got := dials.Load(); got != 0 {
+		t.Fatalf("dials before exclusive Open = %d, want 0", got)
+	}
+
 	// Exclusive bidi: three exchanges, then half-close.
 	cs, err := cli.Open(ctx, descriptor.MustMethod(MethodExclusive, descriptor.BidiStreaming))
 	if err != nil {
@@ -544,9 +597,11 @@ func TestExclusiveKeepsConnectionOutOfPool(t *testing.T) {
 	if err := cs.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
+	// One call, one connection: the exclusive call must not have opened a
+	// second connection on top of the one dial above.
 	dialsAfterExclusive := dials.Load()
-	if dialsAfterExclusive < 1 {
-		t.Fatal("expected at least one dial for exclusive call")
+	if dialsAfterExclusive != 1 {
+		t.Fatalf("dials after exclusive call = %d, want exactly 1", dialsAfterExclusive)
 	}
 
 	// Next Ping must dial again — exclusive session is not returned to the pool.

@@ -2,6 +2,7 @@ package resp_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -20,44 +21,6 @@ import (
 
 	_ "github.com/argos-io/argos/resolver/ip"
 )
-
-// loadWave runs n concurrent PING calls and returns elapsed duration.
-func loadWave(t *testing.T, h *harness, n int) time.Duration {
-	t.Helper()
-	var wg sync.WaitGroup
-	var fails atomic.Int64
-	start := time.Now()
-	wg.Add(n)
-	for i := 0; i < n; i++ {
-		go func() {
-			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			st, err := h.cli.Open(ctx, resp.MethodPING)
-			if err != nil {
-				fails.Add(1)
-				return
-			}
-			defer st.Close()
-			if err := st.Send(resp.EncodeArgs()); err != nil {
-				fails.Add(1)
-				return
-			}
-			_ = st.HalfClose()
-			var out []byte
-			if err := st.Recv(&out); err != nil {
-				fails.Add(1)
-				return
-			}
-		}()
-	}
-	wg.Wait()
-	elapsed := time.Since(start)
-	if f := fails.Load(); f != 0 {
-		t.Fatalf("wave failures: %d / %d", f, n)
-	}
-	return elapsed
-}
 
 type loadEnv struct {
 	h            *harness
@@ -167,10 +130,24 @@ func onePING(t *testing.T, h *harness) {
 	if err := st.Send(resp.EncodeArgs()); err != nil {
 		t.Fatal(err)
 	}
-	_ = st.HalfClose()
+	if err := st.HalfClose(); err != nil {
+		t.Fatalf("HalfClose: %v", err)
+	}
 	var out []byte
 	if err := st.Recv(&out); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// assertServeRunning fails when the server's Run already returned: a
+// peer-visible read failure proves nothing about the connection lifecycle
+// under test if the server died for an unrelated reason.
+func assertServeRunning(t *testing.T, env *loadEnv) {
+	t.Helper()
+	select {
+	case err := <-env.serveDone:
+		t.Fatalf("Serve returned early: %v", err)
+	default:
 	}
 }
 
@@ -205,7 +182,12 @@ func holdWave(t *testing.T, h *harness, n int) time.Duration {
 				fails.Add(1)
 				return
 			}
-			_ = st.HalfClose()
+			if err := st.HalfClose(); err != nil {
+				_ = st.Close()
+				cancel()
+				fails.Add(1)
+				return
+			}
 			streams[i] = &held{st: st, cancel: cancel}
 		}()
 	}
@@ -289,7 +271,7 @@ func TestBurstIdleBurstMaxIdleSessions(t *testing.T) {
 			dd, dh := d2-d1, he2-he1
 
 			rows = append(rows, row{
-				maxIdle: maxIdle,
+				maxIdle:   maxIdle,
 				wave1Dial: d1, wave1Helo: he1,
 				deltaDial: dd, deltaHelo: dh,
 				wave1: wave1, wave2: wave2,
@@ -351,7 +333,6 @@ func TestBurstIdleBurstMaxIdleSessions(t *testing.T) {
 	t.Log("\n" + b.String())
 }
 
-
 // TestSessionIdleTimeoutReclaim verifies idle sessions are closed after
 // SessionIdleTimeout and the next call pays a new HELLO.
 func TestSessionIdleTimeoutReclaim(t *testing.T) {
@@ -402,7 +383,9 @@ func TestMaxSessionLifetimeNonReusable(t *testing.T) {
 	if err := st.Send(resp.EncodeArgs()); err != nil {
 		t.Fatal(err)
 	}
-	_ = st.HalfClose()
+	if err := st.HalfClose(); err != nil {
+		t.Fatalf("HalfClose: %v", err)
+	}
 
 	// Lifetime elapses while the call is still in flight.
 	time.Sleep(life + 50*time.Millisecond)
@@ -531,6 +514,13 @@ func TestMaxInboundConnIdleCloses(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected idle inbound close to end the connection")
 	}
+	// Any error at all would satisfy "the read failed" — including our own dead
+	// deadline, a reset, or a server that died. Only a clean EOF (FIN) proves
+	// the server retired the idle connection.
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("idle inbound read = %v (%T), want io.EOF from a clean server close", err, err)
+	}
+	assertServeRunning(t, env)
 	t.Logf("MaxInboundConnIdle=%s closed idle inbound (read err=%v)", idle, err)
 }
 
@@ -564,6 +554,13 @@ func TestMaxInboundConnAgeDrains(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected MaxInboundConnAge to end accepting and close/drain the conn")
 	}
+	// Draining must present as a clean close (EOF/FIN), not as a read that
+	// merely failed — a dead deadline, a reset, or a dead server would all
+	// produce a non-nil error too.
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("aged inbound read = %v (%T), want io.EOF from a clean drain", err, err)
+	}
+	assertServeRunning(t, env)
 	t.Logf("MaxInboundConnAge=%s drained inbound (read err=%v)", age, err)
 
 	// New connection after age of a prior conn must still be accepted (Serve continues).

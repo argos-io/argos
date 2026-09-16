@@ -18,18 +18,35 @@ type PubMessage struct {
 	Payload string
 }
 
+// subscriber is one pub/sub registration: ch carries pushes and done is closed
+// exactly once, by Unsubscribe. ch itself is never closed — a publisher that
+// captured the registration in a snapshot may still be sending to it after the
+// subscriber leaves, and a send on a closed channel panics even from a select
+// with a default arm.
+type subscriber struct {
+	ch   chan PubMessage
+	done chan struct{}
+	once sync.Once
+}
+
+func (sub *subscriber) stop() { sub.once.Do(func() { close(sub.done) }) }
+
 // Store is an in-process fake Redis key/value + pub/sub map (no redis dependency).
 type Store struct {
 	mu   sync.RWMutex
 	data map[string]string
-	subs map[string]map[chan PubMessage]struct{}
+	subs map[string]map[*subscriber]struct{}
+	// byCh resolves the channel handed back to Unsubscribe to its
+	// registration; the entry lives as long as the channel has a membership.
+	byCh map[chan PubMessage]*subscriber
 }
 
 // NewStore returns an empty Store.
 func NewStore() *Store {
 	return &Store{
 		data: make(map[string]string),
-		subs: make(map[string]map[chan PubMessage]struct{}),
+		subs: make(map[string]map[*subscriber]struct{}),
+		byCh: make(map[chan PubMessage]*subscriber),
 	}
 }
 
@@ -49,69 +66,93 @@ func (s *Store) Set(key, value string) {
 }
 
 // Subscribe registers for pushes on channels. Caller must Unsubscribe.
+// The returned channel is never closed; see Unsubscribe.
 func (s *Store) Subscribe(channels ...string) chan PubMessage {
-	ch := make(chan PubMessage, 16)
+	sub := &subscriber{
+		ch:   make(chan PubMessage, 16),
+		done: make(chan struct{}),
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.byCh[sub.ch] = sub
 	for _, c := range channels {
 		m := s.subs[c]
 		if m == nil {
-			m = make(map[chan PubMessage]struct{})
+			m = make(map[*subscriber]struct{})
 			s.subs[c] = m
 		}
-		m[ch] = struct{}{}
+		m[sub] = struct{}{}
 	}
-	return ch
+	return sub.ch
 }
 
 // Unsubscribe removes ch from the given channels (all channels if none given)
-// and closes ch when it has no remaining membership.
+// and, once ch holds no membership, retires the registration. It is
+// idempotent: a repeat, a partial repeat, or a channel this Store never handed
+// out are all no-ops.
+//
+// ch itself is not closed. Publish snapshots the subscriber set and delivers
+// outside the lock, so a publisher can still be sending to a registration that
+// Unsubscribe has just retired, and a publisher must never panic or block;
+// subscribers stop through their own cancellation instead (see handleSUBSCRIBE).
 func (s *Store) Unsubscribe(ch chan PubMessage, channels ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	sub := s.byCh[ch]
+	if sub == nil {
+		return
+	}
 	for c, m := range s.subs {
-		if _, ok := m[ch]; !ok {
+		if _, ok := m[sub]; !ok {
 			continue
 		}
 		drop := len(channels) == 0
-		if !drop {
-			for _, want := range channels {
-				if want == c {
-					drop = true
-					break
-				}
+		for _, want := range channels {
+			if want == c {
+				drop = true
+				break
 			}
 		}
 		if !drop {
 			continue
 		}
-		delete(m, ch)
+		delete(m, sub)
 		if len(m) == 0 {
 			delete(s.subs, c)
 		}
 	}
 	for _, m := range s.subs {
-		if _, ok := m[ch]; ok {
-			return
+		if _, ok := m[sub]; ok {
+			return // still subscribed elsewhere
 		}
 	}
-	close(ch)
+	delete(s.byCh, ch)
+	sub.stop()
 }
 
-// Publish delivers payload to all subscribers of channel. Returns recipient count.
+// Publish delivers payload to all subscribers of channel. Returns recipient
+// count. Delivery never blocks and never panics: a subscriber that cannot take
+// the message right now — slow reader, or unsubscribed after the snapshot — is
+// skipped.
 func (s *Store) Publish(channel, payload string) int {
 	msg := PubMessage{Channel: channel, Payload: payload}
 	s.mu.RLock()
 	subs := s.subs[channel]
-	targets := make([]chan PubMessage, 0, len(subs))
-	for ch := range subs {
-		targets = append(targets, ch)
+	targets := make([]*subscriber, 0, len(subs))
+	for sub := range subs {
+		targets = append(targets, sub)
 	}
 	s.mu.RUnlock()
 	n := 0
-	for _, ch := range targets {
+	for _, sub := range targets {
 		select {
-		case ch <- msg:
+		case <-sub.done:
+			// Unsubscribed after the snapshot: leave ch untouched.
+			continue
+		default:
+		}
+		select {
+		case sub.ch <- msg:
 			n++
 		default:
 			// Drop if subscriber is slow — gate tests use buffered channels.
@@ -251,10 +292,9 @@ func handleSUBSCRIBE(store *Store) filter.Handler {
 				return nil
 			case <-peerGone:
 				return nil
-			case msg, ok := <-ch:
-				if !ok {
-					return nil
-				}
+			case msg := <-ch:
+				// ch is never closed (Unsubscribe only retires the
+				// registration), so this readiness is always a push.
 				if err := st.Send(EncodePushMessage(msg.Channel, msg.Payload)); err != nil {
 					return err
 				}

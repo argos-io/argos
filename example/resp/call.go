@@ -43,8 +43,10 @@ type call struct {
 	recving atomic.Bool
 }
 
-func newCall(s *session, fullMethod, cmd string, initiator bool) *call {
-	ctx, cancel := context.WithCancel(context.Background())
+// newCall builds one call's state. parent becomes the parent of the call ctx and
+// therefore the authority for its cancellation and deadline.
+func newCall(s *session, fullMethod, cmd string, initiator bool, parent context.Context) *call {
+	ctx, cancel := context.WithCancel(parent)
 	streaming := strings.EqualFold(cmd, "SUBSCRIBE")
 	return &call{
 		sess:      s,
@@ -59,7 +61,11 @@ func newCall(s *session, fullMethod, cmd string, initiator bool) *call {
 
 func (c *call) Method() string { return c.method }
 
-func (c *call) Deadline() (time.Time, bool) { return time.Time{}, false }
+// Deadline reports the deadline the call observes. For an initiator that is the
+// deadline of the ctx passed to OpenCall — the caller's own deadline, which
+// bounds its Recv and is what the composition layer derives the call ctx from.
+// A responder has no inbound deadline channel in RESP2 and reports none.
+func (c *call) Deadline() (time.Time, bool) { return c.ctx.Deadline() }
 
 func (c *call) SendHeaders() error {
 	// RESP has no metadata channel — returning Unimplemented must not require
