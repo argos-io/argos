@@ -80,12 +80,7 @@ func Run(ctx context.Context, opts Options, inputs []string) error {
 	if err := validateOutputPaths(outputs); err != nil {
 		return err
 	}
-	for _, output := range outputs {
-		if err := writeFile(output.path, output.source); err != nil {
-			return err
-		}
-	}
-	return nil
+	return writeAll(outputs)
 }
 
 func resolveFrontend(opts Options) (frontend.Frontend, error) {
@@ -109,12 +104,7 @@ func writeFileOutputs(opts Options, inputs []string, file ir.File) error {
 	if err := validateOutputPaths(outputs); err != nil {
 		return err
 	}
-	for _, output := range outputs {
-		if err := writeFile(output.path, output.source); err != nil {
-			return err
-		}
-	}
-	return nil
+	return writeAll(outputs)
 }
 
 func generateFileOutputs(opts Options, inputs []string, file ir.File) ([]generatedOutput, error) {
@@ -157,33 +147,82 @@ func validateOutputPaths(outputs []generatedOutput) error {
 	return nil
 }
 
+// writeAll replaces every output or none of them.
+//
+// A run typically emits both a message file and a stub file. Writing them one
+// after another left a mixed revision on disk when the second write failed -
+// new stub next to stale messages, which breaks the build in a way that is
+// hard to trace back. Stage every temporary file first, then rename.
+func writeAll(outputs []generatedOutput) error {
+	staged := make([]stagedFile, 0, len(outputs))
+	defer func() {
+		// Anything still staged belongs to a failed run.
+		for _, st := range staged {
+			os.Remove(st.tmp)
+		}
+	}()
+	for _, output := range outputs {
+		st, err := stageFile(output.path, output.source)
+		if err != nil {
+			return err
+		}
+		staged = append(staged, st)
+	}
+	for i, st := range staged {
+		if err := commitFile(st); err != nil {
+			return err
+		}
+		staged[i].tmp = "" // committed; nothing to clean up
+	}
+	return nil
+}
+
+// writeFile replaces one output atomically.
 func writeFile(path string, source []byte) error {
+	return writeAll([]generatedOutput{{path: path, source: source}})
+}
+
+// stagedFile is a complete, closed temporary file waiting to replace path.
+type stagedFile struct {
+	path string
+	tmp  string
+}
+
+func stageFile(path string, source []byte) (stagedFile, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("stub: mkdir %s: %w", dir, err)
+		return stagedFile{}, fmt.Errorf("stub: mkdir %s: %w", dir, err)
 	}
 	tmp, err := os.CreateTemp(dir, ".argos-*"+filepath.Ext(path)+".tmp")
 	if err != nil {
-		return fmt.Errorf("stub: create temporary output for %s: %w", path, err)
+		return stagedFile{}, fmt.Errorf("stub: create temporary output for %s: %w", path, err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
 	n, err := tmp.Write(source)
 	if err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("stub: write temporary output for %s: %w", path, err)
+		os.Remove(tmpName)
+		return stagedFile{}, fmt.Errorf("stub: write temporary output for %s: %w", path, err)
 	}
 	if n != len(source) {
 		_ = tmp.Close()
-		return fmt.Errorf("stub: write temporary output for %s: %w", path, io.ErrShortWrite)
+		os.Remove(tmpName)
+		return stagedFile{}, fmt.Errorf("stub: write temporary output for %s: %w", path, io.ErrShortWrite)
 	}
 	if err := tmp.Chmod(0o644); err != nil {
 		_ = tmp.Close()
-		return fmt.Errorf("stub: chmod temporary output for %s: %w", path, err)
+		os.Remove(tmpName)
+		return stagedFile{}, fmt.Errorf("stub: chmod temporary output for %s: %w", path, err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("stub: close temporary output for %s: %w", path, err)
+		os.Remove(tmpName)
+		return stagedFile{}, fmt.Errorf("stub: close temporary output for %s: %w", path, err)
 	}
+	return stagedFile{path: path, tmp: tmpName}, nil
+}
+
+func commitFile(st stagedFile) error {
+	path, tmpName := st.path, st.tmp
 	if err := os.Rename(tmpName, path); err != nil {
 		// Windows does not replace an existing destination with Rename. The
 		// temporary file is complete and closed at this point, so only the

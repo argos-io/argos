@@ -43,11 +43,22 @@ func (f Frontend) Parse(ctx context.Context, inputs []string) ([]ir.File, error)
 		Resolver: &protocompile.SourceResolver{ImportPaths: paths},
 	}
 	compileNames := make([]string, len(inputs))
+	// An input outside every --proto-path falls back to its basename, so two
+	// distinct files can claim the same compile name and the compiler resolves
+	// one of them twice. Silently generating from the wrong descriptor is worse
+	// than refusing, so reject the collision and name both inputs.
+	claimed := make(map[string]string, len(inputs))
 	for i, input := range inputs {
 		name, err := compileName(input, paths)
 		if err != nil {
 			return nil, err
 		}
+		if prev, dup := claimed[name]; dup {
+			return nil, fmt.Errorf(
+				"proto frontend: %q and %q both compile as %q; put them under a --proto-path so their paths stay distinct",
+				prev, input, name)
+		}
+		claimed[name] = input
 		compileNames[i] = name
 	}
 	linked, err := compiler.Compile(ctx, compileNames...)
