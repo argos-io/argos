@@ -27,18 +27,30 @@ type Option interface {
 type options struct {
 	codec codec.Codec
 
-	// maxReadBytes caps one WebSocket message read. coder/websocket defaults to
-	// 32 KiB and closes the whole connection (status 1009) on overflow, which is
-	// far below the framework's 4 MiB frame default. Zero keeps the transport's
-	// own default; see ws.WithMaxReadBytes.
+	// maxReadBytes caps one WebSocket message read. Overflow closes the whole
+	// connection (status 1009), so it must fit one envelope frame. Zero keeps
+	// ws.DefaultMaxReadBytes; see ws.WithMaxReadBytes.
 	maxReadBytes int64
+	// badRead carries a rejected maxReadBytes to the BindingFunc, which is the
+	// first place allowed to return an error.
+	badRead int64
 }
 
 // WithMaxReadBytes sets the WebSocket per-message read limit. It must be large
 // enough for one envelope frame, i.e. at least MaxMessageSize plus the frame
 // header. Zero keeps ws.DefaultMaxReadBytes.
+//
+// Negative values are rejected when the BindingFunc runs. The ws transport
+// reads a negative limit as "no limit", which would hand a peer control over
+// how much one inbound message may allocate.
 func WithMaxReadBytes(n int64) Option {
-	return optionFunc(func(o *options) { o.maxReadBytes = n })
+	return optionFunc(func(o *options) {
+		if n < 0 {
+			o.badRead = n
+			return
+		}
+		o.maxReadBytes = n
+	})
 }
 
 type optionFunc func(*options)
@@ -51,6 +63,11 @@ func WithCodec(c codec.Codec) Option {
 }
 
 func assemble(tr transport.Transport, frOpts []envframing.Option, o options) (argos.Binding, error) {
+	if o.badRead < 0 {
+		return argos.Binding{}, fmt.Errorf(
+			"binding/envelope: WithMaxReadBytes(%d) must not be negative; the ws transport reads a negative limit as unlimited",
+			o.badRead)
+	}
 	cd := o.codec
 	if cd == nil {
 		cd = protobuf.New()
@@ -87,7 +104,17 @@ func NewTCP(opts ...Option) argos.BindingFunc {
 func NewWS(opts ...Option) argos.BindingFunc {
 	o := applyOpts(opts)
 	return func() (argos.Binding, error) {
-		return assemble(ws.New(ws.WithMaxReadBytes(o.maxReadBytes)), nil, o)
+		// Both sides get the same number so CheckConfig can reject a
+		// MaxFrameSize that ws would refuse to deliver.
+		read := o.maxReadBytes
+		if read == 0 {
+			read = ws.DefaultMaxReadBytes
+		}
+		return assemble(
+			ws.New(ws.WithMaxReadBytes(o.maxReadBytes)),
+			[]envframing.Option{envframing.WithMaxInboundWireBytes(read)},
+			o,
+		)
 	}
 }
 

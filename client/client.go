@@ -86,6 +86,9 @@ func New(cfg *argos.Config, service string, opts ...argos.Option) (*Client, erro
 	if b.Transport == nil || b.Framing == nil || b.Codec == nil {
 		return nil, fmt.Errorf("client: Binding missing Transport, Framing, or Codec")
 	}
+	if err := checkBindingConfig(b.Framing, cfg); err != nil {
+		return nil, fmt.Errorf("client: %w", err)
+	}
 
 	life, cancelLife := context.WithCancel(context.Background())
 	c := &Client{
@@ -124,6 +127,26 @@ func New(cfg *argos.Config, service string, opts ...argos.Option) (*Client, erro
 		},
 	})
 	return c, nil
+}
+
+// checkBindingConfig lets a Framing reject size limits its carrier cannot
+// deliver, before any dial. Framings that do not implement it opt out.
+func checkBindingConfig(fr framing.Framing, cfg *argos.Config) error {
+	checker, ok := fr.(interface {
+		CheckConfig(framing.Config) error
+	})
+	if !ok {
+		return nil
+	}
+	return checker.CheckConfig(framing.Config{
+		MaxMessageSize:         cfg.MaxMessageSize,
+		MaxFrameSize:           cfg.MaxFrameSize,
+		MaxMetadataSize:        cfg.MaxMetadataSize,
+		MaxInboundMetadataSize: cfg.MaxInboundMetadataSize,
+		ReadAheadMessages:      cfg.ReadAheadMessages,
+		OpenTimeout:            cfg.OpenTimeout,
+		MaxDrainBytes:          cfg.MaxDrainBytes,
+	})
 }
 
 func checkBufferedCapacity(cfg *argos.Config) error {
@@ -292,7 +315,8 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 		_ = gotCall.Close()
 	})
 	cs.leak = &leakState{
-		cfg: c.cfg,
+		cfg:    c.cfg,
+		client: c,
 		info: argos.CallInfo{
 			Service: c.service,
 			Method:  m.Name(),
@@ -300,8 +324,19 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 		},
 	}
 	cs.cleanup = runtime.AddCleanup(cs, func(st *leakState) {
-		if !st.closed.Load() {
-			argos.NotifyCallError(st.cfg, st.info, errors.New("client: CallStream leaked without Close"))
+		if st.closed.Load() {
+			return
+		}
+		argos.NotifyCallError(st.cfg, st.info, errors.New("client: CallStream leaked without Close"))
+		// Reclaim the admission reservation. Reporting alone left one slot of
+		// MaxConcurrentCalls and perCall bytes of MaxBufferedBytes held for the
+		// life of the Client, so a leak eventually produced ErrCallsExhausted
+		// with no call in flight. The pooled session is deliberately not
+		// released here: nobody called framing Call.Close, so the session's
+		// demux state is unknown and handing it to another call would be worse
+		// than losing it. stopWatch closes the call when the lifetime ctx ends.
+		if st.client != nil {
+			st.client.releaseAdmit()
 		}
 	}, cs.leak)
 

@@ -39,10 +39,17 @@ type CallStream struct {
 	cleanup runtime.Cleanup
 }
 
+// leakState is what the cleanup hook sees. It must not reference the
+// CallStream, or the CallStream would never become unreachable and the hook
+// would never run.
 type leakState struct {
 	closed atomic.Bool
 	cfg    *argos.Config
 	info   argos.CallInfo
+	// client is reclaimed so a leaked call does not hold its admission
+	// reservation for the lifetime of the Client. The Client outlives every
+	// CallStream, so holding it here keeps nothing else alive.
+	client *Client
 }
 
 // Send delegates to the decorated stream.
@@ -65,7 +72,10 @@ func (s *CallStream) Send(v any) error {
 // marks empty initial metadata arrived (fake Framing has no HEADERS frame).
 func (s *CallStream) Recv(v any) error {
 	if err := s.callCtx.Err(); err != nil {
-		s.markHeadersReady()
+		// Do not mark headers ready: none arrived. Marking here let a waiter in
+		// Header() take the headersCh branch and return (stale metadata, nil)
+		// for a call that was already cancelled. Header() selects on callCtx
+		// itself, so it still wakes — with the ctx error.
 		return err
 	}
 	err := s.stream.Recv(v)

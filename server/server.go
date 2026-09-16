@@ -193,6 +193,25 @@ func (s *Server) Run(ctx context.Context) error {
 			closeTriple(triple)
 			break
 		}
+		// Let the Framing reject size limits its carrier cannot deliver, before
+		// Serve. Framings that do not implement CheckConfig opt out.
+		if checker, ok := triple.Framing.(interface {
+			CheckConfig(framing.Config) error
+		}); ok {
+			if err := checker.CheckConfig(framing.Config{
+				MaxMessageSize:         b.cfg.MaxMessageSize,
+				MaxFrameSize:           b.cfg.MaxFrameSize,
+				MaxMetadataSize:        b.cfg.MaxMetadataSize,
+				MaxInboundMetadataSize: b.cfg.MaxInboundMetadataSize,
+				ReadAheadMessages:      b.cfg.ReadAheadMessages,
+				OpenTimeout:            b.cfg.OpenTimeout,
+				MaxDrainBytes:          b.cfg.MaxDrainBytes,
+			}); err != nil {
+				startErr = fmt.Errorf("server: binding %q: %w", b.name, err)
+				closeTriple(triple)
+				break
+			}
+		}
 		codecName := ""
 		if n, ok := triple.Codec.(codec.Named); ok {
 			codecName = n.CodecName()

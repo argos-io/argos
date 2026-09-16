@@ -23,6 +23,9 @@ type Framing struct {
 	maxDrainBytes int64
 	reuse         framing.ReuseModel
 	maxDatagram   int64 // runtime datagram cap; 0 → defaultMaxDatagram when one-call
+	// maxInboundWire is the largest single inbound wire unit the transport will
+	// deliver, when it has one. Declared by the binding, checked in CheckConfig.
+	maxInboundWire int64
 }
 
 // Option configures New.
@@ -59,6 +62,18 @@ func WithOneCallPerConn() Option {
 	}
 }
 
+// WithMaxInboundWireBytes declares the largest single inbound wire unit the
+// transport will deliver (e.g. a WebSocket per-message read limit) so
+// CheckConfig can reject a MaxFrameSize the carrier would never hand over.
+// Non-positive values are ignored.
+func WithMaxInboundWireBytes(n int64) Option {
+	return func(f *Framing) {
+		if n > 0 {
+			f.maxInboundWire = n
+		}
+	}
+}
+
 // WithMaxDatagramSize sets the runtime/startup datagram payload cap used with
 // DatagramCarrier and CheckDatagramLimits. Non-positive values are ignored.
 func WithMaxDatagramSize(n int64) Option {
@@ -91,9 +106,22 @@ func (f *Framing) Reuse() framing.ReuseModel { return f.reuse }
 // unset (stream carriers). Used by Binding factories with CheckDatagramLimits.
 func (f *Framing) MaxDatagramSize() int64 { return f.maxDatagram }
 
-// CheckConfig validates MaxFrameSize/MaxMessageSize against the datagram cap
-// when this Framing is OneCallPerConn (or maxDatagram is set). No-op otherwise.
+// CheckConfig validates the configured sizes against what the carrier will
+// actually deliver: the datagram cap when this Framing is OneCallPerConn (or
+// maxDatagram is set), and the transport's per-message read limit when one was
+// declared with WithMaxInboundWireBytes.
 func (f *Framing) CheckConfig(cfg framing.Config) error {
+	if n := f.maxInboundWire; n > 0 {
+		// One frame is the length prefix plus the body, and the transport
+		// rejects the whole message above its own limit - on ws by closing the
+		// connection with 1009, which fails unrelated calls too. Catch the
+		// mismatch at start instead of at the first large message.
+		if want := cfg.MaxFrameSize + lenPrefix; cfg.MaxFrameSize > 0 && want > n {
+			return fmt.Errorf(
+				"envelope: MaxFrameSize %d needs %d bytes on the wire but the transport reads at most %d per message",
+				cfg.MaxFrameSize, want, n)
+		}
+	}
 	maxD := f.maxDatagram
 	if maxD <= 0 && f.reuse == framing.OneCallPerConn {
 		maxD = defaultMaxDatagram
