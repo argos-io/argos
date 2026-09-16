@@ -46,28 +46,22 @@ type Client struct {
 	bufRemain int64
 }
 
-// New builds a Client for service. It invokes BindingFunc once (no network I/O),
-// creates an empty session pool, and validates MaxConcurrentCalls×perCall
-// against MaxBufferedBytes when opts are applied.
+// New builds a Client from options only: the Config it starts from is the one
+// named by argos.WithConfig, or the process default. argos.WithServiceName
+// names the service the Client opens calls for and is required — generated
+// stubs pass their own.
 //
-// Target resolution: ServiceTarget for service (via cfg.Services or opts),
-// required before the first Open that reaches the pool.
-func New(cfg *argos.Config, service string, opts ...argos.Option) (*Client, error) {
-	if cfg == nil {
-		return nil, fmt.Errorf("client: nil Config")
-	}
-	if service == "" {
-		return nil, fmt.Errorf("client: empty service name")
-	}
-	if len(opts) > 0 {
-		var err error
-		cfg, err = cfg.With(opts...)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if err := checkBufferedCapacity(cfg); err != nil {
+// It invokes BindingFunc once (no network I/O) and creates an empty session
+// pool. Target resolution: argos.WithTarget, else the Services entry for the
+// service; a target is required before the first Open that reaches the pool.
+func New(opts ...argos.ClientOption) (*Client, error) {
+	cfg, err := argos.ClientConfig(opts...)
+	if err != nil {
 		return nil, err
+	}
+	service, sel := cfg.SelectedService()
+	if service == "" {
+		return nil, fmt.Errorf("client: missing service name; pass argos.WithServiceName")
 	}
 
 	pc, err := cfg.PerCall()
@@ -75,11 +69,11 @@ func New(cfg *argos.Config, service string, opts ...argos.Option) (*Client, erro
 		return nil, err
 	}
 
-	bindingFn, target := resolveBindingTarget(cfg, service)
-	if bindingFn == nil {
+	if sel.Binding == nil {
 		return nil, fmt.Errorf("client: no BindingFunc for service %q", service)
 	}
-	b, err := bindingFn()
+	target := sel.Target
+	b, err := sel.Binding()
 	if err != nil {
 		return nil, err
 	}
@@ -147,43 +141,6 @@ func checkBindingConfig(fr framing.Framing, cfg *argos.Config) error {
 		OpenTimeout:            cfg.OpenTimeout,
 		MaxDrainBytes:          cfg.MaxDrainBytes,
 	})
-}
-
-func checkBufferedCapacity(cfg *argos.Config) error {
-	pc, err := cfg.PerCall()
-	if err != nil {
-		return err
-	}
-	product, ok := mulNonNeg(int64(cfg.MaxConcurrentCalls), pc)
-	if !ok || product > cfg.MaxBufferedBytes {
-		return fmt.Errorf("client: MaxConcurrentCalls × perCall > MaxBufferedBytes (MaxConcurrentCalls, MaxFrameSize, MaxMessageSize, ReadAheadMessages, MaxBufferedBytes)")
-	}
-	return nil
-}
-
-func mulNonNeg(a, b int64) (int64, bool) {
-	if a < 0 || b < 0 {
-		return 0, false
-	}
-	if a == 0 || b == 0 {
-		return 0, true
-	}
-	if a > (1<<63-1)/b {
-		return 0, false
-	}
-	return a * b, true
-}
-
-func resolveBindingTarget(cfg *argos.Config, service string) (argos.BindingFunc, string) {
-	fn := cfg.Binding
-	target := ""
-	if sc, ok := cfg.Services[service]; ok {
-		if sc.Binding != nil {
-			fn = sc.Binding
-		}
-		target = sc.Target
-	}
-	return fn, target
 }
 
 // dial is the sessionpool DialFunc. HandshakeTimeout is applied by the pool

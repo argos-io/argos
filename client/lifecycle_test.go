@@ -50,17 +50,13 @@ func TestBindingFuncOncePerClient(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int64
 	fn := freshLoopback(t, &calls, nil, nil)
-	cfg, err := argos.New(
+	cli, err := client.New(
+		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
-		argos.WithService(testService,
-			argos.ServiceBinding(fn),
-			argos.ServiceTarget(testTarget)),
+		argos.WithBinding(fn),
+		argos.WithTarget(testTarget),
 	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, testService)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
@@ -104,22 +100,21 @@ func TestClientsFromSameFactoryIsolated(t *testing.T) {
 		return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
 	}
 
-	cfg, err := argos.New(
-		argos.WithMaxConcurrentCalls(4),
-		argos.WithMaxBufferedBytes(4*16*1024*1024),
-		argos.WithService(testService,
-			argos.ServiceBinding(fn),
-			argos.ServiceTarget(testTarget)),
-	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
+	// One Config for both clients: the isolation has to come from New calling
+	// the factory once per Client, not from them being configured separately.
+	cfg := &argos.Config{
+		MaxConcurrentCalls: 4,
+		MaxBufferedBytes:   4 * 16 * 1024 * 1024,
+		Binding:            fn,
 	}
 
-	cli1, err := client.New(cfg, testService)
+	cli1, err := client.New(argos.WithConfig(cfg),
+		argos.WithServiceName(testService), argos.WithTarget(testTarget))
 	if err != nil {
 		t.Fatalf("client.New #1: %v", err)
 	}
-	cli2, err := client.New(cfg, testService)
+	cli2, err := client.New(argos.WithConfig(cfg),
+		argos.WithServiceName(testService), argos.WithTarget(testTarget))
 	if err != nil {
 		t.Fatalf("client.New #2: %v", err)
 	}
@@ -165,18 +160,14 @@ func TestCloseDrainsIdleSessions(t *testing.T) {
 	var calls atomic.Int64
 	fn := freshLoopback(t, &calls, &dialed, &dialMu)
 
-	cfg, err := argos.New(
+	cli, err := client.New(
+		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithMaxIdleSessions(4),
-		argos.WithService(testService,
-			argos.ServiceBinding(fn),
-			argos.ServiceTarget(testTarget)),
+		argos.WithBinding(fn),
+		argos.WithTarget(testTarget),
 	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, testService)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
@@ -228,7 +219,8 @@ func TestCallStreamLeakReportsPhaseLeak(t *testing.T) {
 
 	var leaked atomic.Bool
 	var phase atomic.Uint32
-	cfg, err := argos.New(
+	cli, err := client.New(
+		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithCallErrorObserver(func(info argos.CallInfo, _ error) {
@@ -237,14 +229,9 @@ func TestCallStreamLeakReportsPhaseLeak(t *testing.T) {
 				leaked.Store(true)
 			}
 		}),
-		argos.WithService(testService,
-			argos.ServiceBinding(freshLoopback(t, nil, nil, nil)),
-			argos.ServiceTarget(testTarget)),
+		argos.WithBinding(freshLoopback(t, nil, nil, nil)),
+		argos.WithTarget(testTarget),
 	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, testService)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}

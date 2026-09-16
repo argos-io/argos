@@ -21,17 +21,13 @@ func TestCallStreamLeakReturnsAdmission(t *testing.T) {
 	}
 
 	const slots = 2
-	cfg, err := argos.New(
+	cli, err := client.New(
+		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(slots),
 		argos.WithMaxBufferedBytes(slots*16*1024*1024),
-		argos.WithService(testService,
-			argos.ServiceBinding(freshLoopback(t, nil, nil, nil)),
-			argos.ServiceTarget(testTarget)),
+		argos.WithBinding(freshLoopback(t, nil, nil, nil)),
+		argos.WithTarget(testTarget),
 	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, testService)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
@@ -71,17 +67,13 @@ func TestCallStreamLeakReturnsAdmission(t *testing.T) {
 // for a call that was already dead. Header() must report the cancellation.
 func TestHeaderReportsCancellationAfterCancelledRecv(t *testing.T) {
 	t.Parallel()
-	cfg, err := argos.New(
+	cli, err := client.New(
+		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
-		argos.WithService(testService,
-			argos.ServiceBinding(freshLoopback(t, nil, nil, nil)),
-			argos.ServiceTarget(testTarget)),
+		argos.WithBinding(freshLoopback(t, nil, nil, nil)),
+		argos.WithTarget(testTarget),
 	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, testService)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}

@@ -141,22 +141,18 @@ func handleEchoCall(sc framing.ServerCall) {
 	_ = sc.Finish(nil)
 }
 
-func newTestClient(t *testing.T, opts ...argos.Option) *client.Client {
+func newTestClient(t *testing.T, opts ...argos.ClientOption) *client.Client {
 	t.Helper()
-	base := []argos.Option{
+	// opts come last so a test can retune any of these.
+	base := []argos.ClientOption{
+		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(8),
 		argos.WithMaxBufferedBytes(8 * 16 * 1024 * 1024), // 8 × default perCall
 		argos.WithMaxIdleSessions(8),
-		argos.WithService(testService,
-			argos.ServiceBinding(sequentialLoopback(t, nil)),
-			argos.ServiceTarget(testTarget)),
+		argos.WithBinding(sequentialLoopback(t, nil)),
+		argos.WithTarget(testTarget),
 	}
-	base = append(base, opts...)
-	cfg, err := argos.New(base...)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, testService)
+	cli, err := client.New(append(base, opts...)...)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
@@ -217,24 +213,56 @@ func TestAdmissionExhausted(t *testing.T) {
 	}
 }
 
+// A Client needs a service name to select its Services entry and to check the
+// method of every Open against it, so New refuses to build one without it
+// rather than returning a Client that can never open a call. An empty
+// WithServiceName is the same thing as never passing the option.
+func TestNewWithoutServiceNameFails(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		opts []argos.ClientOption
+	}{
+		{name: "option_absent"},
+		{name: "empty_name", opts: []argos.ClientOption{argos.WithServiceName("")}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			opts := append(tc.opts,
+				argos.WithBinding(sequentialLoopback(t, nil)),
+				argos.WithTarget(testTarget),
+			)
+			_, err := client.New(opts...)
+			if err == nil {
+				t.Fatal("client.New built a Client that has no service to open calls for")
+			}
+			if !strings.Contains(err.Error(), "missing service name") {
+				t.Fatalf("error %q, want a missing service name report", err)
+			}
+		})
+	}
+}
+
 func TestNewFailsWhenConcurrentTimesPerCallExceedsBuffered(t *testing.T) {
 	t.Parallel()
-	cfg, err := argos.New(
-		argos.WithMaxConcurrentCalls(2),
-		argos.WithService(testService,
-			argos.ServiceBinding(sequentialLoopback(t, nil)),
-			argos.ServiceTarget(testTarget)),
-	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
 	// Force conflict via options: 128 × 16MiB >> 1GiB default buffered after
 	// raising concurrent without raising MaxBufferedBytes.
-	_, err = client.New(cfg, testService, argos.WithMaxConcurrentCalls(128))
+	_, err := client.New(
+		argos.WithServiceName(testService),
+		argos.WithMaxConcurrentCalls(128),
+		argos.WithBinding(sequentialLoopback(t, nil)),
+		argos.WithTarget(testTarget),
+	)
 	if err == nil {
 		t.Fatal("expected config error")
 	}
 	msg := err.Error()
+	// The cross-check is the root package's now, so the message says "argos:";
+	// client.New no longer keeps a copy of it.
+	if !strings.HasPrefix(msg, "argos:") {
+		t.Fatalf("error %q, want the root-package validation message", msg)
+	}
 	for _, field := range []string{
 		"MaxConcurrentCalls", "MaxFrameSize", "MaxMessageSize", "ReadAheadMessages", "MaxBufferedBytes",
 	} {
@@ -247,19 +275,15 @@ func TestNewFailsWhenConcurrentTimesPerCallExceedsBuffered(t *testing.T) {
 func TestSessionReusableAfterCall(t *testing.T) {
 	t.Parallel()
 	var dials atomic.Int64
-	cfg, err := argos.New(
+	cli, err := client.New(
+		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithMaxIdleSessions(4),
 		argos.WithHandshakeTimeout(50*time.Millisecond),
-		argos.WithService(testService,
-			argos.ServiceBinding(sequentialLoopback(t, &dials)),
-			argos.ServiceTarget(testTarget)),
+		argos.WithBinding(sequentialLoopback(t, &dials)),
+		argos.WithTarget(testTarget),
 	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, testService)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
@@ -326,19 +350,15 @@ func TestCallerCancelAbortsCall(t *testing.T) {
 			return cli, nil
 		},
 	}
-	cfg, err := argos.New(
+	cli, err := client.New(
+		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
-		argos.WithService(testService,
-			argos.ServiceBinding(func() (argos.Binding, error) {
-				return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
-			}),
-			argos.ServiceTarget(testTarget)),
+		argos.WithBinding(func() (argos.Binding, error) {
+			return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
+		}),
+		argos.WithTarget(testTarget),
 	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, testService)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
@@ -382,20 +402,16 @@ func TestOpenFilterShortCircuitNeverDials(t *testing.T) {
 	t.Parallel()
 	var dials atomic.Int64
 	want := errors.New("auth denied")
-	cfg, err := argos.New(
+	cli, err := client.New(
+		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithOpenFilter(func(ctx context.Context, m descriptor.Method, next filter.OpenFunc) (stream.Stream, error) {
 			return nil, want
 		}),
-		argos.WithService(testService,
-			argos.ServiceBinding(sequentialLoopback(t, &dials)),
-			argos.ServiceTarget(testTarget)),
+		argos.WithBinding(sequentialLoopback(t, &dials)),
+		argos.WithTarget(testTarget),
 	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, testService)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
@@ -419,19 +435,15 @@ func TestDialFailureMapsUnavailable(t *testing.T) {
 			return nil, root
 		},
 	}
-	cfg, err := argos.New(
+	cli, err := client.New(
+		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
-		argos.WithService(testService,
-			argos.ServiceBinding(func() (argos.Binding, error) {
-				return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
-			}),
-			argos.ServiceTarget(testTarget)),
+		argos.WithBinding(func() (argos.Binding, error) {
+			return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
+		}),
+		argos.WithTarget(testTarget),
 	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, testService)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
@@ -461,20 +473,16 @@ func TestHandshakeTimeoutMapsDeadlineExceeded(t *testing.T) {
 			return cli, nil
 		},
 	}
-	cfg, err := argos.New(
+	cli, err := client.New(
+		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
 		argos.WithHandshakeTimeout(30*time.Millisecond),
-		argos.WithService(testService,
-			argos.ServiceBinding(func() (argos.Binding, error) {
-				return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
-			}),
-			argos.ServiceTarget(testTarget)),
+		argos.WithBinding(func() (argos.Binding, error) {
+			return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
+		}),
+		argos.WithTarget(testTarget),
 	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, testService)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
@@ -507,7 +515,8 @@ func TestHandshakeTimeoutBeforeOpenFilterNext(t *testing.T) {
 			return cli, nil
 		},
 	}
-	cfg, err := argos.New(
+	cli, err := client.New(
+		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
 		argos.WithHandshakeTimeout(30*time.Millisecond),
@@ -520,16 +529,11 @@ func TestHandshakeTimeoutBeforeOpenFilterNext(t *testing.T) {
 			nextOK.Add(1)
 			return st, nil
 		}),
-		argos.WithService(testService,
-			argos.ServiceBinding(func() (argos.Binding, error) {
-				return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
-			}),
-			argos.ServiceTarget(testTarget)),
+		argos.WithBinding(func() (argos.Binding, error) {
+			return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
+		}),
+		argos.WithTarget(testTarget),
 	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, testService)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
@@ -556,19 +560,15 @@ func TestNarrowInterfaceAssertStaysConfigError(t *testing.T) {
 			return cli, nil
 		},
 	}
-	cfg, err := argos.New(
+	cli, err := client.New(
+		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
-		argos.WithService(testService,
-			argos.ServiceBinding(func() (argos.Binding, error) {
-				return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
-			}),
-			argos.ServiceTarget(testTarget)),
+		argos.WithBinding(func() (argos.Binding, error) {
+			return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
+		}),
+		argos.WithTarget(testTarget),
 	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, testService)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}

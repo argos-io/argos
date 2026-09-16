@@ -63,7 +63,8 @@ func TestRecvKeepsStreamResultWhenCancelRaces(t *testing.T) {
 			entered := make(chan struct{})
 			release := make(chan struct{})
 			var once sync.Once
-			cfg, err := argos.New(
+			cli, err := client.New(
+				argos.WithServiceName(testService),
 				argos.WithMaxConcurrentCalls(4),
 				argos.WithMaxBufferedBytes(4*16*1024*1024),
 				argos.WithOpenFilter(func(ctx context.Context, m descriptor.Method, next filter.OpenFunc) (stream.Stream, error) {
@@ -76,14 +77,9 @@ func TestRecvKeepsStreamResultWhenCancelRaces(t *testing.T) {
 						once: &once, result: tc.result, payload: tc.payload,
 					}, nil
 				}),
-				argos.WithService(testService,
-					argos.ServiceBinding(sequentialLoopback(t, &dials)),
-					argos.ServiceTarget(testTarget)),
+				argos.WithBinding(sequentialLoopback(t, &dials)),
+				argos.WithTarget(testTarget),
 			)
-			if err != nil {
-				t.Fatalf("argos.New: %v", err)
-			}
-			cli, err := client.New(cfg, testService)
 			if err != nil {
 				t.Fatalf("client.New: %v", err)
 			}

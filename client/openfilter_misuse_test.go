@@ -20,19 +20,15 @@ func openFilterClient(t *testing.T, dials *atomic.Int64, f filter.OpenFilter) *c
 
 func openFilterClientWith(t *testing.T, dials *atomic.Int64, maxSessions int, f filter.OpenFilter) *client.Client {
 	t.Helper()
-	cfg, err := argos.New(
+	cli, err := client.New(
+		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithMaxSessionsPerEndpoint(maxSessions),
 		argos.WithOpenFilter(f),
-		argos.WithService(testService,
-			argos.ServiceBinding(sequentialLoopback(t, dials)),
-			argos.ServiceTarget(testTarget)),
+		argos.WithBinding(sequentialLoopback(t, dials)),
+		argos.WithTarget(testTarget),
 	)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, testService)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
