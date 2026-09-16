@@ -204,13 +204,12 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.Cl
 				select {
 				case <-fl.done:
 					if fl.err != nil {
-						// Dial failed; retry loop may dial again or exhaust.
-						select {
-						case <-ctx.Done():
-							return nil, ctx.Err()
-						default:
-							continue
-						}
+						// Report the dial failure like the flight leader and the
+						// Sequential path do. Looping here instead retried with
+						// no bound and no backoff, so an endpoint that refuses
+						// connections turned one Acquire into a dial storm for
+						// as long as the caller's ctx allowed.
+						return nil, fl.err
 					}
 					p.mu.Lock()
 					if p.closed {
@@ -247,26 +246,47 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.Cl
 			// NewClientSession) must not leave the flight registered. Otherwise
 			// every later Acquire for this endpoint joins a flight nobody will
 			// ever close and blocks until its own ctx expires.
+			//
+			// The reservation is released by retireFlight below, not here: it
+			// has to outlive the dial and cover addEntryLocked too. Dropping
+			// pendingDial and the flight first left a window where the session
+			// existed but nothing accounted for it, so a concurrent Acquire saw
+			// an empty endpoint and dialled a second session past
+			// MaxSessionsPerEndpoint.
 			var sess framing.ClientSession
 			var err error
+			retired := false
+			retireFlight := func() {
+				if retired {
+					return
+				}
+				retired = true
+				p.bucketLocked(endpoint).pendingDial--
+				delete(p.flights, endpoint)
+			}
 			func() {
 				defer func() {
-					p.mu.Lock()
-					b = p.bucketLocked(endpoint)
-					b.pendingDial--
-					delete(p.flights, endpoint)
-					p.mu.Unlock()
+					if v := recover(); v != nil {
+						p.mu.Lock()
+						retireFlight()
+						fl.err = fmt.Errorf("sessionpool: dial panicked: %v", v)
+						close(fl.done)
+						p.mu.Unlock()
+						panic(v)
+					}
 				}()
 				sess, err = p.dialNew(endpoint)
 			}()
 			p.mu.Lock()
 			if err != nil {
+				retireFlight()
 				fl.err = err
 				close(fl.done)
 				p.mu.Unlock()
 				return nil, err
 			}
 			if p.closed {
+				retireFlight()
 				fl.err = fmt.Errorf("sessionpool: pool closed")
 				close(fl.done)
 				p.mu.Unlock()
@@ -276,6 +296,9 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.Cl
 			e := p.addEntryLocked(endpoint, sess, time.Now())
 			e.refcount = 1
 			fl.sess = sess
+			// Publish the entry before giving up the reservation so the endpoint
+			// is never momentarily unaccounted for.
+			retireFlight()
 			close(fl.done)
 			p.mu.Unlock()
 			return sess, nil
@@ -322,9 +345,14 @@ func (p *Pool) Release(sess framing.ClientSession) {
 		p.mu.Unlock()
 		return
 	}
-	if e.refcount > 0 {
-		e.refcount--
+	if e.refcount == 0 {
+		// Release must pair with a successful Acquire. A second Release on an
+		// already-idle entry used to append it to the idle queue twice, which
+		// lets reclaim and lend see the same session under two identities.
+		p.mu.Unlock()
+		return
 	}
+	e.refcount--
 	now := time.Now()
 	p.returnLocked(e, now)
 	p.mu.Unlock()
