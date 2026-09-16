@@ -17,6 +17,9 @@ import (
 type streamConn struct {
 	client *http.Client
 	base   string
+	// detach removes this handle from the Transport's tracking map when it
+	// closes, so the map never retains a closed endpoint handle.
+	detach func()
 
 	mu       sync.Mutex
 	closed   atomic.Bool
@@ -107,6 +110,9 @@ func (c *streamConn) Close() error {
 	for _, car := range carriers {
 		_ = car.Abort()
 	}
+	if c.detach != nil {
+		c.detach()
+	}
 	return nil
 }
 
@@ -195,7 +201,30 @@ func (c *clientCarrier) waitReady() error {
 
 // Write writes to the request body. Safe before response headers arrive.
 func (c *clientCarrier) Write(p []byte) (int, error) {
-	return c.pw.Write(p)
+	n, err := c.pw.Write(p)
+	return n, c.sendErr(err)
+}
+
+// sendErr classifies a request-body write failure. A failed write says nothing
+// about the response direction: an HTTP/2 stream is independent, so a server
+// that rejected the call early (or answered before the body finished) leaves
+// trailers readable. Only a carrier we already tore down is known dead.
+func (c *clientCarrier) sendErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	c.mu.Lock()
+	aborted := c.aborted
+	respErr := c.respErr
+	haveResp := c.resp != nil
+	c.mu.Unlock()
+	if aborted {
+		return transport.WrapSendError(err, false)
+	}
+	if respErr != nil && !haveResp {
+		return transport.WrapSendError(err, false)
+	}
+	return transport.WrapSendError(err, true)
 }
 
 // Read reads the response body, waiting for headers first if needed.
@@ -211,7 +240,7 @@ func (c *clientCarrier) CloseSend() error {
 	if c.sendClosed.Swap(true) {
 		return nil
 	}
-	return c.pw.Close()
+	return c.sendErr(c.pw.Close())
 }
 
 // ResponseStatus waits for response headers and returns the HTTP status code.

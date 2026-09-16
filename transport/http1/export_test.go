@@ -1,4 +1,4 @@
-package http2
+package http1
 
 import "github.com/argos-io/argos/transport"
 

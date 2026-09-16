@@ -17,6 +17,9 @@ import (
 type streamConn struct {
 	client *http.Client
 	base   string
+	// detach removes this handle from the Transport's tracking map when it
+	// closes, so the map never retains a closed endpoint handle.
+	detach func()
 
 	mu       sync.Mutex
 	closed   atomic.Bool
@@ -50,6 +53,7 @@ func (c *streamConn) OpenStream(ctx context.Context, p transport.RequestPreface)
 	pr, pw := io.Pipe()
 	reqCtx, cancel := context.WithCancel(ctx)
 	car := &clientCarrier{
+		conn:   c,
 		pw:     pw,
 		pr:     pr,
 		cancel: cancel,
@@ -74,6 +78,7 @@ func (c *streamConn) OpenStream(ctx context.Context, p transport.RequestPreface)
 		return nil, errAborted
 	}
 	c.carriers[car] = struct{}{}
+	car.tracked.Store(true)
 	c.mu.Unlock()
 
 	go func() {
@@ -105,7 +110,17 @@ func (c *streamConn) Close() error {
 	for _, car := range carriers {
 		_ = car.Abort()
 	}
+	if c.detach != nil {
+		c.detach()
+	}
 	return nil
+}
+
+// trackedCarrierCount reports in-flight OpenStream carriers (tests).
+func (c *streamConn) trackedCarrierCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.carriers)
 }
 
 // streamURL joins an endpoint base URL with an HTTP request target (:path).
@@ -131,12 +146,14 @@ func streamURL(base, target string) (string, error) {
 
 // clientCarrier is one client HTTP/1.1 request/response exchange.
 type clientCarrier struct {
+	conn   *streamConn
 	pw     *io.PipeWriter
 	pr     *io.PipeReader
 	cancel context.CancelFunc
 
 	ready      chan struct{}
 	finishOnce sync.Once
+	tracked    atomic.Bool // true while present in streamConn.carriers
 
 	mu      sync.Mutex
 	resp    *http.Response
@@ -144,6 +161,23 @@ type clientCarrier struct {
 	aborted bool
 
 	sendClosed atomic.Bool
+}
+
+// untrack drops this carrier from its endpoint handle; a carrier is tracked
+// only while its exchange can still be aborted.
+func (c *clientCarrier) untrack() {
+	if c.conn != nil {
+		c.conn.untrack(c)
+	}
+}
+
+func (c *streamConn) untrack(car *clientCarrier) {
+	if car == nil || !car.tracked.Swap(false) {
+		return
+	}
+	c.mu.Lock()
+	delete(c.carriers, car)
+	c.mu.Unlock()
 }
 
 // finish records the RoundTrip result once. Reports whether this call won.
@@ -155,6 +189,10 @@ func (c *clientCarrier) finish(resp *http.Response, err error) bool {
 		c.resp, c.respErr = resp, err
 		c.mu.Unlock()
 		close(c.ready)
+		if err != nil {
+			// No response will arrive: the exchange is over.
+			c.untrack()
+		}
 	})
 	return won
 }
@@ -173,24 +211,54 @@ func (c *clientCarrier) waitReady() error {
 }
 
 // Write writes to the request body. Safe before response headers arrive.
+//
+// A failed body write is a send-direction failure: net/http stops reading the
+// request body when the response arrives first, when the peer refuses the body,
+// or when the round trip itself failed. Only the last case proves no response
+// can arrive; the others leave the response readable, so framing must be able
+// to tell them apart (transport.SendError).
 func (c *clientCarrier) Write(p []byte) (int, error) {
-	return c.pw.Write(p)
+	n, err := c.pw.Write(p)
+	if err != nil {
+		return n, transport.WrapSendError(err, c.receiveOpen())
+	}
+	return n, nil
 }
 
-// Read reads the response body, waiting for headers first if needed.
+// receiveOpen reports whether a response can still be read on this exchange.
+// Unknown states answer true: a subsequent Read produces the definitive result.
+func (c *clientCarrier) receiveOpen() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.aborted {
+		return false
+	}
+	// A round trip that failed with no response will never produce one.
+	return !(c.respErr != nil && c.resp == nil)
+}
+
+// Read reads the response body, waiting for headers first if needed. The end
+// of the body ends the exchange, so the carrier stops being tracked there.
 func (c *clientCarrier) Read(p []byte) (int, error) {
 	if err := c.waitReady(); err != nil {
 		return 0, err
 	}
-	return c.resp.Body.Read(p)
+	n, err := c.resp.Body.Read(p)
+	if err != nil {
+		_ = c.resp.Body.Close()
+		c.untrack()
+	}
+	return n, err
 }
 
 // CloseSend ends the request body (HTTP/1.1 end of chunked/body stream).
+// Failure semantics match Write: a half-close that cannot be delivered finishes
+// the send direction without necessarily ending the exchange.
 func (c *clientCarrier) CloseSend() error {
 	if c.sendClosed.Swap(true) {
 		return nil
 	}
-	return c.pw.Close()
+	return transport.WrapSendError(c.pw.Close(), c.receiveOpen())
 }
 
 // ResponseStatus waits for response headers and returns the HTTP status code.
@@ -231,5 +299,6 @@ func (c *clientCarrier) Abort() error {
 		_ = resp.Body.Close()
 	}
 	_ = c.finish(nil, errAborted)
+	c.untrack()
 	return nil
 }

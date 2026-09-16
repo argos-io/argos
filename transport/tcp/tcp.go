@@ -19,11 +19,11 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ transport.Transport       = (*Transport)(nil)
-	_ transport.Conn            = (*Conn)(nil)
-	_ transport.CarrierConn     = (*Conn)(nil)
+	_ transport.Transport         = (*Transport)(nil)
+	_ transport.Conn              = (*Conn)(nil)
+	_ transport.CarrierConn       = (*Conn)(nil)
 	_ transport.ByteStreamCarrier = (*Conn)(nil)
-	_ transport.SendCloser      = (*Conn)(nil)
+	_ transport.SendCloser        = (*Conn)(nil)
 )
 
 // Transport is a TCP Transport producing CarrierConn connections.
@@ -159,6 +159,10 @@ func (t *Transport) Dial(ctx context.Context, spec transport.DialSpec, _ ...tran
 		return nil, fmt.Errorf("tcp: dial %s: %w", spec.Endpoint, err)
 	}
 	c := newConn(nc)
+	// A dialed connection is tracked only while it is open: Session recycles
+	// connections on idle/lifetime timeouts, and the transport must not retain
+	// closed ones until Close.
+	c.detach = func() { t.untrack(c) }
 
 	t.mu.Lock()
 	if t.closed {
@@ -207,7 +211,12 @@ func (t *Transport) Shutdown(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		t.closeAllConns()
-		<-done
+		// A callback that ignores Conn.Close must not hold Shutdown open past
+		// its deadline.
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
 		return ctx.Err()
 	}
 }
@@ -253,6 +262,9 @@ func (t *Transport) closeAllConns() {
 type Conn struct {
 	nc     net.Conn
 	closed atomic.Bool
+	// detach removes this Conn from the Transport's tracking map when it
+	// closes, so the map never retains a closed connection.
+	detach func()
 }
 
 func newConn(nc net.Conn) *Conn {
@@ -268,20 +280,32 @@ func (c *Conn) Addr() net.Addr { return c.nc.LocalAddr() }
 // Read implements io.Reader.
 func (c *Conn) Read(p []byte) (int, error) { return c.nc.Read(p) }
 
-// Write implements io.Writer.
-func (c *Conn) Write(p []byte) (int, error) { return c.nc.Write(p) }
+// Write implements io.Writer. A write error is a send-direction failure only:
+// it does not imply the peer stopped sending, because the response may already
+// be in flight or in the receive buffer. ReceiveOpen is therefore true unless
+// this Conn is already closed — the conservative reading of transport.SendError.
+func (c *Conn) Write(p []byte) (int, error) {
+	n, err := c.nc.Write(p)
+	if err != nil {
+		return n, transport.WrapSendError(err, !c.closed.Load())
+	}
+	return n, nil
+}
 
-// CloseSend half-closes the write side (TCP FIN).
+// CloseSend half-closes the write side (TCP FIN). Like Write, a failed FIN is a
+// send-direction failure: the peer may still deliver the response, so only a
+// closed Conn answers ReceiveOpen with false.
 func (c *Conn) CloseSend() error {
 	if tc, ok := c.nc.(*net.TCPConn); ok {
-		return tc.CloseWrite()
+		return transport.WrapSendError(tc.CloseWrite(), !c.closed.Load())
 	}
 	type closeWriter interface {
 		CloseWrite() error
 	}
 	if cw, ok := c.nc.(closeWriter); ok {
-		return cw.CloseWrite()
+		return transport.WrapSendError(cw.CloseWrite(), !c.closed.Load())
 	}
+	// A carrier without a half-close is a capability error, not a failed write.
 	return errors.New("tcp: CloseWrite not supported")
 }
 
@@ -296,5 +320,9 @@ func (c *Conn) Close() error {
 	if c.closed.Swap(true) {
 		return nil
 	}
-	return c.nc.Close()
+	err := c.nc.Close()
+	if c.detach != nil {
+		c.detach()
+	}
+	return err
 }

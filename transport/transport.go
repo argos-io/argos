@@ -8,6 +8,7 @@ package transport
 import (
 	"context"
 	"io"
+	"time"
 )
 
 // Header is a single opaque name/value pair. Transport does not interpret
@@ -51,6 +52,9 @@ type ClientOption interface {
 
 type serveConfig struct {
 	listenAddress string
+
+	httpReadHeaderTimeout time.Duration
+	httpIdleTimeout       time.Duration
 }
 
 type dialConfig struct{}
@@ -66,10 +70,24 @@ func WithListenAddress(addr string) ServerOption {
 	return serverOptionFunc(func(c *serveConfig) { c.listenAddress = addr })
 }
 
+// WithHTTPTimeouts sets the HTTP-level timeouts for the HTTP-based transports
+// (ws, http1, http2). They bound connections that never reach onConn: a peer
+// that connects and sends nothing (or half a request line) otherwise holds a
+// goroutine and an fd forever, because the composition layer's connection
+// admission and idle timers only start once onConn is called.
+func WithHTTPTimeouts(readHeader, idle time.Duration) ServerOption {
+	return serverOptionFunc(func(c *serveConfig) {
+		c.httpReadHeaderTimeout = readHeader
+		c.httpIdleTimeout = idle
+	})
+}
+
 // ServerSettings is the resolved view of ServerOption values for concrete
 // transport implementations.
 type ServerSettings struct {
-	ListenAddress string
+	ListenAddress         string
+	HTTPReadHeaderTimeout time.Duration
+	HTTPIdleTimeout       time.Duration
 }
 
 // ApplyServerOptions applies sealed ServerOption values and returns the
@@ -82,7 +100,11 @@ func ApplyServerOptions(opts ...ServerOption) ServerSettings {
 			o.applyServer(&c)
 		}
 	}
-	return ServerSettings{ListenAddress: c.listenAddress}
+	return ServerSettings{
+		ListenAddress:         c.listenAddress,
+		HTTPReadHeaderTimeout: c.httpReadHeaderTimeout,
+		HTTPIdleTimeout:       c.httpIdleTimeout,
+	}
 }
 
 // Transport produces Conn only. It does not import descriptor, framing, or

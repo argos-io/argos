@@ -26,6 +26,19 @@ type Option interface {
 
 type options struct {
 	codec codec.Codec
+
+	// maxReadBytes caps one WebSocket message read. coder/websocket defaults to
+	// 32 KiB and closes the whole connection (status 1009) on overflow, which is
+	// far below the framework's 4 MiB frame default. Zero keeps the transport's
+	// own default; see ws.WithMaxReadBytes.
+	maxReadBytes int64
+}
+
+// WithMaxReadBytes sets the WebSocket per-message read limit. It must be large
+// enough for one envelope frame, i.e. at least MaxMessageSize plus the frame
+// header. Zero keeps ws.DefaultMaxReadBytes.
+func WithMaxReadBytes(n int64) Option {
+	return optionFunc(func(o *options) { o.maxReadBytes = n })
 }
 
 type optionFunc func(*options)
@@ -74,7 +87,7 @@ func NewTCP(opts ...Option) argos.BindingFunc {
 func NewWS(opts ...Option) argos.BindingFunc {
 	o := applyOpts(opts)
 	return func() (argos.Binding, error) {
-		return assemble(ws.New(), nil, o)
+		return assemble(ws.New(ws.WithMaxReadBytes(o.maxReadBytes)), nil, o)
 	}
 }
 

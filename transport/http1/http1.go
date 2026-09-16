@@ -124,6 +124,8 @@ func (t *Transport) Serve(ctx context.Context, onConn func(context.Context, tran
 	serveDone := t.serveDone
 
 	srv := &http.Server{
+		ReadHeaderTimeout: settings.HTTPReadHeaderTimeout,
+		IdleTimeout:       settings.HTTPIdleTimeout,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			t.handleRequest(ctx, w, r, onConn)
 		}),
@@ -212,6 +214,10 @@ func (t *Transport) Dial(ctx context.Context, spec transport.DialSpec, _ ...tran
 
 	base := dialBaseURL(spec.Endpoint)
 	c := newStreamConn(client, base)
+	// An endpoint handle is tracked only while it is open: Session recycles
+	// handles on idle/lifetime timeouts, and the transport must not retain
+	// closed ones until Close.
+	c.detach = func() { t.untrackStreamConn(c) }
 
 	t.mu.Lock()
 	if t.closed {
@@ -271,7 +277,12 @@ func (t *Transport) Shutdown(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		t.closeAllServerConns()
-		<-done
+		// A callback that ignores Conn.Close must not hold Shutdown open past
+		// its deadline.
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
 		return ctx.Err()
 	}
 }
@@ -307,6 +318,12 @@ func (t *Transport) Close() error {
 func (t *Transport) untrackServer(c *serverConn) {
 	t.mu.Lock()
 	delete(t.serverConns, c)
+	t.mu.Unlock()
+}
+
+func (t *Transport) untrackStreamConn(c *streamConn) {
+	t.mu.Lock()
+	delete(t.streamConns, c)
 	t.mu.Unlock()
 }
 

@@ -25,14 +25,19 @@ const (
 // client.New / server.New later ignore options that do not apply to that side.
 type Config struct {
 	// Call-dimension limits.
-	MaxFrameSize       int64
-	MaxMessageSize     int64
-	MaxMetadataSize    int64
-	MaxHeaderBytes     int64
-	ReadAheadMessages  int
-	MaxConcurrentCalls int
-	MaxBufferedBytes   int64
-	OpenTimeout        time.Duration
+	MaxFrameSize    int64
+	MaxMessageSize  int64
+	MaxMetadataSize int64
+	// MaxInboundMetadataSize bounds metadata a peer may send us. It is
+	// deliberately independent of MaxMetadataSize, which only constrains our own
+	// outbound metadata: enforcing the outbound value on receive would reject
+	// peers (grpc-go defaults to 16 MiB) that our own sender would never exceed.
+	MaxInboundMetadataSize int64
+	MaxHeaderBytes         int64
+	ReadAheadMessages      int
+	MaxConcurrentCalls     int
+	MaxBufferedBytes       int64
+	OpenTimeout            time.Duration
 
 	// Connection-dimension limits.
 	HandshakeTimeout       time.Duration
@@ -41,10 +46,18 @@ type Config struct {
 	MaxSessionsPerEndpoint int
 	MaxIdleSessions        int           // client-only; confirmed §6.1
 	SessionIdleTimeout     time.Duration // client-only; 0 disables; confirmed §6.1
-	MaxSessionLifetime      time.Duration // client-only; 0 disables; confirmed §6.1
+	MaxSessionLifetime     time.Duration // client-only; 0 disables; confirmed §6.1
 	MaxInboundConns        int           // server-only; confirmed §6.1
 	MaxInboundConnIdle     time.Duration // server-only; must be > 0; confirmed §6.1
 	MaxInboundConnAge      time.Duration // server-only; must be > 0; confirmed §6.1
+
+	// HTTPReadHeaderTimeout and HTTPIdleTimeout are the HTTP-level limits for
+	// the HTTP-based transports (ws, http1, http2). They apply before onConn
+	// runs, so they are what actually bounds a peer that connects and sends
+	// nothing — MaxInboundConns and MaxInboundConnIdle only see connections
+	// that completed a request or upgrade.
+	HTTPReadHeaderTimeout time.Duration // must be > 0
+	HTTPIdleTimeout       time.Duration // must be > 0
 
 	// Binding is the optional factory stored by WithBinding.
 	// Nil is allowed until a Client/Server path requires it.
@@ -124,6 +137,7 @@ func defaults() Config {
 		MaxFrameSize:           4 * miB,
 		MaxMessageSize:         4 * miB,
 		MaxMetadataSize:        256 * kiB,
+		MaxInboundMetadataSize: 4 * miB,
 		MaxHeaderBytes:         1 * miB,
 		ReadAheadMessages:      1,
 		MaxConcurrentCalls:     64,
@@ -136,10 +150,13 @@ func defaults() Config {
 		// Confirmed §6.1 defaults (task 7.5; evidence in example/resp/LOAD.md).
 		MaxIdleSessions:    8,
 		SessionIdleTimeout: 50 * time.Second,
-		MaxSessionLifetime:  30 * time.Minute,
+		MaxSessionLifetime: 30 * time.Minute,
 		MaxInboundConns:    1024,
 		MaxInboundConnIdle: 50 * time.Second,
 		MaxInboundConnAge:  30 * time.Minute,
+
+		HTTPReadHeaderTimeout: 10 * time.Second,
+		HTTPIdleTimeout:       50 * time.Second,
 	}
 }
 
@@ -183,6 +200,9 @@ func (c *Config) validate() error {
 	}
 	if c.MaxMetadataSize <= 0 {
 		return fmt.Errorf("argos: MaxMetadataSize must be > 0")
+	}
+	if c.MaxInboundMetadataSize <= 0 {
+		return fmt.Errorf("argos: MaxInboundMetadataSize must be > 0")
 	}
 	if c.MaxHeaderBytes <= 0 {
 		return fmt.Errorf("argos: MaxHeaderBytes must be > 0")
@@ -228,6 +248,12 @@ func (c *Config) validate() error {
 	}
 	if c.MaxInboundConnAge <= 0 {
 		return fmt.Errorf("argos: MaxInboundConnAge must be > 0")
+	}
+	if c.HTTPReadHeaderTimeout <= 0 {
+		return fmt.Errorf("argos: HTTPReadHeaderTimeout must be > 0")
+	}
+	if c.HTTPIdleTimeout <= 0 {
+		return fmt.Errorf("argos: HTTPIdleTimeout must be > 0")
 	}
 
 	pc, err := perCall(c.MaxFrameSize, c.MaxMessageSize, c.ReadAheadMessages)

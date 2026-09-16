@@ -39,7 +39,7 @@ type Server struct {
 	runCancel context.CancelCauseFunc
 
 	wg       sync.WaitGroup
-	serveErr atomic.Value // error
+	serveErr atomic.Pointer[error]
 }
 
 type bindingReg struct {
@@ -207,12 +207,14 @@ func (s *Server) Run(ctx context.Context) error {
 			sessSpec: framing.SessionSpec{
 				CodecName: codecName,
 				Config: framing.Config{
-					MaxMessageSize:    b.cfg.MaxMessageSize,
-					MaxFrameSize:      b.cfg.MaxFrameSize,
-					MaxMetadataSize:   b.cfg.MaxMetadataSize,
-					ReadAheadMessages: b.cfg.ReadAheadMessages,
-					OpenTimeout:       b.cfg.OpenTimeout,
-					MaxDrainBytes:     b.cfg.MaxDrainBytes,
+					MaxMessageSize:  b.cfg.MaxMessageSize,
+					MaxFrameSize:    b.cfg.MaxFrameSize,
+					MaxMetadataSize: b.cfg.MaxMetadataSize,
+
+					MaxInboundMetadataSize: b.cfg.MaxInboundMetadataSize,
+					ReadAheadMessages:      b.cfg.ReadAheadMessages,
+					OpenTimeout:            b.cfg.OpenTimeout,
+					MaxDrainBytes:          b.cfg.MaxDrainBytes,
 				},
 			},
 		}
@@ -246,11 +248,16 @@ func (s *Server) Run(ctx context.Context) error {
 			if lb.cfg.ListenAddress != "" {
 				serveOpts = append(serveOpts, transport.WithListenAddress(lb.cfg.ListenAddress))
 			}
+			serveOpts = append(serveOpts, transport.WithHTTPTimeouts(
+				lb.cfg.HTTPReadHeaderTimeout, lb.cfg.HTTPIdleTimeout))
 			err := lb.tr.Serve(runCtx, func(_ context.Context, c transport.Conn) {
 				s.onConn(lb, routes, filters, c)
 			}, serveOpts...)
 			if err != nil && runCtx.Err() == nil {
-				s.serveErr.Store(err)
+				// CompareAndSwap, not Store: two bindings can fail in the same
+				// window, and atomic.Value panics when the two errors have
+				// different dynamic types. First failure wins.
+				s.serveErr.CompareAndSwap(nil, &err)
 				runCancel(err)
 			}
 		}()
@@ -264,8 +271,8 @@ func (s *Server) Run(ctx context.Context) error {
 	s.running = false
 	s.mu.Unlock()
 
-	if v := s.serveErr.Load(); v != nil {
-		return v.(error)
+	if p := s.serveErr.Load(); p != nil {
+		return *p
 	}
 	cause := context.Cause(runCtx)
 	if cause != nil && !errors.Is(cause, context.Canceled) && !errors.Is(cause, ErrServerShutdown) {

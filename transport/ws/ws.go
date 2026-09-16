@@ -29,8 +29,37 @@ var (
 	_ transport.MessageCarrier = (*Conn)(nil)
 )
 
+// DefaultMaxReadBytes is the inbound message limit applied when
+// WithMaxReadBytes is not given: the framework's default 4 MiB maximum frame
+// plus 1 MiB of framing headroom. A larger configured MaxFrameSize needs a
+// matching WithMaxReadBytes.
+const DefaultMaxReadBytes int64 = 5 << 20
+
+// Option configures a Transport; the set is sealed so it can grow without
+// breaking the constructor.
+type Option interface {
+	apply(*options)
+}
+
+type options struct {
+	maxReadBytes int64
+}
+
+type optionFunc func(*options)
+
+func (f optionFunc) apply(o *options) { f(o) }
+
+// WithMaxReadBytes bounds one inbound WebSocket message on both Serve and Dial.
+// The peer of an oversized message is closed with status 1009; a negative n
+// removes the limit. The zero value means DefaultMaxReadBytes.
+func WithMaxReadBytes(n int64) Option {
+	return optionFunc(func(o *options) { o.maxReadBytes = n })
+}
+
 // Transport is a WebSocket Transport producing CarrierConn connections.
 type Transport struct {
+	opts options
+
 	mu sync.Mutex
 
 	listener net.Listener
@@ -49,8 +78,18 @@ type Transport struct {
 }
 
 // New returns a WebSocket Transport.
-func New() transport.Transport {
+func New(opts ...Option) transport.Transport {
+	var o options
+	for _, opt := range opts {
+		if opt != nil {
+			opt.apply(&o)
+		}
+	}
+	if o.maxReadBytes == 0 {
+		o.maxReadBytes = DefaultMaxReadBytes
+	}
 	return &Transport{
+		opts:  o,
 		conns: make(map[*Conn]struct{}),
 	}
 }
@@ -96,6 +135,8 @@ func (t *Transport) Serve(ctx context.Context, onConn func(context.Context, tran
 	serveDone := t.serveDone
 
 	srv := &http.Server{
+		ReadHeaderTimeout: settings.HTTPReadHeaderTimeout,
+		IdleTimeout:       settings.HTTPIdleTimeout,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			t.handleUpgrade(ctx, w, r, onConn)
 		}),
@@ -152,6 +193,7 @@ func (t *Transport) handleUpgrade(ctx context.Context, w http.ResponseWriter, r 
 	if err != nil {
 		return
 	}
+	wc.SetReadLimit(t.opts.maxReadBytes)
 
 	c := newConn(wc)
 
@@ -188,7 +230,13 @@ func (t *Transport) Dial(ctx context.Context, spec transport.DialSpec, _ ...tran
 	if err != nil {
 		return nil, fmt.Errorf("ws: dial %s: %w", url, err)
 	}
+	wc.SetReadLimit(t.opts.maxReadBytes)
+
 	c := newConn(wc)
+	// A dialed connection is tracked only while it is open: Session recycles
+	// connections on idle/lifetime timeouts, and the transport must not retain
+	// closed ones until Close.
+	c.detach = func() { t.untrack(c) }
 
 	t.mu.Lock()
 	if t.closed {
@@ -251,7 +299,12 @@ func (t *Transport) Shutdown(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		t.closeAllConns()
-		<-done
+		// A callback that ignores Conn.Close must not hold Shutdown open past
+		// its deadline.
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
 		return ctx.Err()
 	}
 }
@@ -302,6 +355,9 @@ type Conn struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	closed atomic.Bool
+	// detach removes this Conn from the Transport's tracking map when it
+	// closes, so the map never retains a closed connection.
+	detach func()
 }
 
 func newConn(wc *websocket.Conn) *Conn {
@@ -324,9 +380,17 @@ func (c *Conn) RecvMessage() ([]byte, error) {
 	return data, nil
 }
 
-// SendMessage writes one WebSocket binary message.
+// SendMessage writes one WebSocket binary message. A failed write is a
+// send-direction failure only: WebSocket delivers messages in both directions
+// independently, so the peer may still send its response. ReceiveOpen stays
+// true unless this Conn was closed — the conservative reading of
+// transport.SendError.
 func (c *Conn) SendMessage(p []byte) error {
-	return c.ws.Write(c.ctx, websocket.MessageBinary, p)
+	err := c.ws.Write(c.ctx, websocket.MessageBinary, p)
+	if err != nil {
+		return transport.WrapSendError(err, !c.closed.Load())
+	}
+	return nil
 }
 
 // Abort cancels in-flight I/O and closes the connection.
@@ -341,5 +405,9 @@ func (c *Conn) Close() error {
 		return nil
 	}
 	c.cancel()
-	return c.ws.CloseNow()
+	err := c.ws.CloseNow()
+	if c.detach != nil {
+		c.detach()
+	}
+	return err
 }

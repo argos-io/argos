@@ -82,6 +82,26 @@ func WithMaxMetadataSize(n int64) Option {
 	return optionFunc(func(c *Config) { c.MaxMetadataSize = n })
 }
 
+// WithMaxInboundMetadataSize bounds the metadata a peer may send us. It is
+// independent of WithMaxMetadataSize, which only constrains our own outbound
+// metadata. 0 is invalid: omit the option to keep the default.
+func WithMaxInboundMetadataSize(n int64) Option {
+	return optionFunc(func(c *Config) { c.MaxInboundMetadataSize = n })
+}
+
+// WithHTTPReadHeaderTimeout bounds how long an HTTP-based peer may take to send
+// a request header block or upgrade. It is the only bound that applies before
+// onConn runs.
+func WithHTTPReadHeaderTimeout(d time.Duration) Option {
+	return optionFunc(func(c *Config) { c.HTTPReadHeaderTimeout = d })
+}
+
+// WithHTTPIdleTimeout bounds how long a keep-alive HTTP connection may sit idle
+// between requests or streams.
+func WithHTTPIdleTimeout(d time.Duration) Option {
+	return optionFunc(func(c *Config) { c.HTTPIdleTimeout = d })
+}
+
 // WithMaxHeaderBytes sets the HTTP header-block limit (http1/http2).
 func WithMaxHeaderBytes(n int64) Option {
 	return optionFunc(func(c *Config) { c.MaxHeaderBytes = n })

@@ -190,6 +190,10 @@ func (t *Transport) Dial(ctx context.Context, spec transport.DialSpec, _ ...tran
 		return nil, fmt.Errorf("udp: dial %s: unexpected conn type %T", spec.Endpoint, nc)
 	}
 	c := newClientConn(uc)
+	// A dialed association is tracked only while it is open: Session recycles
+	// connections on idle/lifetime timeouts, and the transport must not retain
+	// closed ones until Close.
+	c.detach = func() { t.untrack(c) }
 
 	t.mu.Lock()
 	if t.closed {
@@ -237,7 +241,12 @@ func (t *Transport) Shutdown(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		t.closeAllConns()
-		<-done
+		// A callback that ignores Conn.Close must not hold Shutdown open past
+		// its deadline.
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
 		return ctx.Err()
 	}
 }
@@ -259,6 +268,12 @@ func (t *Transport) Close() error {
 	}
 	t.closeAllConns()
 	return nil
+}
+
+func (t *Transport) untrack(c *Conn) {
+	t.mu.Lock()
+	delete(t.conns, c)
+	t.mu.Unlock()
 }
 
 func (t *Transport) untrackAssoc(c *Conn, key string) {
@@ -297,6 +312,10 @@ type Conn struct {
 
 	// closeOnce guards closing done.
 	closeOnce sync.Once
+
+	// detach removes this Conn from the Transport's tracking map when it
+	// closes, so the map never retains a closed association.
+	detach func()
 }
 
 func newClientConn(uc *net.UDPConn) *Conn {
@@ -380,9 +399,14 @@ func (c *Conn) RecvDatagram() ([]byte, error) {
 
 // SendDatagram writes one UDP datagram. Payloads larger than MaxDatagramSize
 // fail without writing.
+//
+// Every I/O failure here is terminal for the exchange: UDP carries one datagram
+// per call, so a datagram that never left (or left truncated) can never be
+// answered. ReceiveOpen is therefore false — unlike byte-stream transports,
+// where a failed write may still be followed by a readable response.
 func (c *Conn) SendDatagram(p []byte) error {
 	if c.closed.Load() {
-		return net.ErrClosed
+		return transport.WrapSendError(net.ErrClosed, false)
 	}
 	if len(p) > MaxDatagramSize {
 		return fmt.Errorf("udp: datagram is %d bytes; maximum is %d", len(p), MaxDatagramSize)
@@ -398,13 +422,13 @@ func (c *Conn) SendDatagram(p []byte) error {
 	case c.pc != nil && c.remote != nil:
 		n, err = c.pc.WriteTo(p, c.remote)
 	default:
-		return net.ErrClosed
+		return transport.WrapSendError(net.ErrClosed, false)
 	}
 	if err != nil {
-		return err
+		return transport.WrapSendError(err, false)
 	}
 	if n < len(p) {
-		return io.ErrShortWrite
+		return transport.WrapSendError(io.ErrShortWrite, false)
 	}
 	return nil
 }
@@ -424,8 +448,12 @@ func (c *Conn) Close() error {
 		return nil
 	}
 	c.closeOnce.Do(func() { close(c.done) })
+	var err error
 	if c.uc != nil {
-		return c.uc.Close()
+		err = c.uc.Close()
 	}
-	return nil
+	if c.detach != nil {
+		c.detach()
+	}
+	return err
 }
