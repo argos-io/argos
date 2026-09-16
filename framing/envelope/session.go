@@ -586,13 +586,47 @@ func (s *session) readFrame() (Frame, error) {
 	return s.readPrefixedFrame()
 }
 
+// checkInboundMeta rejects metadata larger than the configured inbound limit.
+// MaxMetadataSize only constrains what we send, so without this a peer decides
+// how much metadata we parse and retain.
+func (s *session) checkInboundMeta(f Frame) error {
+	max := s.cfg.MaxInboundMetadataSize
+	if max <= 0 || len(f.Headers) == 0 {
+		return nil
+	}
+	sz, err := metadataWireSize(f.Headers)
+	if err != nil {
+		return err
+	}
+	if sz > max {
+		return fmt.Errorf("%w: %d > inbound limit %d", ErrMetaTooLarge, sz, max)
+	}
+	return nil
+}
+
+func (s *session) checkInboundMetas(frames []Frame) error {
+	for _, f := range frames {
+		if err := s.checkInboundMeta(f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *session) readPrefixedFrame() (Frame, error) {
 	bs, ok := s.carrier.(transport.ByteStreamCarrier)
 	if !ok {
 		return Frame{}, fmt.Errorf("envelope: ByteStreamCarrier required")
 	}
 	r := &bufReader{s: s, r: bs}
-	return UnmarshalPrefixedLimited(r, s.cfg.MaxFrameSize, s.cfg.MaxMessageSize)
+	f, err := UnmarshalPrefixedLimited(r, s.cfg.MaxFrameSize, s.cfg.MaxMessageSize)
+	if err != nil {
+		return Frame{}, err
+	}
+	if err := s.checkInboundMeta(f); err != nil {
+		return Frame{}, err
+	}
+	return f, nil
 }
 
 func (s *session) readMessageFrame(ctx context.Context, honorCtx bool) (Frame, error) {
@@ -640,7 +674,14 @@ func (s *session) readMessageFrame(ctx context.Context, honorCtx bool) (Frame, e
 		return Frame{}, fmt.Errorf("%w: DATA payload %d > max %d",
 			ErrMessageTooLarge, len(res.msg)-headerSize, s.cfg.MaxMessageSize)
 	}
-	return ParseFrameBody(res.msg)
+	f, err := ParseFrameBody(res.msg)
+	if err != nil {
+		return Frame{}, err
+	}
+	if err := s.checkInboundMeta(f); err != nil {
+		return Frame{}, err
+	}
+	return f, nil
 }
 
 func (s *session) pushFront(f Frame) {
@@ -788,6 +829,12 @@ func (s *session) acceptDatagram(ctx context.Context) {
 		s.waitModeChange(modeAccepting)
 		return
 	}
+	if err := s.checkInboundMetas(frames); err != nil {
+		s.failAccept(err)
+		s.markBad()
+		s.waitModeChange(modeAccepting)
+		return
+	}
 	if len(frames) == 0 || frames[0].Type != TypeOpen {
 		s.failAccept(fmt.Errorf("envelope: datagram expected OPEN, got %v", frames))
 		s.markBad()
@@ -872,6 +919,12 @@ func (s *session) recvClientDatagram(active *call) {
 
 		frames, err := ParseDatagram(data, s.cfg.MaxFrameSize, s.cfg.MaxMessageSize)
 		if err != nil {
+			active.abortRecv(err)
+			s.markBad()
+			s.waitWakeOrClosed()
+			return
+		}
+		if err := s.checkInboundMetas(frames); err != nil {
 			active.abortRecv(err)
 			s.markBad()
 			s.waitWakeOrClosed()
@@ -1097,8 +1150,17 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 		return nil, fmt.Errorf("envelope: expected OPEN, got type %d", f.Type)
 	}
 	if f.Method == "" {
-		s.finishAccept(nil)
-		return nil, fmt.Errorf("%w: %w", framing.ErrCallRejected,
+		// Hand the call back alongside the error: the composition layer writes
+		// the status through it (server.handleRejected), and attaching it as the
+		// active call makes the demux consume the peer's remaining DATA/END
+		// frames. Returning a nil call left those bytes queued, so the next
+		// AcceptCall parsed an END frame as its OPEN and died with a
+		// connection-level error — killing an unrelated, perfectly legal call.
+		b, _ := budget.FromContext(ctx)
+		c := newCall(s.session, f.CallID, f.Method, false, spec.Metadata, 0, b)
+		c.openSeen = true
+		s.finishAccept(c)
+		return &serverCall{call: c}, fmt.Errorf("%w: %w", framing.ErrCallRejected,
 			status.Error(status.InvalidArgument, "envelope: empty method in OPEN"))
 	}
 

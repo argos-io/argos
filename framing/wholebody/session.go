@@ -184,8 +184,12 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 			status.Error(status.InvalidArgument, err.Error()))
 	}
 	fullName := svc + "." + meth
+	inMD := DecodeMetadata(rh.RequestHeaders())
+	if err := checkInboundMeta(s.cfg, inMD); err != nil {
+		return nil, fmt.Errorf("%w: %w", framing.ErrCallRejected, err)
+	}
 	if spec.Metadata != nil {
-		_ = metadata.SetIncomingHeaders(spec.Metadata, DecodeMetadata(rh.RequestHeaders()))
+		_ = metadata.SetIncomingHeaders(spec.Metadata, inMD)
 	}
 
 	c := &call{

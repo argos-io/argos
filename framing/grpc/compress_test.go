@@ -357,7 +357,7 @@ func TestMaxMessageSizeBoundary(t *testing.T) {
 			t.Fatalf("Send oversize: CodeOf=%v err=%v, want ResourceExhausted", status.CodeOf(err), err)
 		}
 		_ = call.HalfClose()
-		_ = <-errCh
+		<-errCh
 	})
 
 	t.Run("recv_oversize_peer", func(t *testing.T) {

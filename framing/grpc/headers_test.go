@@ -345,11 +345,11 @@ func TestBuildAndParseRequestPreface(t *testing.T) {
 	m := descriptor.MustMethod("echo.v1.EchoService.Echo", descriptor.Unary)
 	raw := string([]byte{0x01, 0x02, 0xff})
 	preface := grpcframing.BuildRequestPreface(grpcframing.PrefaceOptions{
-		Method:         m,
-		Outgoing:       metadata.Metadata{"x-trace-bin": {raw}, "x-id": {"42"}, "content-type": {"evil"}},
-		Timeout:        1500 * time.Millisecond,
-		ContentSubtype: "proto",
-		SendCompressor: "gzip",
+		Method:            m,
+		Outgoing:          metadata.Metadata{"x-trace-bin": {raw}, "x-id": {"42"}, "content-type": {"evil"}},
+		Timeout:           1500 * time.Millisecond,
+		ContentSubtype:    "proto",
+		SendCompressor:    "gzip",
 		AcceptCompressors: []string{"gzip", "identity"},
 	})
 	if preface.RequestTarget != "/echo.v1.EchoService/Echo" {

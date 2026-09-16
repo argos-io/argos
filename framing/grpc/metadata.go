@@ -44,11 +44,17 @@ func EncodeMetadata(md metadata.Metadata) transport.Headers {
 //   - reserved keys are skipped unless whitelisted (:authority, user-agent)
 //   - -bin values accept padded and unpadded base64
 //   - comma-joined -bin values are split then decoded (§7.4)
+//
+// A malformed binary value never discards the rest of the set: like grpc-go
+// (internal/transport/http2_client.go), the offending value is skipped, every
+// other header is still decoded, and the first failure is reported alongside
+// the result. The returned Metadata is therefore always non-nil.
 func DecodeMetadata(hs transport.Headers) (metadata.Metadata, error) {
 	if len(hs) == 0 {
 		return metadata.Metadata{}, nil
 	}
 	out := make(metadata.Metadata)
+	var firstErr error
 	for _, h := range hs {
 		key := strings.ToLower(h.Name)
 		if IsReservedHeader(key) && !IsWhitelistedHeader(key) {
@@ -56,11 +62,14 @@ func DecodeMetadata(hs transport.Headers) (metadata.Metadata, error) {
 		}
 		vals, err := decodeMetadataValues(key, h.Value)
 		if err != nil {
-			return nil, fmt.Errorf("framing/grpc: malformed binary metadata %q in header %q: %w", h.Value, key, err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("framing/grpc: malformed binary metadata %q in header %q: %w", h.Value, key, err)
+			}
+			continue
 		}
 		out[key] = append(out[key], vals...)
 	}
-	return out, nil
+	return out, firstErr
 }
 
 func encodeMetadataValue(key, v string) string {

@@ -12,6 +12,7 @@ import (
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/status"
+	"github.com/argos-io/argos/transport"
 )
 
 // Local concurrency / lifecycle errors (errors.Is).
@@ -59,11 +60,18 @@ type call struct {
 	closed         bool
 	peerHalfClosed bool // responder saw END / OPEN|END
 	sawStatus      bool
-	terminalRead   bool // initiator read STATUS (or EOF after OK)
+	terminalRead   bool  // initiator read STATUS (or EOF after OK)
 	statusErr      error // non-nil when STATUS code != OK; returned once from Recv
 	statusReturned bool
 	recvDone       bool // demux finished (STATUS or fatal)
 	detachCh       chan struct{}
+
+	// sendErr is the failure that ended the send direction. A partial write
+	// cannot be rolled back, so no further frame may be written after it: Send
+	// and HalfClose keep returning it. When it is a transport.SendError with
+	// ReceiveOpen() true the receive direction still works and Recv delivers the
+	// response plus the remote status.
+	sendErr error
 
 	sending atomic.Bool
 	recving atomic.Bool
@@ -228,7 +236,17 @@ func (c *call) noteRelease(n int64) {
 	}
 }
 
+// ensureImpliedHeaders marks the response's initial metadata as arrived when
+// the peer sent DATA/STATUS without a HEADERS frame. It is initiator-only: a
+// responder's incoming headers are the request's OPEN headers, applied by
+// AcceptCall, and HEADERS is a response frame it never receives. Running this
+// on the responder overwrote the just-parsed request metadata with an empty
+// map, so server filters and handlers saw no request metadata at all once the
+// first DATA frame was delivered.
 func (c *call) ensureImpliedHeaders() {
+	if !c.initiator {
+		return
+	}
 	c.mu.Lock()
 	arrived := c.headersArrived
 	if !arrived {
@@ -241,6 +259,32 @@ func (c *call) ensureImpliedHeaders() {
 }
 
 var errStatusPending = errors.New("envelope: status pending")
+
+// sendFailure reports whether err is a transport send failure on an exchange
+// whose receive direction is still open. Framing must keep such a carrier
+// readable instead of aborting it: the peer may still deliver the response and
+// the terminal status. A SendError with ReceiveOpen() false (or a local error)
+// means the exchange is unrecoverable.
+func sendFailure(err error) bool {
+	se, ok := transport.AsSendError(err)
+	return ok && se.ReceiveOpen()
+}
+
+// sendFailed records the error that ended the send direction and returns it to
+// the caller unchanged, so stream.Wrap can map a still-receivable exchange to
+// ErrSendClosed. Only a failure the transport reports as unrecoverable poisons
+// the session; "send direction finished" is not a terminal state for the call.
+func (c *call) sendFailed(err error) error {
+	c.mu.Lock()
+	if c.sendErr == nil {
+		c.sendErr = err
+	}
+	c.mu.Unlock()
+	if !sendFailure(err) {
+		c.sess.markBad()
+	}
+	return err
+}
 
 func (c *call) deliverEnd() {
 	c.mu.Lock()
@@ -294,8 +338,7 @@ func (c *call) SendHeaders() error {
 		CallID:  c.callID,
 		Headers: hdrs,
 	}); err != nil {
-		c.sess.markBad()
-		return err
+		return c.sendFailed(err)
 	}
 	c.mu.Lock()
 	c.headersSent = true
@@ -340,6 +383,13 @@ func (c *call) Send(payload []byte) error {
 	if c.closed {
 		c.mu.Unlock()
 		return ErrCallClosed
+	}
+	if c.sendErr != nil {
+		// The send direction already failed; a partial write cannot be rolled
+		// back, so this call stays finished for sending. Recv still works.
+		err := c.sendErr
+		c.mu.Unlock()
+		return err
 	}
 	if c.initiator && c.halfClosed {
 		c.mu.Unlock()
@@ -389,8 +439,7 @@ func (c *call) Send(payload []byte) error {
 		CallID: c.callID,
 		Data:   cp,
 	}); err != nil {
-		c.sess.markBad()
-		return err
+		return c.sendFailed(err)
 	}
 	return nil
 }
@@ -417,8 +466,7 @@ func (c *call) ensureOpen() error {
 		Method:  c.method,
 		Headers: hdrs,
 	}); err != nil {
-		c.sess.markBad()
-		return err
+		return c.sendFailed(err)
 	}
 	c.mu.Lock()
 	c.openSent = true
@@ -434,6 +482,13 @@ func (c *call) HalfClose() error {
 	if c.closed {
 		c.mu.Unlock()
 		return ErrCallClosed
+	}
+	if c.sendErr != nil {
+		// HalfClose is idempotent, including its failure: the caller that
+		// already saw the send direction end sees the same result again.
+		err := c.sendErr
+		c.mu.Unlock()
+		return err
 	}
 	if c.halfClosed {
 		c.mu.Unlock()
@@ -466,8 +521,7 @@ func (c *call) HalfClose() error {
 			}
 		}
 		if err := c.sess.sendDatagramBatch(frames); err != nil {
-			c.sess.markBad()
-			return err
+			return c.sendFailed(err)
 		}
 		c.mu.Lock()
 		c.openSent = true
@@ -491,8 +545,7 @@ func (c *call) HalfClose() error {
 			Flags:   FlagOpenEnd,
 			Headers: hdrs,
 		}); err != nil {
-			c.sess.markBad()
-			return err
+			return c.sendFailed(err)
 		}
 		c.mu.Lock()
 		c.openSent = true
@@ -505,8 +558,7 @@ func (c *call) HalfClose() error {
 		Type:   TypeEnd,
 		CallID: c.callID,
 	}); err != nil {
-		c.sess.markBad()
-		return err
+		return c.sendFailed(err)
 	}
 	c.mu.Lock()
 	c.halfClosed = true
@@ -556,8 +608,7 @@ func (c *call) Finish(err error) error {
 		Message: msg,
 		Headers: trailers,
 	}); werr != nil {
-		c.sess.markBad()
-		return werr
+		return c.sendFailed(werr)
 	}
 	c.mu.Lock()
 	c.finished = true
@@ -616,8 +667,7 @@ func (c *call) finishDatagram(err error) error {
 	})
 
 	if werr := c.sess.sendDatagramBatch(frames); werr != nil {
-		c.sess.markBad()
-		return werr
+		return c.sendFailed(werr)
 	}
 	c.mu.Lock()
 	c.finished = true

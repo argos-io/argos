@@ -34,6 +34,10 @@ func appendMetadata(dst []byte, hdrs []Header) ([]byte, error) {
 	return dst, nil
 }
 
+// minHeaderWireSize is the smallest encoded size of one name/value pair: two
+// u16 length prefixes with empty payloads.
+const minHeaderWireSize = 4
+
 // parseMetadata decodes a metadata blob and returns the headers plus bytes consumed.
 // Strings are deep-copied and do not alias body.
 func parseMetadata(body []byte) ([]Header, int, error) {
@@ -44,6 +48,13 @@ func parseMetadata(body []byte) ([]Header, int, error) {
 	off := 2
 	if count == 0 {
 		return nil, off, nil
+	}
+	// Each pair costs at least two length prefixes, so a count the remaining
+	// bytes cannot possibly hold is a malformed header. Without this check a
+	// well-framed 14-byte OPEN can drive a 65535-entry allocation (~2 MiB) that
+	// fails on the first parseString — pure waste, repeatable per connection.
+	if count > (len(body)-off)/minHeaderWireSize {
+		return nil, 0, fmt.Errorf("%w: metadata count %d exceeds body %d", ErrInvalidLength, count, len(body)-off)
 	}
 	hdrs := make([]Header, 0, count)
 	for i := 0; i < count; i++ {

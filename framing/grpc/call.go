@@ -143,6 +143,21 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 }
 
 // serverSession wraps one HTTP request CarrierConn. AcceptCall succeeds once.
+// checkInboundMeta rejects metadata larger than the configured inbound limit.
+// MaxMetadataSize only constrains what we send, so without this a peer decides
+// how much metadata we parse and retain.
+func checkInboundMeta(cfg framing.Config, md metadata.Metadata) error {
+	max := cfg.MaxInboundMetadataSize
+	if max <= 0 || len(md) == 0 {
+		return nil
+	}
+	if sz := metadata.WireSize(md); sz > max {
+		return status.Error(status.ResourceExhausted,
+			fmt.Sprintf("framing/grpc: inbound metadata %d exceeds limit %d", sz, max))
+	}
+	return nil
+}
+
 type serverSession struct {
 	framing     *Framing
 	conn        transport.CarrierConn
@@ -203,6 +218,9 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 	}
 
 	fullName := info.Service + "." + info.Method
+	if err := checkInboundMeta(s.cfg, info.Metadata); err != nil {
+		return nil, fmt.Errorf("%w: %w", framing.ErrCallRejected, err)
+	}
 	if spec.Metadata != nil {
 		_ = metadata.SetIncomingHeaders(spec.Metadata, info.Metadata)
 	}
@@ -275,6 +293,13 @@ type call struct {
 	messagesSent   bool // any LPM written (affects trailers-only)
 	messagesRecv   bool // any LPM successfully received
 
+	// sendErr is the failure that ended the send direction. A partial LPM
+	// cannot be rolled back, so no further frame may follow it: Send and
+	// HalfClose keep returning it. A transport.SendError with ReceiveOpen()
+	// true leaves this stream readable, so the caller still gets the response
+	// and the remote status.
+	sendErr error
+
 	sending atomic.Bool
 	recving atomic.Bool
 }
@@ -292,6 +317,31 @@ func (c *call) markBad() {
 	if c.client != nil {
 		c.client.markBad()
 	}
+}
+
+// sendFailure reports whether err is a transport send failure on a stream whose
+// receive direction is still open. This stream must stay readable then — the
+// remote status is still coming — and the HTTP/2 session is not poisoned: a
+// failed send on one stream says nothing about the connection (or the other
+// streams sharing it).
+func sendFailure(err error) bool {
+	se, ok := transport.AsSendError(err)
+	return ok && se.ReceiveOpen()
+}
+
+// sendFailed records the error that ended this stream's send direction and
+// returns it to the caller unchanged, so stream.Wrap can map a still-receivable
+// stream to ErrSendClosed instead of reporting a terminal failure.
+func (c *call) sendFailed(err error) error {
+	c.mu.Lock()
+	if c.sendErr == nil {
+		c.sendErr = err
+	}
+	c.mu.Unlock()
+	if !sendFailure(err) {
+		c.markBad()
+	}
+	return err
 }
 
 func (c *call) SendHeaders() error {
@@ -322,8 +372,7 @@ func (c *call) SendHeaders() error {
 		md = c.md.OutgoingHeaders()
 	}
 	if err := rw.WriteHeaders(httpOK, EncodeResponseHeaders(c.subtype, md, c.sendEncodingHeader())); err != nil {
-		c.markBad()
-		return err
+		return c.sendFailed(err)
 	}
 	c.mu.Lock()
 	c.headersSent = true
@@ -360,6 +409,13 @@ func (c *call) Send(payload []byte) error {
 		c.mu.Unlock()
 		return errCallClosed
 	}
+	if c.sendErr != nil {
+		// The send direction already failed; a partial LPM cannot be rolled
+		// back, so this stream stays finished for sending. Recv still works.
+		err := c.sendErr
+		c.mu.Unlock()
+		return err
+	}
 	if c.initiator && c.halfClosed {
 		c.mu.Unlock()
 		return errSendFinished
@@ -395,8 +451,7 @@ func (c *call) Send(payload []byte) error {
 		return fmt.Errorf("framing/grpc: Send wire payload %d > max frame %d", len(wire), c.cfg.MaxFrameSize)
 	}
 	if err := WriteLPM(c.body, compressed, wire); err != nil {
-		c.markBad()
-		return err
+		return c.sendFailed(err)
 	}
 	c.mu.Lock()
 	c.messagesSent = true
@@ -413,6 +468,13 @@ func (c *call) HalfClose() error {
 		c.mu.Unlock()
 		return errCallClosed
 	}
+	if c.sendErr != nil {
+		// HalfClose is idempotent, including its failure: the caller that
+		// already saw the send direction end sees the same result again.
+		err := c.sendErr
+		c.mu.Unlock()
+		return err
+	}
 	if c.halfClosed {
 		c.mu.Unlock()
 		return nil
@@ -425,8 +487,7 @@ func (c *call) HalfClose() error {
 		return status.Error(status.Unimplemented, "framing/grpc: carrier has no CloseSend")
 	}
 	if err := sc.CloseSend(); err != nil {
-		c.markBad()
-		return err
+		return c.sendFailed(err)
 	}
 	return nil
 }
@@ -470,8 +531,7 @@ func (c *call) Finish(err error) error {
 	}
 
 	if werr := rw.Finish(httpOK, initial, trailers); werr != nil {
-		c.markBad()
-		return werr
+		return c.sendFailed(werr)
 	}
 	c.mu.Lock()
 	c.finished = true
@@ -600,6 +660,9 @@ func (c *call) ensureResponseHeaders() error {
 			c.peerEncoding = encoding
 			c.mu.Unlock()
 		}
+		if err := checkInboundMeta(c.cfg, md); err != nil {
+			return err
+		}
 		if c.md != nil {
 			_ = metadata.SetIncomingHeaders(c.md, md)
 		}
@@ -632,9 +695,17 @@ func (c *call) finishClientRecv() ([]byte, func(), error) {
 		}
 	}
 
+	// Both decodes are tolerant: a malformed binary value is skipped and
+	// reported, never fatal, and the result is always a usable map (see
+	// DecodeMetadata). framing has no diagnostic channel, so the reported
+	// anomaly is deliberately dropped here rather than failing the call.
 	userMD, _ := DecodeMetadata(trailers)
+	if err := checkInboundMeta(c.cfg, userMD); err != nil {
+		c.markBad()
+		return nil, nil, err
+	}
 	// Also merge trailers-only user keys that landed in headers (excluding reserved).
-	if hdrMD, err := DecodeMetadata(headers); err == nil {
+	if hdrMD, _ := DecodeMetadata(headers); len(hdrMD) > 0 {
 		for k, vs := range hdrMD {
 			if _, exists := userMD[k]; !exists {
 				userMD[k] = vs
@@ -698,7 +769,6 @@ func (c *call) wakeRead() {
 		_ = d.SetDeadline(time.Now())
 	}
 }
-
 
 func (c *call) sendEncodingHeader() string {
 	if c.sendComp == nil || c.sendComp.Name() == compressor.Identity.Name() {

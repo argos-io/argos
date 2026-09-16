@@ -129,12 +129,12 @@ func echoHandler(_ context.Context, _ descriptor.Method, st stream.Stream) error
 }
 
 type integEnv struct {
-	srv     *server.Server
-	cli     *client.Client
-	dials   *countingDial
-	addr    string
-	method  descriptor.Method
-	srvTr   *listenTCP
+	srv    *server.Server
+	cli    *client.Client
+	dials  *countingDial
+	addr   string
+	method descriptor.Method
+	srvTr  *listenTCP
 }
 
 func startInteg(t *testing.T, opts ...argos.Option) *integEnv {
@@ -283,6 +283,9 @@ func TestIOErrorMakesSessionNotReusable(t *testing.T) {
 			return
 		}
 		defer sc.Close()
+		_, _, _ = sc.Recv()
+		// Drain END too; the peer's HalfClose write must not depend on a race
+		// with this goroutine finishing (net.Pipe is unbuffered).
 		_, _, _ = sc.Recv()
 	}()
 
@@ -816,14 +819,29 @@ func TestReadNeverConcurrent(t *testing.T) {
 	defer srvSess.Close()
 
 	method := descriptor.MustMethod("svc.Reentry", descriptor.Unary)
+
+	// Bounded so a stall surfaces as a diagnostic instead of the package's
+	// 10-minute timeout, and so the server half can never disappear silently
+	// and leave the client blocked in Recv forever.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	go func() {
+		<-ctx.Done()
+		_ = cliSess.Close()
+		_ = srvSess.Close()
+	}()
+
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 3; i++ {
 			md := metadata.New(metadata.RoleResponder, nil)
-			sc, err := srvSess.AcceptCall(context.Background(), framing.CallSpec{Metadata: md})
+			sc, err := srvSess.AcceptCall(ctx, framing.CallSpec{Metadata: md})
 			if err != nil {
+				if ctx.Err() == nil {
+					t.Errorf("server AcceptCall %d: %v", i, err)
+				}
 				return
 			}
 			_, _, _ = sc.Recv()
@@ -835,7 +853,7 @@ func TestReadNeverConcurrent(t *testing.T) {
 	}()
 
 	for i := 0; i < 3; i++ {
-		c, err := cliSess.OpenCall(context.Background(), method, framing.CallSpec{
+		c, err := cliSess.OpenCall(ctx, method, framing.CallSpec{
 			Metadata: metadata.New(metadata.RoleInitiator, nil),
 		})
 		if err != nil {

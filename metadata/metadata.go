@@ -16,6 +16,20 @@ import (
 // copies; callers must never assume the map or its slices alias internal state.
 type Metadata map[string][]string
 
+// WireSize returns the encoded size of md: every key and value plus the
+// two-byte length prefix each value carries. Framing uses it to bound metadata
+// received from a peer, since a limit that only constrains the local sender
+// bounds nothing an attacker controls.
+func WireSize(md Metadata) int64 {
+	var n int64
+	for k, vs := range md {
+		for _, v := range vs {
+			n += int64(len(k)) + int64(len(v)) + 2
+		}
+	}
+	return n
+}
+
 // Clone returns an independent deep copy of md, including value slices.
 // Clone(nil) returns nil.
 func Clone(md Metadata) Metadata {

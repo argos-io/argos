@@ -16,7 +16,6 @@ import (
 	"github.com/argos-io/argos/transport"
 )
 
-
 func newTestFraming(t *testing.T, opts ...grpcframing.Option) framing.Framing {
 	t.Helper()
 	f, err := grpcframing.New(opts...)

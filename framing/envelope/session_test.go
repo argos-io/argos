@@ -521,6 +521,9 @@ func TestHalfCloseDoesNotCloseConn(t *testing.T) {
 		}
 		defer sc.Close()
 		_, _, _ = sc.Recv()
+		// Drain the initiator's END as well: net.Pipe is unbuffered, so the
+		// peer's HalfClose write cannot complete unless someone is reading.
+		_, _, _ = sc.Recv()
 		_ = sc.Finish(nil)
 	}()
 

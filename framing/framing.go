@@ -23,10 +23,13 @@ import (
 // construction concern injected by binding/grpc Options (§3.1-10); Config
 // must not grow compression fields.
 type Config struct {
-	MaxMessageSize    int64
-	MaxFrameSize      int64
-	MaxMetadataSize   int64
-	ReadAheadMessages int // complete DATA messages allowed ahead per receive direction; must be >= 1 when validated
+	MaxMessageSize  int64
+	MaxFrameSize    int64
+	MaxMetadataSize int64
+	// MaxInboundMetadataSize bounds metadata received from a peer. Independent of
+	// MaxMetadataSize, which is the outbound limit.
+	MaxInboundMetadataSize int64
+	ReadAheadMessages      int // complete DATA messages allowed ahead per receive direction; must be >= 1 when validated
 	// OpenTimeout is the server AcceptCall budget from the first byte of a call
 	// through OPEN parse. Zero means the Framing implementation's default.
 	OpenTimeout time.Duration

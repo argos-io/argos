@@ -338,9 +338,9 @@ func TestTruncationAndBadLengths(t *testing.T) {
 		// typ + callID + flags + method"" + count=1 but no pairs
 		body := []byte{
 			1, 0, 0, 0, 0, 0, 0, 0, 1, // typ+callID
-			0,       // flags
-			0, 0,    // method len 0
-			0, 1,    // count 1
+			0,    // flags
+			0, 0, // method len 0
+			0, 1, // count 1
 		}
 		_, err := envelope.ParseFrameBody(body)
 		if err == nil {

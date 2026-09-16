@@ -40,20 +40,20 @@ type sendErr struct {
 	receiveOpen bool
 }
 
-func (e *sendErr) Error() string       { return e.msg }
-func (e *sendErr) ReceiveOpen() bool   { return e.receiveOpen }
+func (e *sendErr) Error() string     { return e.msg }
+func (e *sendErr) ReceiveOpen() bool { return e.receiveOpen }
 
 var _ transport.SendError = (*sendErr)(nil)
 
 type fakeCall struct {
-	recvPayload []byte
-	recvErr     error
-	sendErr     error
+	recvPayload  []byte
+	recvErr      error
+	sendErr      error
 	halfCloseErr error
-	sent        bytes.Buffer
-	released    bool
-	closed      bool
-	halfClosed  bool
+	sent         bytes.Buffer
+	released     bool
+	closed       bool
+	halfClosed   bool
 }
 
 func (c *fakeCall) Method() string              { return "svc.Method" }

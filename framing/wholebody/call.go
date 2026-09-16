@@ -36,14 +36,21 @@ type call struct {
 
 	mu sync.Mutex
 
-	reqBuf     []byte // client: buffered request; server unused for send
-	respBuf    []byte // server: buffered success body
-	reqSent    bool   // client HalfClose done / server request consumed
-	respSeen   bool   // client: response body delivered (or error returned)
-	halfClosed bool
-	finished   bool
-	closed     bool
+	reqBuf      []byte // client: buffered request; server unused for send
+	respBuf     []byte // server: buffered success body
+	reqSent     bool   // client HalfClose done / server request consumed
+	respSeen    bool   // client: response body delivered (or error returned)
+	halfClosed  bool
+	finished    bool
+	closed      bool
 	sawTerminal bool
+
+	// sendErr is the failure that ended the send direction (the request body on
+	// the initiator, the response on the responder). It is sticky: a partial
+	// body write cannot be rolled back. A transport.SendError with
+	// ReceiveOpen() true leaves the exchange readable, so the initiator still
+	// gets the response and the remote status.
+	sendErr error
 
 	sending atomic.Bool
 	recving atomic.Bool
@@ -53,9 +60,67 @@ func (c *call) Method() string { return c.method }
 
 func (c *call) Deadline() (time.Time, bool) { return time.Time{}, false }
 
+// checkInboundMeta rejects request/response metadata larger than the configured
+// inbound limit. MaxMetadataSize only constrains what we send.
+func checkInboundMeta(cfg framing.Config, md metadata.Metadata) error {
+	max := cfg.MaxInboundMetadataSize
+	if max <= 0 || len(md) == 0 {
+		return nil
+	}
+	if sz := metadata.WireSize(md); sz > max {
+		return status.Error(status.ResourceExhausted,
+			fmt.Sprintf("framing/wholebody: inbound metadata %d exceeds limit %d", sz, max))
+	}
+	return nil
+}
+
 func (c *call) markBad() {
 	if c.client != nil {
 		c.client.markBad()
+	}
+}
+
+// sendFailure reports whether err is a transport send failure on an exchange
+// whose receive direction is still open. Framing must keep such a carrier
+// readable: the peer may still deliver the response and the remote status.
+func sendFailure(err error) bool {
+	se, ok := transport.AsSendError(err)
+	return ok && se.ReceiveOpen()
+}
+
+// sendFailed records the error that ended the send direction and returns it to
+// the caller unchanged, so stream.Wrap can map a still-receivable exchange to
+// ErrSendClosed. The client session (a handle shared by concurrent calls on
+// one HTTP endpoint) is only dropped when the transport reports the exchange
+// unrecoverable.
+func (c *call) sendFailed(err error) error {
+	c.mu.Lock()
+	if c.sendErr == nil {
+		c.sendErr = err
+	}
+	c.mu.Unlock()
+	if !sendFailure(err) {
+		c.markBad()
+	}
+	return err
+}
+
+// wakeRead unblocks a Recv parked in a body Read by expiring the carrier's read
+// deadline. Call.Close must unblock in-flight Recv/Send (framing.Call), and
+// poisoning the deadline is the only way to interrupt a body read.
+func (c *call) wakeRead() {
+	type deadliner interface {
+		SetReadDeadline(time.Time) error
+	}
+	if d, ok := c.carrier.(deadliner); ok {
+		_ = d.SetReadDeadline(time.Now())
+		return
+	}
+	type both interface {
+		SetDeadline(time.Time) error
+	}
+	if d, ok := c.carrier.(both); ok {
+		_ = d.SetDeadline(time.Now())
 	}
 }
 
@@ -126,6 +191,13 @@ func (c *call) HalfClose() error {
 		c.mu.Unlock()
 		return errCallClosed
 	}
+	if c.sendErr != nil {
+		// HalfClose is idempotent, including its failure: the caller that
+		// already saw the send direction end sees the same result again.
+		err := c.sendErr
+		c.mu.Unlock()
+		return err
+	}
 	if c.halfClosed {
 		c.mu.Unlock()
 		return nil
@@ -139,8 +211,7 @@ func (c *call) HalfClose() error {
 
 	if len(buf) > 0 {
 		if _, err := c.body.Write(buf); err != nil {
-			c.markBad()
-			return err
+			return c.sendFailed(err)
 		}
 	}
 	sc, ok := c.carrier.(transport.SendCloser)
@@ -148,8 +219,7 @@ func (c *call) HalfClose() error {
 		return status.Error(status.Unimplemented, "framing/wholebody: carrier has no CloseSend")
 	}
 	if err := sc.CloseSend(); err != nil {
-		c.markBad()
-		return err
+		return c.sendFailed(err)
 	}
 	return nil
 }
@@ -204,8 +274,7 @@ func (c *call) Finish(err error) error {
 	hs = append(hs, EncodeMetadata(userMD)...)
 
 	if werr := urw.WriteResponse(httpSt, hs, body); werr != nil {
-		c.markBad()
-		return werr
+		return c.sendFailed(werr)
 	}
 	c.mu.Lock()
 	c.finished = true
@@ -272,8 +341,13 @@ func (c *call) recvClient() ([]byte, func(), error) {
 		c.markBad()
 		return nil, nil, err
 	}
+	inMD := DecodeMetadata(hs)
+	if err := checkInboundMeta(c.cfg, inMD); err != nil {
+		c.markBad()
+		return nil, nil, err
+	}
 	if c.md != nil {
-		_ = metadata.SetIncomingHeaders(c.md, DecodeMetadata(hs))
+		_ = metadata.SetIncomingHeaders(c.md, inMD)
 	}
 
 	limit := c.maxMsg
@@ -319,6 +393,10 @@ func (c *call) Close() error {
 	terminal := c.sawTerminal || c.finished
 	initiator := c.initiator
 	c.mu.Unlock()
+
+	// Wake a blocked body read before anything else: Close owes the caller an
+	// unblocked Recv/Send regardless of how the call ended.
+	c.wakeRead()
 
 	if initiator && !terminal {
 		c.markBad()
