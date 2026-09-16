@@ -35,16 +35,20 @@ type hasAddr interface {
 	Addr() net.Addr
 }
 
-func baseOpts(extra ...argos.Option) []argos.Option {
-	opts := []argos.Option{
-		argos.WithMaxConcurrentCalls(16),
-		argos.WithMaxBufferedBytes(16 * 16 * 1024 * 1024),
-		argos.WithMaxIdleSessions(8),
-		argos.WithMaxSessionsPerEndpoint(8),
-		argos.WithHandshakeTimeout(5 * time.Second),
-		argos.WithListenAddress(testListenAddr),
+// baseConfig is the tuning both halves of a RESP test share. It is a Config
+// rather than an option list because the knobs below are split across the two
+// sides now — MaxIdleSessions and MaxSessionsPerEndpoint are client-only,
+// ListenAddress is server-only — so no single option slice reaches both
+// constructors, while one Config named by argos.WithConfig does.
+func baseConfig() *argos.Config {
+	return &argos.Config{
+		MaxConcurrentCalls:     16,
+		MaxBufferedBytes:       16 * 16 * 1024 * 1024,
+		MaxIdleSessions:        8,
+		MaxSessionsPerEndpoint: 8,
+		HandshakeTimeout:       5 * time.Second,
+		ListenAddress:          testListenAddr,
 	}
-	return append(opts, extra...)
 }
 
 func waitAddr(t *testing.T, a hasAddr) string {
@@ -116,11 +120,8 @@ func startRESP(t *testing.T, register func(*server.Server, *resp.Store) error, f
 		}, nil
 	}
 
-	cfg, err := argos.New(baseOpts()...)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	srv := server.New(cfg)
+	cfg := baseConfig()
+	srv := server.New(argos.WithConfig(cfg))
 	if err := srv.AddBinding(serverFn); err != nil {
 		t.Fatal(err)
 	}
@@ -136,16 +137,12 @@ func startRESP(t *testing.T, register func(*server.Server, *resp.Store) error, f
 	addr := waitAddr(t, addrTr)
 	t.Cleanup(func() { _ = srv.Close() })
 
-	cliCfg, err := argos.New(append(baseOpts(),
-		argos.WithService(svcName,
-			argos.ServiceBinding(clientFn),
-			argos.ServiceTarget("ip://"+addr),
-		),
-	)...)
-	if err != nil {
-		t.Fatalf("client argos.New: %v", err)
-	}
-	cli, err := client.New(cliCfg, svcName)
+	cli, err := client.New(
+		argos.WithConfig(cfg),
+		argos.WithServiceName(svcName),
+		argos.WithBinding(clientFn),
+		argos.WithTarget("ip://"+addr),
+	)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}

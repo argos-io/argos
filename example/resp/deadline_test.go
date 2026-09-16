@@ -63,16 +63,12 @@ func TestCallerDeadlineEndsBlockedRecv(t *testing.T) {
 			Codec:     resp.NewBytesCodec(),
 		}, nil
 	}
-	cfg, err := argos.New(append(baseOpts(),
-		argos.WithService(svcName,
-			argos.ServiceBinding(clientFn),
-			argos.ServiceTarget("ip://"+target),
-		),
-	)...)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, svcName)
+	cli, err := client.New(
+		argos.WithConfig(baseConfig()),
+		argos.WithServiceName(svcName),
+		argos.WithBinding(clientFn),
+		argos.WithTarget("ip://"+target),
+	)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}

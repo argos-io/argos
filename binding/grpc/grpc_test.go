@@ -75,28 +75,26 @@ func waitAddr(t *testing.T, tr *argoshttp2.Transport) string {
 	return ""
 }
 
-func startEcho(t *testing.T, srvOpts, cliOpts []grpcbinding.Option, extra ...argos.Option) *harness {
+func startEcho(t *testing.T, srvOpts, cliOpts []grpcbinding.Option) *harness {
 	t.Helper()
 
-	cfgOpts := append([]argos.Option{
-		argos.WithMaxConcurrentCalls(16),
-		argos.WithMaxBufferedBytes(16 * 16 * 1024 * 1024),
-		argos.WithMaxIdleSessions(8),
-		argos.WithMaxSessionsPerEndpoint(8),
-		argos.WithMaxInboundConnIdle(30 * time.Second),
-		argos.WithMaxInboundConnAge(30 * time.Minute),
-		argos.WithListenAddress("127.0.0.1:0"),
-	}, extra...)
-
-	cfg, err := argos.New(cfgOpts...)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
+	// Shared by both halves: the session limits are client-only and the
+	// inbound-connection limits and ListenAddress server-only, so the tuning
+	// travels as a Config instead of as one option list for both constructors.
+	cfg := &argos.Config{
+		MaxConcurrentCalls:     16,
+		MaxBufferedBytes:       16 * 16 * 1024 * 1024,
+		MaxIdleSessions:        8,
+		MaxSessionsPerEndpoint: 8,
+		MaxInboundConnIdle:     30 * time.Second,
+		MaxInboundConnAge:      30 * time.Minute,
+		ListenAddress:          "127.0.0.1:0",
 	}
 
 	var srvTr *argoshttp2.Transport
 	bound := make(chan struct{})
 	srvFn := grpcbinding.New(srvOpts...)
-	srv := server.New(cfg)
+	srv := server.New(argos.WithConfig(cfg))
 	if err := srv.AddBinding(func() (argos.Binding, error) {
 		b, err := srvFn()
 		if err != nil {
@@ -128,16 +126,12 @@ func startEcho(t *testing.T, srvOpts, cliOpts []grpcbinding.Option, extra ...arg
 	addr := waitAddr(t, srvTr)
 	t.Cleanup(func() { _ = srv.Close() })
 
-	cliCfg, err := argos.New(append(cfgOpts,
-		argos.WithService(echoService,
-			argos.ServiceBinding(grpcbinding.New(cliOpts...)),
-			argos.ServiceTarget("ip://"+addr),
-		),
-	)...)
-	if err != nil {
-		t.Fatalf("client argos.New: %v", err)
-	}
-	cli, err := client.New(cliCfg, echoService)
+	cli, err := client.New(
+		argos.WithConfig(cfg),
+		argos.WithServiceName(echoService),
+		argos.WithBinding(grpcbinding.New(cliOpts...)),
+		argos.WithTarget("ip://"+addr),
+	)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}

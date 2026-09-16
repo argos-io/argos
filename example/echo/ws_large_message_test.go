@@ -17,8 +17,7 @@ func TestWSLargeMessageExceedsDefaultReadLimit(t *testing.T) {
 	// Comfortably above coder/websocket's 32768-byte default and well below the
 	// 4 MiB frame default.
 	const size = 128 << 10
-	cli := startEcho(t, envelopebinding.NewWS())
-	ec := NewEchoServiceClient(cli)
+	ec := startEcho(t, envelopebinding.NewWS())
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

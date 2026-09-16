@@ -253,26 +253,25 @@ type argosServer struct {
 	tr   *argoshttp2.Transport
 }
 
-func startArgosEchoServer(t *testing.T, bindOpts []grpcbinding.Option, extra ...argos.Option) *argosServer {
+func startArgosEchoServer(t *testing.T, bindOpts []grpcbinding.Option, extra ...argos.ServerOption) *argosServer {
 	t.Helper()
-	cfgOpts := append([]argos.Option{
-		argos.WithMaxConcurrentCalls(64),
-		argos.WithMaxBufferedBytes(64 * 16 * 1024 * 1024),
-		argos.WithMaxIdleSessions(8),
-		argos.WithMaxSessionsPerEndpoint(8),
-		argos.WithMaxInboundConnIdle(30 * time.Second),
-		argos.WithMaxInboundConnAge(30 * time.Minute),
-		argos.WithListenAddress("127.0.0.1:0"),
-	}, extra...)
-	cfg, err := argos.New(cfgOpts...)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
+	// The session limits are client-only, so what used to be one option list
+	// for this server is now a Config plus the server-side extras the caller
+	// adds (argos.WithFilter).
+	cfg := &argos.Config{
+		MaxConcurrentCalls:     64,
+		MaxBufferedBytes:       64 * 16 * 1024 * 1024,
+		MaxIdleSessions:        8,
+		MaxSessionsPerEndpoint: 8,
+		MaxInboundConnIdle:     30 * time.Second,
+		MaxInboundConnAge:      30 * time.Minute,
+		ListenAddress:          "127.0.0.1:0",
 	}
 
 	var srvTr *argoshttp2.Transport
 	bound := make(chan struct{})
 	srvFn := grpcbinding.New(bindOpts...)
-	srv := server.New(cfg)
+	srv := server.New(append([]argos.ServerOption{argos.WithConfig(cfg)}, extra...)...)
 	if err := srv.AddBinding(func() (argos.Binding, error) {
 		b, err := srvFn()
 		if err != nil {
@@ -306,23 +305,20 @@ func startArgosEchoServer(t *testing.T, bindOpts []grpcbinding.Option, extra ...
 	return &argosServer{srv: srv, addr: addr, tr: srvTr}
 }
 
-func newArgosClient(t *testing.T, addr string, bindOpts []grpcbinding.Option, extra ...argos.Option) *client.Client {
+func newArgosClient(t *testing.T, addr string, bindOpts []grpcbinding.Option, extra ...argos.ClientOption) *client.Client {
 	t.Helper()
-	cfgOpts := append([]argos.Option{
-		argos.WithMaxConcurrentCalls(64),
-		argos.WithMaxBufferedBytes(64 * 16 * 1024 * 1024),
-		argos.WithMaxIdleSessions(8),
-		argos.WithMaxSessionsPerEndpoint(8),
-		argos.WithService(interopService,
-			argos.ServiceBinding(grpcbinding.New(bindOpts...)),
-			argos.ServiceTarget("ip://"+addr),
-		),
-	}, extra...)
-	cfg, err := argos.New(cfgOpts...)
-	if err != nil {
-		t.Fatalf("client argos.New: %v", err)
+	cfg := &argos.Config{
+		MaxConcurrentCalls:     64,
+		MaxBufferedBytes:       64 * 16 * 1024 * 1024,
+		MaxIdleSessions:        8,
+		MaxSessionsPerEndpoint: 8,
 	}
-	cli, err := client.New(cfg, interopService)
+	cli, err := client.New(append([]argos.ClientOption{
+		argos.WithConfig(cfg),
+		argos.WithServiceName(interopService),
+		argos.WithBinding(grpcbinding.New(bindOpts...)),
+		argos.WithTarget("ip://" + addr),
+	}, extra...)...)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}

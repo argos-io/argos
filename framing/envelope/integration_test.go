@@ -137,24 +137,23 @@ type integEnv struct {
 	srvTr  *listenTCP
 }
 
-func startInteg(t *testing.T, opts ...argos.Option) *integEnv {
+func startInteg(t *testing.T) *integEnv {
 	t.Helper()
 	srvTr := newListenTCP("127.0.0.1:0")
 	frOpts := []envelope.Option{}
-	cfgOpts := append([]argos.Option{
-		argos.WithMaxConcurrentCalls(16),
-		argos.WithMaxBufferedBytes(16 * 16 * 1024 * 1024),
-		argos.WithMaxIdleSessions(8),
-		argos.WithMaxSessionsPerEndpoint(8),
-		argos.WithMaxInboundConnIdle(30 * time.Second),
-		argos.WithMaxInboundConnAge(30 * time.Minute),
-	}, opts...)
-
-	cfg, err := argos.New(cfgOpts...)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
+	// One Config for both halves: the session limits below are client-only and
+	// the inbound-connection limits server-only, so a single option list can no
+	// longer be spliced into both constructors.
+	cfg := &argos.Config{
+		MaxConcurrentCalls:     16,
+		MaxBufferedBytes:       16 * 16 * 1024 * 1024,
+		MaxIdleSessions:        8,
+		MaxSessionsPerEndpoint: 8,
+		MaxInboundConnIdle:     30 * time.Second,
+		MaxInboundConnAge:      30 * time.Minute,
 	}
-	srv := server.New(cfg)
+
+	srv := server.New(argos.WithConfig(cfg))
 	if err := srv.AddBinding(func() (argos.Binding, error) {
 		return argos.Binding{
 			Transport: srvTr,
@@ -176,22 +175,18 @@ func startInteg(t *testing.T, opts ...argos.Option) *integEnv {
 
 	dials := &countingDial{inner: tcp.New()}
 	target := "ip://" + addr
-	cliCfg, err := argos.New(append(cfgOpts,
-		argos.WithService(integService,
-			argos.ServiceBinding(func() (argos.Binding, error) {
-				return argos.Binding{
-					Transport: dials,
-					Framing:   envelope.New(frOpts...),
-					Codec:     rawCodec{},
-				}, nil
-			}),
-			argos.ServiceTarget(target),
-		),
-	)...)
-	if err != nil {
-		t.Fatalf("client argos.New: %v", err)
-	}
-	cli, err := client.New(cliCfg, integService)
+	cli, err := client.New(
+		argos.WithConfig(cfg),
+		argos.WithServiceName(integService),
+		argos.WithBinding(func() (argos.Binding, error) {
+			return argos.Binding{
+				Transport: dials,
+				Framing:   envelope.New(frOpts...),
+				Codec:     rawCodec{},
+			}, nil
+		}),
+		argos.WithTarget(target),
+	)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
@@ -355,18 +350,15 @@ func TestClientEarlyCloseNotReturnedToPool(t *testing.T) {
 	// Close without the demux having observed STATUS yet.
 	hold := make(chan struct{})
 	srvTr := newListenTCP("127.0.0.1:0")
-	cfg, err := argos.New(
-		argos.WithMaxConcurrentCalls(8),
-		argos.WithMaxBufferedBytes(8*16*1024*1024),
-		argos.WithMaxIdleSessions(4),
-		argos.WithMaxSessionsPerEndpoint(4),
-		argos.WithMaxInboundConnIdle(30*time.Second),
-		argos.WithMaxInboundConnAge(30*time.Minute),
-	)
-	if err != nil {
-		t.Fatal(err)
+	cfg := &argos.Config{
+		MaxConcurrentCalls:     8,
+		MaxBufferedBytes:       8 * 16 * 1024 * 1024,
+		MaxIdleSessions:        4,
+		MaxSessionsPerEndpoint: 4,
+		MaxInboundConnIdle:     30 * time.Second,
+		MaxInboundConnAge:      30 * time.Minute,
 	}
-	srv := server.New(cfg)
+	srv := server.New(argos.WithConfig(cfg))
 	_ = srv.AddBinding(func() (argos.Binding, error) {
 		return argos.Binding{Transport: srvTr, Framing: envelope.New(), Codec: rawCodec{}}, nil
 	})
@@ -391,22 +383,14 @@ func TestClientEarlyCloseNotReturnedToPool(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Close() })
 
 	dials := &countingDial{inner: tcp.New()}
-	cliCfg, err := argos.New(
-		argos.WithMaxConcurrentCalls(8),
-		argos.WithMaxBufferedBytes(8*16*1024*1024),
-		argos.WithMaxIdleSessions(4),
-		argos.WithMaxSessionsPerEndpoint(4),
-		argos.WithService(integService,
-			argos.ServiceBinding(func() (argos.Binding, error) {
-				return argos.Binding{Transport: dials, Framing: envelope.New(), Codec: rawCodec{}}, nil
-			}),
-			argos.ServiceTarget("ip://"+addr),
-		),
+	cli, err := client.New(
+		argos.WithConfig(cfg),
+		argos.WithServiceName(integService),
+		argos.WithBinding(func() (argos.Binding, error) {
+			return argos.Binding{Transport: dials, Framing: envelope.New(), Codec: rawCodec{}}, nil
+		}),
+		argos.WithTarget("ip://"+addr),
 	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cli, err := client.New(cliCfg, integService)
 	if err != nil {
 		t.Fatal(err)
 	}

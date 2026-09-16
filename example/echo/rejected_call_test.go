@@ -46,7 +46,7 @@ func TestRejectedCallKeepsConnectionUsable(t *testing.T) {
 	// startEcho keeps the listen address to itself, and a raw peer has to dial
 	// the same server the real client talks to, so pull the address out of the
 	// binding the composition layer builds.
-	cli := startEcho(t, rec.wrap(envelopebinding.NewTCP()))
+	ec := startEcho(t, rec.wrap(envelopebinding.NewTCP()))
 
 	raw, err := net.Dial("tcp", rec.addr(t))
 	if err != nil {
@@ -104,7 +104,6 @@ func TestRejectedCallKeepsConnectionUsable(t *testing.T) {
 	//    pool, routing and codec, still gets a normal answer. Its connection is
 	//    a fresh one, so step 3 is what pins the rejected connection; this step
 	//    pins everything the rejection path shares with it.
-	ec := NewEchoServiceClient(cli)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	clientResp, err := ec.Echo(ctx, &EchoRequest{Msg: "after-rejection"})

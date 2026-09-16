@@ -28,30 +28,29 @@ type hasAddr interface {
 	Addr() net.Addr
 }
 
-func testOpts(extra ...argos.Option) []argos.Option {
-	opts := []argos.Option{
-		argos.WithMaxConcurrentCalls(16),
-		argos.WithMaxBufferedBytes(16 * 16 * 1024 * 1024),
-		argos.WithMaxIdleSessions(4),
-		argos.WithMaxSessionsPerEndpoint(4),
-		argos.WithHandshakeTimeout(5 * time.Second),
-		argos.WithMaxInboundConnIdle(30 * time.Second),
-		argos.WithMaxInboundConnAge(30 * time.Minute),
-		argos.WithListenAddress("127.0.0.1:0"),
+// testConfig is the tuning shared by both halves of a synth test. The knobs
+// below no longer belong to one option list — session limits are client-only,
+// inbound-connection limits and ListenAddress are server-only — so the shared
+// tuning travels as a Config that each constructor names with argos.WithConfig.
+func testConfig() *argos.Config {
+	return &argos.Config{
+		MaxConcurrentCalls:     16,
+		MaxBufferedBytes:       16 * 16 * 1024 * 1024,
+		MaxIdleSessions:        4,
+		MaxSessionsPerEndpoint: 4,
+		HandshakeTimeout:       5 * time.Second,
+		MaxInboundConnIdle:     30 * time.Second,
+		MaxInboundConnAge:      30 * time.Minute,
+		ListenAddress:          "127.0.0.1:0",
 	}
-	return append(opts, extra...)
 }
 
-func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ...argos.Option) (addr string, fn argos.BindingFunc) {
+func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ...argos.ServerOption) (addr string, fn argos.BindingFunc) {
 	t.Helper()
 	fn = NewTCP()
-	cfg, err := argos.New(testOpts(extra...)...)
-	if err != nil {
-		t.Fatalf("argos.New: %v", err)
-	}
 	var addrTr hasAddr
 	bound := make(chan struct{})
-	srv := server.New(cfg)
+	srv := server.New(append([]argos.ServerOption{argos.WithConfig(testConfig())}, extra...)...)
 	if err := srv.AddBinding(func() (argos.Binding, error) {
 		b, err := fn()
 		if err != nil {
@@ -100,18 +99,14 @@ func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ..
 	return "", nil
 }
 
-func newSynthClient(t *testing.T, addr string, fn argos.BindingFunc, extra ...argos.Option) *client.Client {
+func newSynthClient(t *testing.T, addr string, fn argos.BindingFunc, extra ...argos.ClientOption) *client.Client {
 	t.Helper()
-	cfg, err := argos.New(append(testOpts(extra...),
-		argos.WithService(ServiceName,
-			argos.ServiceBinding(fn),
-			argos.ServiceTarget("ip://"+addr),
-		),
-	)...)
-	if err != nil {
-		t.Fatalf("client argos.New: %v", err)
-	}
-	cli, err := client.New(cfg, ServiceName)
+	cli, err := client.New(append([]argos.ClientOption{
+		argos.WithConfig(testConfig()),
+		argos.WithServiceName(ServiceName),
+		argos.WithBinding(fn),
+		argos.WithTarget("ip://" + addr),
+	}, extra...)...)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
@@ -521,13 +516,9 @@ func TestExclusiveKeepsConnectionOutOfPool(t *testing.T) {
 		return b, nil
 	}
 
-	cfg, err := argos.New(testOpts()...)
-	if err != nil {
-		t.Fatal(err)
-	}
 	var addrTr hasAddr
 	bound := make(chan struct{})
-	srv := server.New(cfg)
+	srv := server.New(argos.WithConfig(testConfig()))
 	if err := srv.AddBinding(func() (argos.Binding, error) {
 		b, err := NewTCP()()
 		if err != nil {

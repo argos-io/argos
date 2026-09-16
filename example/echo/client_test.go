@@ -17,9 +17,9 @@ import (
 
 func TestClientEchoTransports(t *testing.T) {
 	cases := []struct {
-		name  string
-		fn    argos.BindingFunc
-		extra []argos.Option
+		name string
+		fn   argos.BindingFunc
+		tune func(*argos.Config)
 	}{
 		{name: "grpc_http2", fn: grpcbinding.New()},
 		{name: "envelope_tcp", fn: envelopebinding.NewTCP()},
@@ -27,9 +27,11 @@ func TestClientEchoTransports(t *testing.T) {
 		{
 			name: "envelope_udp",
 			fn:   envelopebinding.NewUDP(),
-			extra: []argos.Option{
-				argos.WithMaxFrameSize(udp.MaxDatagramSize),
-				argos.WithMaxMessageSize(32 << 10),
+			// A call has to fit in one datagram, and both ends must agree on
+			// that, which is what sharing the Config buys here.
+			tune: func(cfg *argos.Config) {
+				cfg.MaxFrameSize = udp.MaxDatagramSize
+				cfg.MaxMessageSize = 32 << 10
 			},
 		},
 		{name: "wholebody_http1", fn: wholebodybinding.New()},
@@ -37,8 +39,7 @@ func TestClientEchoTransports(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cli := startEcho(t, tc.fn, tc.extra...)
-			ec := NewEchoServiceClient(cli)
+			ec := startEcho(t, tc.fn, tc.tune)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			resp, err := ec.Echo(ctx, &EchoRequest{Msg: tc.name})
@@ -64,8 +65,7 @@ func TestWatchStreaming(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cli := startEcho(t, tc.fn)
-			ec := NewEchoServiceClient(cli)
+			ec := startEcho(t, tc.fn)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			stream, err := ec.Watch(ctx, &WatchRequest{Msg: tc.name})
@@ -102,11 +102,13 @@ func TestClientMetadataPassesAuthFilter(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cli := startEcho(t, tc.fn,
-				argos.WithFilter(ServerAuth),
-				argos.WithOpenFilter(ClientAuth),
-			)
-			ec := NewEchoServiceClient(cli)
+			ec := startEcho(t, tc.fn, func(cfg *argos.Config) {
+				// The two chains are plain fields on the one Config both ends
+				// start from, so the server-side and client-side halves of
+				// this test's auth cannot drift apart.
+				cfg.Filters = append(cfg.Filters, ServerAuth)
+				cfg.OpenFilters = append(cfg.OpenFilters, ClientAuth)
+			})
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			resp, err := ec.Echo(ctx, &EchoRequest{Msg: tc.name})
@@ -121,8 +123,9 @@ func TestClientMetadataPassesAuthFilter(t *testing.T) {
 }
 
 func TestServerAuthRejectsMissingToken(t *testing.T) {
-	cli := startEcho(t, grpcbinding.New(), argos.WithFilter(ServerAuth))
-	ec := NewEchoServiceClient(cli)
+	ec := startEcho(t, grpcbinding.New(), func(cfg *argos.Config) {
+		cfg.Filters = append(cfg.Filters, ServerAuth)
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err := ec.Echo(ctx, &EchoRequest{Msg: "noauth"})

@@ -379,12 +379,9 @@ func TestCheckDatagramLimitsStartup(t *testing.T) {
 
 func TestBindingNewRejectsOversizedUDP(t *testing.T) {
 	t.Parallel()
-	cfg, err := argos.New(
-		argos.WithMaxMessageSize(4<<20),
-		argos.WithMaxFrameSize(4<<20),
-	)
-	if err != nil {
-		t.Fatal(err)
+	cfg := &argos.Config{
+		MaxMessageSize: 4 << 20,
+		MaxFrameSize:   4 << 20,
 	}
 	fn := argos.BindingFunc(func() (argos.Binding, error) {
 		if err := envelope.CheckDatagramLimits(cfg.MaxFrameSize, cfg.MaxMessageSize, udp.MaxDatagramSize); err != nil {
@@ -396,7 +393,7 @@ func TestBindingNewRejectsOversizedUDP(t *testing.T) {
 			Codec:     rawCodec{},
 		}, nil
 	})
-	_, err = fn()
+	_, err := fn()
 	if err == nil {
 		t.Fatal("BindingFunc: want size-gate error")
 	}
