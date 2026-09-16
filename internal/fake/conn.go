@@ -141,6 +141,11 @@ func (c *ByteConn) SetDeadline(t time.Time) error { return c.nc.SetDeadline(t) }
 type MessageConn struct {
 	in  chan []byte
 	out chan []byte
+	// done is closed by Close so this conn's own pending RecvMessage returns,
+	// as a real carrier's Close does. Closing only out would unblock the peer
+	// and leave our reader parked, which deadlocks Session.Close: it closes
+	// the Conn and then joins recvLoop.
+	done chan struct{}
 
 	mu      sync.Mutex
 	closed  bool
@@ -152,8 +157,8 @@ type MessageConn struct {
 func MessagePipe() (client, server *MessageConn) {
 	ab := make(chan []byte, 16)
 	ba := make(chan []byte, 16)
-	client = &MessageConn{in: ba, out: ab}
-	server = &MessageConn{in: ab, out: ba}
+	client = &MessageConn{in: ba, out: ab, done: make(chan struct{})}
+	server = &MessageConn{in: ab, out: ba, done: make(chan struct{})}
 	return client, server
 }
 
@@ -170,6 +175,9 @@ func (c *MessageConn) Close() error {
 	c.closed = true
 	c.closes++
 	close(c.out)
+	if c.done != nil {
+		close(c.done)
+	}
 	return nil
 }
 
@@ -197,11 +205,25 @@ func (c *MessageConn) Abort() error {
 
 // RecvMessage implements transport.MessageCarrier.
 func (c *MessageConn) RecvMessage() ([]byte, error) {
-	msg, ok := <-c.in
-	if !ok {
+	// Already-delivered messages win over our own Close, so a test that closes
+	// after sending still sees what it sent.
+	select {
+	case msg, ok := <-c.in:
+		if !ok {
+			return nil, io.EOF
+		}
+		return msg, nil
+	default:
+	}
+	select {
+	case msg, ok := <-c.in:
+		if !ok {
+			return nil, io.EOF
+		}
+		return msg, nil
+	case <-c.done:
 		return nil, io.EOF
 	}
-	return msg, nil
 }
 
 // SendMessage implements transport.MessageCarrier.
