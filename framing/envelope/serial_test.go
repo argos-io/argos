@@ -107,3 +107,142 @@ func TestServerSerialAcceptAfterClose(t *testing.T) {
 		t.Fatalf("order = %v, want %v", order, want)
 	}
 }
+
+// The package contract (frame.go): "A third-party client that writes two OPENs
+// concurrently will see the second call wait, not fail."
+func TestPipelinedOpensSecondCallWaitsNotFails(t *testing.T) {
+	cliConn, srvConn := tcpBytePair(t)
+	fr := envelope.New()
+	srvSess, err := fr.NewServerSession(context.Background(), srvConn, framing.SessionSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srvSess.Close() }()
+
+	method := descriptor.MustMethod("svc.Pipe", descriptor.Unary)
+
+	// Both calls, pipelined in a single write: the peer does not wait for the
+	// first STATUS before opening the second call.
+	var raw []byte
+	for _, id := range []uint64{1, 2} {
+		for _, f := range []envelope.Frame{
+			{Type: envelope.TypeOpen, CallID: id, Method: method.FullName()},
+			{Type: envelope.TypeData, CallID: id, Data: []byte("q")},
+			{Type: envelope.TypeEnd, CallID: id},
+		} {
+			b, err := envelope.MarshalFrame(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw = append(raw, b...)
+		}
+	}
+	if _, err := cliConn.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, wantID := range []uint64{1, 2} {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		sc, err := srvSess.AcceptCall(ctx, framing.CallSpec{
+			Metadata: metadata.New(metadata.RoleResponder, nil),
+		})
+		if err != nil {
+			cancel()
+			t.Fatalf("call %d: AcceptCall: %v", wantID, err)
+		}
+		if sc.Method() != method.FullName() {
+			cancel()
+			t.Fatalf("call %d: method %q", wantID, sc.Method())
+		}
+		payload, _, err := sc.Recv()
+		if err != nil {
+			cancel()
+			t.Fatalf("call %d: Recv: %v", wantID, err)
+		}
+		if string(payload) != "q" {
+			cancel()
+			t.Fatalf("call %d: payload %q, want q", wantID, payload)
+		}
+		if _, _, err := sc.Recv(); err == nil {
+			cancel()
+			t.Fatalf("call %d: second Recv should report end of request", wantID)
+		}
+		if err := sc.Send([]byte("r")); err != nil {
+			cancel()
+			t.Fatalf("call %d: Send: %v", wantID, err)
+		}
+		if err := sc.Finish(nil); err != nil {
+			cancel()
+			t.Fatalf("call %d: Finish: %v", wantID, err)
+		}
+		_ = sc.Close()
+		cancel()
+	}
+}
+
+// Same Sequential contract as the byte-stream case, on a MessageCarrier.
+func TestPipelinedOpensOnMessageCarrier(t *testing.T) {
+	cliConn, srvConn := fake.MessagePipe()
+	defer cliConn.Close()
+	defer srvConn.Close()
+
+	fr := envelope.New()
+	srvSess, err := fr.NewServerSession(context.Background(), srvConn, framing.SessionSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = srvSess.Close() }()
+
+	method := descriptor.MustMethod("svc.Pipe", descriptor.Unary)
+
+	// Pipeline both calls: the peer does not wait for the first STATUS.
+	for _, id := range []uint64{1, 2} {
+		for _, f := range []envelope.Frame{
+			{Type: envelope.TypeOpen, CallID: id, Method: method.FullName()},
+			{Type: envelope.TypeData, CallID: id, Data: []byte("q")},
+			{Type: envelope.TypeEnd, CallID: id},
+		} {
+			body, err := envelope.MarshalFrameBody(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cliConn.SendMessage(body); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	for _, wantID := range []uint64{1, 2} {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		sc, err := srvSess.AcceptCall(ctx, framing.CallSpec{
+			Metadata: metadata.New(metadata.RoleResponder, nil),
+		})
+		if err != nil {
+			cancel()
+			t.Fatalf("call %d: AcceptCall: %v", wantID, err)
+		}
+		payload, _, err := sc.Recv()
+		if err != nil {
+			cancel()
+			t.Fatalf("call %d: Recv: %v", wantID, err)
+		}
+		if string(payload) != "q" {
+			cancel()
+			t.Fatalf("call %d: payload %q", wantID, payload)
+		}
+		if _, _, err := sc.Recv(); err == nil {
+			cancel()
+			t.Fatalf("call %d: second Recv should end the request", wantID)
+		}
+		if err := sc.Send([]byte("r")); err != nil {
+			cancel()
+			t.Fatalf("call %d: Send: %v", wantID, err)
+		}
+		if err := sc.Finish(nil); err != nil {
+			cancel()
+			t.Fatalf("call %d: Finish: %v", wantID, err)
+		}
+		_ = sc.Close()
+		cancel()
+	}
+}

@@ -2,6 +2,7 @@ package envelope
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -71,12 +72,25 @@ type session struct {
 
 	// Cross-call leftover for ByteStreamCarrier length-prefix framing.
 	readBuf []byte
+	// frameBuf accumulates the frame currently being read. It belongs to
+	// recvLoop alone and survives a failed read, so a frame read is resumable.
+	frameBuf []byte
+	// discardRest is what is left of an oversize body that must leave the
+	// carrier before the next frame boundary means anything.
+	discardRest int64
 	// datagramRest holds frames after OPEN from the request datagram until
 	// AcceptCall attaches the server call and delivers them.
 	datagramRest []Frame
+	// pendingFrames holds frames the demux handed back on carriers that cannot
+	// unread bytes (MessageCarrier); byte streams push back into readBuf.
+	pendingFrames []Frame
 
-	// wake notifies recvLoop that mode/active/accept changed or session closed.
-	wake chan struct{}
+	// stateVer counts published changes to the demux state (mode, active,
+	// acceptCh, closed). wakeCh is closed and replaced by every publication,
+	// so a waiter that captures it in the same critical section as the state
+	// it acted on cannot miss a later change.
+	stateVer uint64
+	wakeCh   chan struct{}
 
 	recvDone chan struct{}
 }
@@ -95,17 +109,54 @@ func newSession(f *Framing, conn transport.Conn, car transport.Carrier, kind car
 		reusable:      true,
 		oneCall:       oneCall,
 		nextCallID:    1,
-		wake:          make(chan struct{}, 1),
+		wakeCh:        make(chan struct{}),
 		recvDone:      make(chan struct{}),
 	}
 	go s.recvLoop()
 	return s
 }
 
-func (s *session) signal() {
-	select {
-	case s.wake <- struct{}{}:
-	default:
+// bumpLocked publishes a demux-state change. Caller holds s.mu.
+func (s *session) bumpLocked() {
+	s.stateVer++
+	close(s.wakeCh)
+	s.wakeCh = make(chan struct{})
+}
+
+// waitUntil blocks until pred reports true or the session closes. pred is
+// evaluated under s.mu in the same critical section that captures the wake
+// channel, so a change published after the evaluation always reaches us.
+func (s *session) waitUntil(pred func() bool) {
+	for {
+		s.mu.Lock()
+		if s.closed || pred() {
+			s.mu.Unlock()
+			return
+		}
+		ch := s.wakeCh
+		s.mu.Unlock()
+		<-ch
+	}
+}
+
+// waitUntilOrTick is waitUntil with a polling tick, for the client idle watch.
+func (s *session) waitUntilOrTick(pred func() bool, d time.Duration) {
+	for {
+		s.mu.Lock()
+		if s.closed || pred() {
+			s.mu.Unlock()
+			return
+		}
+		ch := s.wakeCh
+		s.mu.Unlock()
+		t := time.NewTimer(d)
+		select {
+		case <-ch:
+			t.Stop()
+			return
+		case <-t.C:
+			return
+		}
 	}
 }
 
@@ -137,8 +188,8 @@ func (s *session) detachCall(c *call, poison bool) {
 			s.reusable = false
 		}
 	}
+	s.bumpLocked()
 	s.mu.Unlock()
-	s.signal()
 }
 
 func (s *session) Reusable() bool {
@@ -164,9 +215,9 @@ func (s *session) closeSession() error {
 	s.mode = modeIdle
 	s.acceptCh = nil
 	s.acceptCtx = nil
+	s.bumpLocked()
 	s.mu.Unlock()
 
-	s.signal()
 	s.wakeRead()
 	if acceptCh != nil {
 		select {
@@ -196,6 +247,7 @@ func (s *session) recvLoop() {
 		acceptCtx := s.acceptCtx
 		active := s.active
 		lastID := s.lastCallID
+		ver := s.stateVer
 		s.mu.Unlock()
 
 		switch mode {
@@ -208,11 +260,11 @@ func (s *session) recvLoop() {
 				armed := s.lastCallID != 0
 				s.mu.Unlock()
 				if armed {
-					s.watchIdle()
+					s.watchIdle(ver)
 					continue
 				}
 			}
-			<-s.wake
+			s.waitUntil(func() bool { return s.stateVer != ver })
 			continue
 
 		case modeAccepting:
@@ -242,7 +294,7 @@ func (s *session) recvLoop() {
 					default:
 					}
 				}
-				s.waitModeChange(modeAccepting)
+				s.waitAcceptRetired(ch)
 				continue
 			}
 			s.mu.Lock()
@@ -256,12 +308,14 @@ func (s *session) recvLoop() {
 			} else {
 				s.pushFront(f)
 			}
-			// Do not read again until AcceptCall attaches (modeInCall) or aborts.
-			s.waitModeChange(modeAccepting)
+			// Do not read again until this accept attempt is retired: mode
+			// returns to modeAccepting for the next one, so its value cannot
+			// distinguish "still mine" from "a new attempt".
+			s.waitAcceptRetired(ch)
 
 		case modeInCall:
 			if active == nil {
-				<-s.wake
+				s.waitUntil(func() bool { return s.stateVer != ver })
 				continue
 			}
 			if s.kind == kindDatagram {
@@ -269,7 +323,7 @@ func (s *session) recvLoop() {
 					s.recvClientDatagram(active)
 				} else {
 					// Server datagram: request frames already delivered at accept.
-					s.waitWakeOrClosed()
+					s.waitVer(ver)
 				}
 				continue
 			}
@@ -289,12 +343,12 @@ func (s *session) recvLoop() {
 				s.mu.Unlock()
 				s.clearReadDeadline()
 				if cur == nil || mode != modeInCall {
-					s.waitWakeOrClosed()
+					s.waitVer(ver)
 					continue
 				}
 				cur.abortRecv(err)
 				s.markBad()
-				s.waitWakeOrClosed()
+				s.waitVer(ver)
 				continue
 			}
 			s.mu.Lock()
@@ -302,18 +356,27 @@ func (s *session) recvLoop() {
 			s.mu.Unlock()
 			if cur == nil {
 				s.pushFront(f)
-				s.waitWakeOrClosed()
+				s.waitVer(ver)
 				continue
 			}
 			if f.CallID != cur.callID {
+				if f.Type == TypeOpen {
+					// The peer opened the next call without waiting for this
+					// call's STATUS. Sequential reuse makes that wait, not fail
+					// (§4.5), so hand the OPEN to the next AcceptCall instead of
+					// reporting a call-ID violation and aborting the carrier.
+					s.pushFront(f)
+					s.waitVer(ver)
+					continue
+				}
 				cur.abortRecv(fmt.Errorf("envelope: unexpected call ID %d want %d", f.CallID, cur.callID))
 				s.markBad()
-				s.waitWakeOrClosed()
+				s.waitVer(ver)
 				continue
 			}
 			cur.deliver(f)
 			if cur.recvFinished() {
-				s.waitWakeOrClosed()
+				s.waitVer(ver)
 			}
 		}
 	}
@@ -328,15 +391,17 @@ func (s *session) isClosed() bool {
 // watchIdle runs one idle-watch iteration on the sole recvLoop reader (client).
 // Peer EOF/hard I/O → reusable=false / markBad. Unexpected bytes are parked and
 // mark the session not reusable without parsing (avoids racing residual STATUS/END).
-func (s *session) watchIdle() {
+// ver is recvLoop's snapshot, so a change published while we decide what to do
+// here still releases the wait.
+func (s *session) watchIdle(ver uint64) {
 	s.mu.Lock()
 	if s.closed || s.mode != modeIdle || !s.client {
 		s.mu.Unlock()
 		return
 	}
-	if len(s.readBuf) > 0 {
+	if len(s.readBuf) > 0 || len(s.frameBuf) > 0 || len(s.pendingFrames) > 0 {
 		s.mu.Unlock()
-		s.waitWakeOrClosed()
+		s.waitVer(ver)
 		return
 	}
 	kind := s.kind
@@ -344,19 +409,16 @@ func (s *session) watchIdle() {
 
 	switch kind {
 	case kindByteStream:
-		s.watchIdleByteStream()
+		s.watchIdleByteStream(ver)
 	default:
-		select {
-		case <-s.wake:
-		case <-time.After(50 * time.Millisecond):
-		}
+		s.waitUntilOrTick(func() bool { return s.stateVer != ver }, 50*time.Millisecond)
 	}
 }
 
-func (s *session) watchIdleByteStream() {
+func (s *session) watchIdleByteStream(ver uint64) {
 	bs, ok := s.carrier.(transport.ByteStreamCarrier)
 	if !ok {
-		<-s.wake
+		s.waitVer(ver)
 		return
 	}
 	for {
@@ -366,12 +428,6 @@ func (s *session) watchIdleByteStream() {
 			return
 		}
 		s.mu.Unlock()
-
-		select {
-		case <-s.wake:
-			return
-		default:
-		}
 
 		s.setReadDeadline(time.Now().Add(50 * time.Millisecond))
 		var one [1]byte
@@ -414,7 +470,7 @@ func (s *session) watchIdleByteStream() {
 			s.readBuf = append(s.readBuf, one[0])
 			s.reusable = false
 			s.mu.Unlock()
-			s.waitWakeOrClosed()
+			s.waitVer(ver)
 			return
 		}
 		if err == nil {
@@ -427,37 +483,34 @@ func (s *session) watchIdleByteStream() {
 		} else {
 			s.markBad()
 		}
-		s.waitWakeOrClosed()
+		s.waitVer(ver)
 		return
 	}
 }
 
-// waitModeChange blocks until session.mode differs from from, or the session closes.
-func (s *session) waitModeChange(from demuxMode) {
-	for {
-		s.mu.Lock()
-		closed := s.closed
-		mode := s.mode
-		s.mu.Unlock()
-		if closed || mode != from {
-			return
-		}
-		<-s.wake
-	}
+// waitAcceptRetired blocks until the accept attempt that owned ch is no longer
+// installed, or the session closes. Identity, not mode value: the attempt is
+// what the reader handed a frame to, and only its retirement licenses another read.
+func (s *session) waitAcceptRetired(ch chan acceptResult) {
+	s.waitUntil(func() bool { return s.acceptCh != ch })
 }
 
-// waitWakeOrClosed waits for a wake signal or session close (whichever first).
+// waitVer blocks until the demux state advances past ver, or the session closes.
+func (s *session) waitVer(ver uint64) {
+	s.waitUntil(func() bool { return s.stateVer != ver })
+}
+
+// waitWakeOrClosed blocks until the next state change after entry, or close.
 func (s *session) waitWakeOrClosed() {
-	for {
-		if s.isClosed() {
-			return
-		}
-		select {
-		case <-s.wake:
-			return
-		case <-time.After(20 * time.Millisecond):
-		}
-	}
+	s.mu.Lock()
+	ver := s.stateVer
+	s.mu.Unlock()
+	s.waitVer(ver)
+}
+
+// waitModeChange blocks until session.mode differs from from, or the session closes.
+func (s *session) waitModeChange(from demuxMode) {
+	s.waitUntil(func() bool { return s.mode != from })
 }
 
 func (s *session) readFrameAccepting(ctx context.Context, lastCallID uint64) (Frame, error) {
@@ -500,6 +553,9 @@ func frameWireSize(f Frame, kind carrierKind) (int64, error) {
 }
 
 func (s *session) readFrameFirstByteThenTimeout(ctx context.Context) (Frame, error) {
+	if f, ok := s.popPending(); ok {
+		return f, nil
+	}
 	if s.kind == kindMessage {
 		return s.readMessageFrame(ctx, true)
 	}
@@ -511,14 +567,48 @@ func (s *session) readFrameFirstByteThenTimeout(ctx context.Context) (Frame, err
 		return Frame{}, err
 	}
 	to := s.openTimeout
-	if to > 0 {
-		s.setReadDeadline(time.Now().Add(to))
-		defer s.clearReadDeadline()
+	if to <= 0 {
+		return s.readFrame()
 	}
-	return s.readFrame()
+	defer s.clearReadDeadline()
+	// One OpenTimeout budget from the first byte through the parsed OPEN.
+	// Anchoring it outside the loop is what makes the retry below safe: a
+	// retry cannot extend the peer's budget, and the loop always terminates.
+	budget := time.Now().Add(to)
+	for {
+		s.setReadDeadline(budget)
+		f, err := s.readFrame()
+		if err == nil || !isTimeoutErr(err) {
+			return f, err
+		}
+		// Our OpenTimeout expiring and someone else's wakeRead() both surface
+		// as a read timeout. Only the budget tells them apart: wakeRead moves
+		// the deadline into the past to bounce the reader, so the budget still
+		// has time left. A foreign wake is our own control event, not a peer
+		// fault — reporting it fails a legal accept and marks a healthy
+		// session unusable.
+		//
+		// The retry is local on purpose. Returning to recvLoop would re-enter
+		// the accept branch and park, and it is only safe at all because a
+		// frame read now resumes instead of losing what it already took.
+		if !time.Now().Before(budget) {
+			return Frame{}, err
+		}
+		if ctx == nil {
+			return Frame{}, err
+		}
+		select {
+		case <-ctx.Done():
+			return Frame{}, ctx.Err()
+		default:
+		}
+	}
 }
 
 func (s *session) waitFirstByte(ctx context.Context) error {
+	if len(s.frameBuf) > 0 {
+		return nil
+	}
 	s.mu.Lock()
 	if len(s.readBuf) > 0 {
 		s.mu.Unlock()
@@ -580,10 +670,29 @@ func isTimeoutErr(err error) bool {
 }
 
 func (s *session) readFrame() (Frame, error) {
+	if f, ok := s.popPending(); ok {
+		return f, nil
+	}
 	if s.kind == kindMessage {
 		return s.readMessageFrame(context.Background(), false)
 	}
 	return s.readPrefixedFrame()
+}
+
+// popPending takes the next frame the demux handed back, if any. Such frames
+// were already size- and metadata-checked when they were first read.
+func (s *session) popPending() (Frame, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.pendingFrames) == 0 {
+		return Frame{}, false
+	}
+	f := s.pendingFrames[0]
+	s.pendingFrames = s.pendingFrames[1:]
+	if len(s.pendingFrames) == 0 {
+		s.pendingFrames = nil
+	}
+	return f, true
 }
 
 // checkInboundMeta rejects metadata larger than the configured inbound limit.
@@ -618,8 +727,49 @@ func (s *session) readPrefixedFrame() (Frame, error) {
 	if !ok {
 		return Frame{}, fmt.Errorf("envelope: ByteStreamCarrier required")
 	}
-	r := &bufReader{s: s, r: bs}
-	f, err := UnmarshalPrefixedLimited(r, s.cfg.MaxFrameSize, s.cfg.MaxMessageSize)
+	// An oversize body from an earlier frame may still be on the wire.
+	if err := s.runDiscard(bs); err != nil {
+		return Frame{}, err
+	}
+	if err := s.fillFrame(bs, lenPrefix, "length prefix"); err != nil {
+		return Frame{}, err
+	}
+	n := int64(binary.BigEndian.Uint32(s.frameBuf[:lenPrefix]))
+	if n < headerSize {
+		s.dropFrame(lenPrefix)
+		return Frame{}, fmt.Errorf("%w: body length %d", ErrInvalidLength, n)
+	}
+	if max := s.cfg.MaxFrameSize; max > 0 && n > max {
+		// Never buffer an oversize frame; drop its body off the carrier.
+		s.dropFrame(lenPrefix)
+		s.discardRest = n
+		if err := s.runDiscard(bs); err != nil {
+			return Frame{}, err
+		}
+		return Frame{}, fmt.Errorf("%w: body %d > max %d", ErrFrameTooLarge, n, max)
+	}
+	if max := s.cfg.MaxMessageSize; max > 0 && n-headerSize > max {
+		// Peek the type so an oversize DATA payload is discarded instead of
+		// allocated. Other types are under MaxFrameSize and parse normally.
+		if err := s.fillFrame(bs, lenPrefix+1, "frame type"); err != nil {
+			return Frame{}, err
+		}
+		if Type(s.frameBuf[lenPrefix]) == TypeData {
+			s.dropFrame(lenPrefix + 1)
+			s.discardRest = n - 1
+			if err := s.runDiscard(bs); err != nil {
+				return Frame{}, err
+			}
+			return Frame{}, fmt.Errorf("%w: DATA payload %d > max %d",
+				ErrMessageTooLarge, n-headerSize, max)
+		}
+	}
+	total := lenPrefix + int(n)
+	if err := s.fillFrame(bs, total, "frame body"); err != nil {
+		return Frame{}, err
+	}
+	f, err := ParseFrameBody(s.frameBuf[lenPrefix:total])
+	s.dropFrame(total)
 	if err != nil {
 		return Frame{}, err
 	}
@@ -627,6 +777,92 @@ func (s *session) readPrefixedFrame() (Frame, error) {
 		return Frame{}, err
 	}
 	return f, nil
+}
+
+// fillFrame grows frameBuf to need bytes, spending pushed-back bytes first and
+// then reading from the carrier.
+//
+// Whatever arrives stays in frameBuf even when the read fails. wakeRead()
+// expires the carrier deadline from other goroutines at arbitrary points, so a
+// frame read has to be resumable: discarding what an aborted read already took
+// off the carrier misaligns every later frame boundary, and a length field
+// parsed from the middle of a frame parks the reader on bytes that never come.
+func (s *session) fillFrame(bs transport.ByteStreamCarrier, need int, what string) error {
+	s.takeReadBuf()
+	for len(s.frameBuf) < need {
+		if cap(s.frameBuf) < need {
+			size := need
+			if grown := 2 * cap(s.frameBuf); grown > size {
+				size = grown
+			}
+			buf := make([]byte, len(s.frameBuf), size)
+			copy(buf, s.frameBuf)
+			s.frameBuf = buf
+		}
+		have := len(s.frameBuf)
+		n, err := bs.Read(s.frameBuf[have:need])
+		if n > 0 {
+			s.frameBuf = s.frameBuf[:have+n]
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return fmt.Errorf("%w: %s", ErrTruncated, what)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// takeReadBuf moves pushed-back bytes into frameBuf. readBuf is shared with
+// AcceptCall's cancel path; frameBuf belongs to recvLoop alone.
+func (s *session) takeReadBuf() {
+	s.mu.Lock()
+	if len(s.readBuf) > 0 {
+		s.frameBuf = append(s.frameBuf, s.readBuf...)
+		s.readBuf = nil
+	}
+	s.mu.Unlock()
+}
+
+// dropFrame removes n consumed bytes from the front of frameBuf, keeping the
+// allocation for the next frame.
+func (s *session) dropFrame(n int) {
+	s.frameBuf = s.frameBuf[:copy(s.frameBuf, s.frameBuf[n:])]
+}
+
+// runDiscard drops what is left of an oversize body. discardRest survives a
+// failed read, so the discard resumes rather than restarting mid-body.
+func (s *session) runDiscard(bs transport.ByteStreamCarrier) error {
+	var scratch []byte
+	for s.discardRest > 0 {
+		s.takeReadBuf()
+		if len(s.frameBuf) > 0 {
+			n := int64(len(s.frameBuf))
+			if n > s.discardRest {
+				n = s.discardRest
+			}
+			s.dropFrame(int(n))
+			s.discardRest -= n
+			continue
+		}
+		if scratch == nil {
+			scratch = make([]byte, 32<<10)
+		}
+		chunk := scratch
+		if int64(len(chunk)) > s.discardRest {
+			chunk = chunk[:s.discardRest]
+		}
+		n, err := bs.Read(chunk)
+		s.discardRest -= int64(n)
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return fmt.Errorf("%w: discard", ErrTruncated)
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *session) readMessageFrame(ctx context.Context, honorCtx bool) (Frame, error) {
@@ -685,15 +921,17 @@ func (s *session) readMessageFrame(ctx context.Context, honorCtx bool) (Frame, e
 }
 
 func (s *session) pushFront(f Frame) {
-	var raw []byte
-	var err error
 	if s.kind == kindMessage {
-		// Message mode cannot unread; mark bad.
-		_ = err
-		s.markBad()
+		// A message carrier cannot unread bytes, so keep the frame itself.
+		// Aborting here instead used to kill the connection whenever the demux
+		// handed a frame back — a pipelined OPEN, or an accept cancelled after
+		// the reader had already published its result.
+		s.mu.Lock()
+		s.pendingFrames = append([]Frame{f}, s.pendingFrames...)
+		s.mu.Unlock()
 		return
 	}
-	raw, err = MarshalFrame(f)
+	raw, err := MarshalFrame(f)
 	if err != nil {
 		s.markBad()
 		return
@@ -979,27 +1217,6 @@ func (s *session) wakeRead() {
 	s.setReadDeadline(time.Now().Add(-time.Second))
 }
 
-// bufReader reads from session.readBuf then the carrier.
-type bufReader struct {
-	s *session
-	r io.Reader
-}
-
-func (b *bufReader) Read(p []byte) (int, error) {
-	b.s.mu.Lock()
-	if len(b.s.readBuf) > 0 {
-		n := copy(p, b.s.readBuf)
-		b.s.readBuf = b.s.readBuf[n:]
-		if len(b.s.readBuf) == 0 {
-			b.s.readBuf = nil
-		}
-		b.s.mu.Unlock()
-		return n, nil
-	}
-	b.s.mu.Unlock()
-	return b.r.Read(p)
-}
-
 // ---------------------------------------------------------------------------
 // Client / Server session wrappers
 // ---------------------------------------------------------------------------
@@ -1055,8 +1272,8 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 	s.active = c
 	s.mode = modeInCall
 	s.lastCallID = id
+	s.bumpLocked()
 	s.mu.Unlock()
-	s.signal()
 	s.wakeRead() // unblock idle watchdog Read
 
 	if s.kind == kindDatagram {
@@ -1080,8 +1297,8 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 			s.mode = modeIdle
 		}
 		s.markBadLocked()
+		s.bumpLocked()
 		s.mu.Unlock()
-		s.signal()
 		return nil, err
 	}
 	c.openSent = true
@@ -1112,8 +1329,8 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 	s.acceptCh = ch
 	s.acceptCtx = ctx
 	s.mode = modeAccepting
+	s.bumpLocked()
 	s.mu.Unlock()
-	s.signal()
 
 	var res acceptResult
 	select {
@@ -1211,8 +1428,8 @@ func (s *serverSession) finishAccept(c *call) {
 	} else if s.mode == modeAccepting {
 		s.mode = modeIdle
 	}
+	s.bumpLocked()
 	s.mu.Unlock()
-	s.signal()
 }
 
 func (s *serverSession) Close() error { return s.closeSession() }
