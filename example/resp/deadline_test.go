@@ -53,19 +53,18 @@ func TestCallerDeadlineEndsBlockedRecv(t *testing.T) {
 	target := silentRESPPeer(t)
 
 	var clientFr *resp.Framing
-	preset := resp.NewBinding()
-	clientPreset := argos.Protocol{
-		Transport: preset.Transport,
-		Framing: func() (framing.Framing, error) {
-			clientFr = resp.New()
-			return clientFr, nil
-		},
-		Codec: preset.Codec,
-	}
+	baseT, _, baseC := resp.BindingAxes()
 	cli, err := client.New(
 		argos.WithConfig(baseConfig()),
 		argos.WithServiceName(svcName),
-		argos.WithProtocol(clientPreset),
+		argos.JoinClient(
+			argos.WithTransport(baseT),
+			argos.WithFraming(func() (framing.Framing, error) {
+				clientFr = resp.New()
+				return clientFr, nil
+			}),
+			argos.WithCodec(baseC),
+		),
 		argos.WithTarget("ip://"+target),
 	)
 	if err != nil {

@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	envelopebinding "github.com/argos-io/argos/binding/envelope"
 )
 
 // coder/websocket caps a message read at 32 KiB by default and closes the whole
@@ -17,7 +15,8 @@ func TestWSLargeMessageExceedsDefaultReadLimit(t *testing.T) {
 	// Comfortably above coder/websocket's 32768-byte default and well below the
 	// 4 MiB frame default.
 	const size = 128 << 10
-	ec := startEcho(t, envelopebinding.NewWS())
+	tr, fr, cd := envelopeWSAxes()
+	ec := startEcho(t, tr, fr, cd)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

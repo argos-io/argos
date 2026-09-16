@@ -138,14 +138,24 @@ type integEnv struct {
 	srvTr  *listenTCP
 }
 
-func integProtocol(tr transport.Transport, frOpts []envelope.Option) argos.Protocol {
-	return argos.Protocol{
-		Transport: func() (transport.Transport, error) { return tr, nil },
-		Framing: func() (framing.Framing, error) {
+func integClient(tr transport.Transport, frOpts []envelope.Option) argos.ClientOption {
+	return argos.JoinClient(
+		argos.WithTransport(func() (transport.Transport, error) { return tr, nil }),
+		argos.WithFraming(func() (framing.Framing, error) {
 			return envelope.New(frOpts...), nil
-		},
-		Codec: func() (codec.Codec, error) { return rawCodec{}, nil },
-	}
+		}),
+		argos.WithCodec(func() (codec.Codec, error) { return rawCodec{}, nil }),
+	)
+}
+
+func integServiceOption(tr transport.Transport, frOpts []envelope.Option) argos.ServiceOption {
+	return argos.JoinService(
+		argos.ServiceTransport(func() (transport.Transport, error) { return tr, nil }),
+		argos.ServiceFraming(func() (framing.Framing, error) {
+			return envelope.New(frOpts...), nil
+		}),
+		argos.ServiceCodec(func() (codec.Codec, error) { return rawCodec{}, nil }),
+	)
 }
 
 func startInteg(t *testing.T) *integEnv {
@@ -165,7 +175,7 @@ func startInteg(t *testing.T) *integEnv {
 	}
 
 	srv := server.New(argos.WithConfig(cfg), argos.WithService(integService,
-		argos.ServiceProtocol(integProtocol(srvTr, frOpts)),
+		integServiceOption(srvTr, frOpts),
 		argos.ServiceListenAddress("127.0.0.1:0"),
 	))
 	svc := descriptor.MustService(integService, descriptor.MustMethod(integMethod, descriptor.Unary))
@@ -183,7 +193,7 @@ func startInteg(t *testing.T) *integEnv {
 	cli, err := client.New(
 		argos.WithConfig(cfg),
 		argos.WithServiceName(integService),
-		argos.WithProtocol(integProtocol(dials, frOpts)),
+		integClient(dials, frOpts),
 		argos.WithTarget(target),
 	)
 	if err != nil {
@@ -358,7 +368,7 @@ func TestClientEarlyCloseNotReturnedToPool(t *testing.T) {
 		MaxInboundConnAge:      30 * time.Minute,
 	}
 	srv := server.New(argos.WithConfig(cfg), argos.WithService(integService,
-		argos.ServiceProtocol(integProtocol(srvTr, nil)),
+		integServiceOption(srvTr, nil),
 		argos.ServiceListenAddress("127.0.0.1:0"),
 	))
 	svc := descriptor.MustService(integService, descriptor.MustMethod(integMethod, descriptor.Unary))
@@ -385,7 +395,7 @@ func TestClientEarlyCloseNotReturnedToPool(t *testing.T) {
 	cli, err := client.New(
 		argos.WithConfig(cfg),
 		argos.WithServiceName(integService),
-		argos.WithProtocol(integProtocol(dials, nil)),
+		integClient(dials, nil),
 		argos.WithTarget("ip://"+addr),
 	)
 	if err != nil {

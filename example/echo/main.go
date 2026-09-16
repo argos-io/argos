@@ -8,11 +8,11 @@ import (
 	"os"
 
 	"github.com/argos-io/argos"
-	envelopebinding "github.com/argos-io/argos/binding/envelope"
-	grpcbinding "github.com/argos-io/argos/binding/grpc"
-	wholebodybinding "github.com/argos-io/argos/binding/wholebody"
+	"github.com/argos-io/argos/codec"
 	echov1 "github.com/argos-io/argos/example/echo"
+	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/server"
+	"github.com/argos-io/argos/transport"
 )
 
 const echoService = "echo.v1.EchoService"
@@ -20,19 +20,54 @@ const echoService = "echo.v1.EchoService"
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
+	trReg, frReg, coReg, err := echov1.DemoRegistries()
+	if err != nil {
+		slog.Error("DemoRegistries", "err", err)
+		os.Exit(1)
+	}
+
 	// Datagram limits must fit the smallest carrier in the demo (envelope×udp).
 	demoCfg := argos.Defaults()
 	demoCfg.MaxMessageSize = 32 << 10
 	demoCfg.MaxFrameSize = 65507
 
+	grpcAxes := []argos.ServiceOption{
+		argos.ServiceTransportName(transport.NameHTTP2),
+		argos.ServiceFramingName(framing.NameGRPC),
+		argos.ServiceCodecName(codec.NameProtobuf),
+	}
+	envelopeTCP := []argos.ServiceOption{
+		argos.ServiceTransportName(transport.NameTCP),
+		argos.ServiceFramingName(framing.NameEnvelope),
+		argos.ServiceCodecName(codec.NameProtobuf),
+	}
+	envelopeWS := []argos.ServiceOption{
+		argos.ServiceTransportName(transport.NameWS),
+		argos.ServiceFramingName(framing.NameEnvelope),
+		argos.ServiceCodecName(codec.NameProtobuf),
+	}
+	envelopeUDP := []argos.ServiceOption{
+		argos.ServiceTransportName(transport.NameUDP),
+		argos.ServiceFramingName(framing.NameEnvelope),
+		argos.ServiceCodecName(codec.NameProtobuf),
+	}
+	wholebodyAxes := []argos.ServiceOption{
+		argos.ServiceTransportName(transport.NameHTTP1),
+		argos.ServiceFramingName(framing.NameWholebody),
+		argos.ServiceCodecName(codec.NameJSON),
+	}
+
 	srv := server.New(
 		argos.WithConfig(&demoCfg),
+		argos.WithTransportRegistry(trReg),
+		argos.WithFramingRegistry(frReg),
+		argos.WithCodecRegistry(coReg),
 		argos.WithService(echoService,
-			argos.ServiceListener(":9090", grpcbinding.New()),
-			argos.ServiceListener(":7000", envelopebinding.NewTCP()),
-			argos.ServiceListener(":8081", envelopebinding.NewWS()),
-			argos.ServiceListener(":7001", envelopebinding.NewUDP()),
-			argos.ServiceListener(":8080", wholebodybinding.New()),
+			argos.ServiceListener(":9090", grpcAxes...),
+			argos.ServiceListener(":7000", envelopeTCP...),
+			argos.ServiceListener(":8081", envelopeWS...),
+			argos.ServiceListener(":7001", envelopeUDP...),
+			argos.ServiceListener(":8080", wholebodyAxes...),
 		),
 	)
 	if err := echov1.RegisterEchoService(srv, echov1.NewEchoImpl()); err != nil {

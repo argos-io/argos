@@ -46,41 +46,7 @@ func startLoadRESP(t *testing.T, tune func(*argos.Config)) *loadEnv {
 	var addrTr hasAddr
 	bound := make(chan struct{})
 
-	base := resp.NewBinding()
-	serverPreset := argos.Protocol{
-		Transport: func() (transport.Transport, error) {
-			tr, err := base.Transport()
-			if err != nil {
-				return nil, err
-			}
-			if a, ok := tr.(hasAddr); ok {
-				addrTr = a
-				select {
-				case <-bound:
-				default:
-					close(bound)
-				}
-			}
-			return tr, nil
-		},
-		Framing: base.Framing,
-		Codec:   base.Codec,
-	}
-	clientPreset := argos.Protocol{
-		Transport: func() (transport.Transport, error) {
-			tr, err := base.Transport()
-			if err != nil {
-				return nil, err
-			}
-			return &dialCounter{Transport: tr, dials: &dials}, nil
-		},
-		Framing: func() (framing.Framing, error) {
-			fr := resp.New()
-			clientFr = fr
-			return fr, nil
-		},
-		Codec: base.Codec,
-	}
+	baseT, baseF, baseC := resp.BindingAxes()
 
 	cfg := &argos.Config{
 		MaxConcurrentCalls: 64,
@@ -98,7 +64,25 @@ func startLoadRESP(t *testing.T, tune func(*argos.Config)) *loadEnv {
 	}
 
 	srv := server.New(argos.WithConfig(cfg), argos.WithService(svcName,
-		argos.ServiceProtocol(serverPreset),
+		argos.JoinService(
+			argos.ServiceTransport(func() (transport.Transport, error) {
+				tr, err := baseT()
+				if err != nil {
+					return nil, err
+				}
+				if a, ok := tr.(hasAddr); ok {
+					addrTr = a
+					select {
+					case <-bound:
+					default:
+						close(bound)
+					}
+				}
+				return tr, nil
+			}),
+			argos.ServiceFraming(baseF),
+			argos.ServiceCodec(baseC),
+		),
 		argos.ServiceListenAddress(testListenAddr),
 	))
 	if err := resp.Register(srv, store); err != nil {
@@ -117,7 +101,21 @@ func startLoadRESP(t *testing.T, tune func(*argos.Config)) *loadEnv {
 	cli, err := client.New(
 		argos.WithConfig(cfg),
 		argos.WithServiceName(svcName),
-		argos.WithProtocol(clientPreset),
+		argos.JoinClient(
+			argos.WithTransport(func() (transport.Transport, error) {
+				tr, err := baseT()
+				if err != nil {
+					return nil, err
+				}
+				return &dialCounter{Transport: tr, dials: &dials}, nil
+			}),
+			argos.WithFraming(func() (framing.Framing, error) {
+				fr := resp.New()
+				clientFr = fr
+				return fr, nil
+			}),
+			argos.WithCodec(baseC),
+		),
 		argos.WithTarget("ip://"+addr),
 	)
 	if err != nil {

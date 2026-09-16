@@ -175,19 +175,19 @@ func echoService() descriptor.Service {
 	return descriptor.MustService(svcName, m)
 }
 
-func testProtocol(tr transport.Transport, fr framing.Framing) argos.Protocol {
-	return argos.Protocol{
-		Transport: func() (transport.Transport, error) { return tr, nil },
-		Framing:   func() (framing.Framing, error) { return fr, nil },
-		Codec:     func() (codec.Codec, error) { return rawCodec{}, nil },
-	}
+func testServiceAxes(tr transport.Transport, fr framing.Framing) argos.ServiceOption {
+	return argos.JoinService(
+		argos.ServiceTransport(func() (transport.Transport, error) { return tr, nil }),
+		argos.ServiceFraming(func() (framing.Framing, error) { return fr, nil }),
+		argos.ServiceCodec(func() (codec.Codec, error) { return rawCodec{}, nil }),
+	)
 }
 
 func startServer(t *testing.T, tr *testTransport, fr framing.Framing, h filter.Handler, opts ...argos.ServerOption) *server.Server {
 	t.Helper()
 	base := append([]argos.ServerOption{
 		argos.WithService(svcName,
-			argos.ServiceProtocol(testProtocol(tr, fr)),
+			testServiceAxes(tr, fr),
 			argos.ServiceListenAddress("127.0.0.1:0"),
 		),
 	}, opts...)
@@ -317,7 +317,7 @@ func TestServiceListenFilterChain(t *testing.T) {
 	srv := server.New(
 		argos.WithFilter(count(&serverLevel)),
 		argos.WithService(svcName,
-			argos.ServiceProtocol(testProtocol(tr, srvFr)),
+			testServiceAxes(tr, srvFr),
 			argos.ServiceListenAddress("127.0.0.1:0"),
 		),
 		argos.WithFilter(count(&perBinding)),
@@ -465,7 +465,7 @@ func TestShutdownIdleConnExitsQuickly(t *testing.T) {
 	srv := server.New(
 		argos.WithMaxInboundConnIdle(30*time.Second),
 		argos.WithService(svcName,
-			argos.ServiceProtocol(testProtocol(tr, fr)),
+			testServiceAxes(tr, fr),
 			argos.ServiceListenAddress("127.0.0.1:0"),
 		),
 	)

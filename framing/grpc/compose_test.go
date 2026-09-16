@@ -16,12 +16,15 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
-	grpcbinding "github.com/argos-io/argos/binding/grpc"
 	"github.com/argos-io/argos/client"
+	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/codec/protobuf"
+	"github.com/argos-io/argos/compressor"
 	"github.com/argos-io/argos/compressor/gzip"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
+	"github.com/argos-io/argos/framing"
+	grpcframing "github.com/argos-io/argos/framing/grpc"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/stream"
 	"github.com/argos-io/argos/transport"
@@ -35,6 +38,98 @@ const (
 	echoService = "echo.v1.Echo"
 	echoMethod  = echoService + ".Echo"
 )
+
+type composeOpt interface {
+	apply(*composeOpts)
+}
+
+type composeOpts struct {
+	serverTLS   *tls.Config
+	clientTLS   *tls.Config
+	authority   string
+	compressors []compressor.Compressor
+	sendName    string
+	codec       codec.Codec
+}
+
+type composeOptionFunc func(*composeOpts)
+
+func (f composeOptionFunc) apply(o *composeOpts) { f(o) }
+
+func WithServerTLS(cfg *tls.Config) composeOpt {
+	return composeOptionFunc(func(o *composeOpts) { o.serverTLS = cfg })
+}
+
+func WithClientTLS(cfg *tls.Config) composeOpt {
+	return composeOptionFunc(func(o *composeOpts) { o.clientTLS = cfg })
+}
+
+func WithAuthority(authority string) composeOpt {
+	return composeOptionFunc(func(o *composeOpts) { o.authority = authority })
+}
+
+func WithCompressor(cs ...compressor.Compressor) composeOpt {
+	return composeOptionFunc(func(o *composeOpts) {
+		o.compressors = append(o.compressors, cs...)
+	})
+}
+
+func WithSendCompressor(name string) composeOpt {
+	return composeOptionFunc(func(o *composeOpts) { o.sendName = name })
+}
+
+func WithCodec(c codec.Codec) composeOpt {
+	return composeOptionFunc(func(o *composeOpts) { o.codec = c })
+}
+
+func applyComposeOpts(opts []composeOpt) composeOpts {
+	var o composeOpts
+	for _, opt := range opts {
+		if opt != nil {
+			opt.apply(&o)
+		}
+	}
+	return o
+}
+
+func axesFrom(opts ...composeOpt) (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
+	o := applyComposeOpts(opts)
+	var http2Opts []argoshttp2.Option
+	if o.serverTLS != nil {
+		http2Opts = append(http2Opts, argoshttp2.WithServerTLS(o.serverTLS))
+	}
+	cliTLS := o.clientTLS
+	if cliTLS == nil && o.authority != "" {
+		cliTLS = &tls.Config{ServerName: o.authority}
+	} else if cliTLS != nil && o.authority != "" && cliTLS.ServerName == "" {
+		c := cliTLS.Clone()
+		c.ServerName = o.authority
+		cliTLS = c
+	}
+	if cliTLS != nil {
+		http2Opts = append(http2Opts, argoshttp2.WithClientTLS(cliTLS))
+	}
+	var frOpts []grpcframing.Option
+	if len(o.compressors) > 0 {
+		frOpts = append(frOpts, grpcframing.WithCompressors(o.compressors...))
+	}
+	if o.sendName != "" {
+		frOpts = append(frOpts, grpcframing.WithSendCompressor(o.sendName))
+	}
+	return argos.TransportFunc(func() (transport.Transport, error) {
+			return argoshttp2.New(http2Opts...), nil
+		}),
+		argos.FramingFunc(func() (framing.Framing, error) {
+			return grpcframing.New(frOpts...)
+		}),
+		argos.CodecFunc(func() (codec.Codec, error) {
+			cd := o.codec
+			if cd == nil {
+				cd = protobuf.New()
+			}
+			return cd, nil
+		})
+}
 
 func echoHandler(_ context.Context, _ descriptor.Method, st stream.Stream) error {
 	var req wrapperspb.StringValue
@@ -63,18 +158,19 @@ type harness struct {
 	srvTr  *argoshttp2.Transport
 }
 
-func grpcServerProtocol(preset argos.Protocol, srvTr **argoshttp2.Transport, bound chan struct{}) argos.Protocol {
+func grpcServerService(srvOpts []composeOpt, srvTr **argoshttp2.Transport, bound chan struct{}) argos.ServiceOption {
+	baseT, baseF, baseC := axesFrom(srvOpts...)
 	var pair struct {
 		tr *argoshttp2.Transport
 	}
 	build := func() error {
-		tr, err := preset.Transport()
+		tr, err := baseT()
 		if err != nil {
 			return err
 		}
 		h2, ok := tr.(*argoshttp2.Transport)
 		if !ok {
-			return errors.New("binding/grpc test: Transport is not *http2.Transport")
+			return errors.New("framing/grpc test: Transport is not *http2.Transport")
 		}
 		pair.tr = h2
 		*srvTr = h2
@@ -85,8 +181,8 @@ func grpcServerProtocol(preset argos.Protocol, srvTr **argoshttp2.Transport, bou
 		}
 		return nil
 	}
-	return argos.Protocol{
-		Transport: func() (transport.Transport, error) {
+	return argos.JoinService(
+		argos.ServiceTransport(func() (transport.Transport, error) {
 			if pair.tr != nil {
 				return pair.tr, nil
 			}
@@ -94,10 +190,10 @@ func grpcServerProtocol(preset argos.Protocol, srvTr **argoshttp2.Transport, bou
 				return nil, err
 			}
 			return pair.tr, nil
-		},
-		Framing: preset.Framing,
-		Codec:   preset.Codec,
-	}
+		}),
+		argos.ServiceFraming(baseF),
+		argos.ServiceCodec(baseC),
+	)
 }
 
 func waitAddr(t *testing.T, tr *argoshttp2.Transport) string {
@@ -113,12 +209,9 @@ func waitAddr(t *testing.T, tr *argoshttp2.Transport) string {
 	return ""
 }
 
-func startEcho(t *testing.T, srvOpts, cliOpts []grpcbinding.Option) *harness {
+func startEcho(t *testing.T, srvOpts, cliOpts []composeOpt) *harness {
 	t.Helper()
 
-	// Shared by both halves: the session limits are client-only and the
-	// inbound-connection limits and ListenAddress server-only, so the tuning
-	// travels as a Config instead of as one option list for both constructors.
 	cfg := &argos.Config{
 		MaxConcurrentCalls:     16,
 		MaxBufferedBytes:       16 * 16 * 1024 * 1024,
@@ -131,12 +224,10 @@ func startEcho(t *testing.T, srvOpts, cliOpts []grpcbinding.Option) *harness {
 
 	var srvTr *argoshttp2.Transport
 	bound := make(chan struct{})
-	preset := grpcbinding.New(srvOpts...)
-	ep := grpcServerProtocol(preset, &srvTr, bound)
 	srv := server.New(
 		argos.WithConfig(cfg),
 		argos.WithService(echoService,
-			argos.ServiceProtocol(ep),
+			grpcServerService(srvOpts, &srvTr, bound),
 			argos.ServiceListenAddress(cfg.ListenAddress),
 		),
 	)
@@ -147,15 +238,20 @@ func startEcho(t *testing.T, srvOpts, cliOpts []grpcbinding.Option) *harness {
 	select {
 	case <-bound:
 	case <-time.After(3 * time.Second):
-		t.Fatal("server protocol not assembled")
+		t.Fatal("server axes not assembled")
 	}
 	addr := waitAddr(t, srvTr)
 	t.Cleanup(func() { _ = srv.Close() })
 
+	tFn, fFn, cFn := axesFrom(cliOpts...)
 	cli, err := client.New(
 		argos.WithConfig(cfg),
 		argos.WithServiceName(echoService),
-		argos.WithProtocol(grpcbinding.New(cliOpts...)),
+		argos.JoinClient(
+			argos.WithTransport(tFn),
+			argos.WithFraming(fFn),
+			argos.WithCodec(cFn),
+		),
 		argos.WithTarget("ip://"+addr),
 	)
 	if err != nil {
@@ -206,7 +302,7 @@ func selfSigned(t *testing.T) (srv, cli *tls.Config) {
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "argos-binding-grpc"},
+		Subject:               pkix.Name{CommonName: "argos-grpc-interop"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
@@ -251,10 +347,10 @@ func TestH2CUnaryEcho(t *testing.T) {
 func TestTLSALPNUnaryEcho(t *testing.T) {
 	srvTLS, cliTLS := selfSigned(t)
 	h := startEcho(t,
-		[]grpcbinding.Option{grpcbinding.WithServerTLS(srvTLS)},
-		[]grpcbinding.Option{
-			grpcbinding.WithClientTLS(cliTLS),
-			grpcbinding.WithAuthority("127.0.0.1"),
+		[]composeOpt{WithServerTLS(srvTLS)},
+		[]composeOpt{
+			WithClientTLS(cliTLS),
+			WithAuthority("127.0.0.1"),
 		},
 	)
 	got := unaryEcho(t, h.cli, h.method, "tls")
@@ -264,9 +360,9 @@ func TestTLSALPNUnaryEcho(t *testing.T) {
 }
 
 func TestCompressorGzipSmoke(t *testing.T) {
-	compOpts := []grpcbinding.Option{
-		grpcbinding.WithCompressor(gzip.New()),
-		grpcbinding.WithSendCompressor(gzip.Name),
+	compOpts := []composeOpt{
+		WithCompressor(gzip.New()),
+		WithSendCompressor(gzip.Name),
 	}
 	h := startEcho(t, compOpts, compOpts)
 	got := unaryEcho(t, h.cli, h.method, "gzip-path")
@@ -275,13 +371,14 @@ func TestCompressorGzipSmoke(t *testing.T) {
 	}
 }
 
-func TestProtocolAssembleIndependentInstances(t *testing.T) {
-	p := grpcbinding.New(grpcbinding.WithCodec(protobuf.New()))
-	tr1, fr1, _, err := p.Assemble()
+func TestAxesAssembleIndependentInstances(t *testing.T) {
+	var sc argos.ServiceConfig
+	sc.Transport, sc.Framing, sc.Codec = axesFrom(WithCodec(protobuf.New()))
+	tr1, fr1, _, err := sc.Assemble()
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr2, fr2, _, err := p.Assemble()
+	tr2, fr2, _, err := sc.Assemble()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,8 +393,8 @@ func TestProtocolAssembleIndependentInstances(t *testing.T) {
 }
 
 func TestSendCompressorRequiresInjection(t *testing.T) {
-	p := grpcbinding.New(grpcbinding.WithSendCompressor(gzip.Name))
-	_, err := p.Framing()
+	_, fFn, _ := axesFrom(WithSendCompressor(gzip.Name))
+	_, err := fFn()
 	if err == nil {
 		t.Fatal("expected error when send compressor is not configured")
 	}

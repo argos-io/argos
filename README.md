@@ -61,8 +61,8 @@
 
 要点：
 
-- **三轴可命名注册**——`DefaultConfig().RegisterTransport/Framing/Codec(name, factory)` 供文本配置解析；`ServiceTransportName` 等与直接写工厂二选一。`binding/*` 在 `init` 里注册常用名（`tcp` / `http2` / `envelope` / `grpc` / `protobuf` 等）。每个 Client / 监听面仍各 `Assemble()` 一次，得到互不共享的三元组。
-- **Compressor 不是核心概念**——仅 gRPC 路径使用（`framing/grpc`、`binding/grpc`）。
+- **三轴可命名注册**——`transport.Registry` / `framing.Registry` / `codec.Registry` 挂在 `Config` 上（`WithTransportRegistry` 等）；`ServiceTransportName` 等与直接写工厂二选一。各 `transport/*`、`framing/*`、`codec/*` 提供 `Register(r)`，在 **main 或测试** 里显式注册，避免根包与实现之间的循环依赖。每个 Client / 监听面仍各 `Assemble()` 一次，得到互不共享的三元组。
+- **Compressor 不是核心概念**——仅 gRPC 路径使用（`framing/grpc`）。
 - **复用不是第四轴**——`Framing.Reuse()` 声明承载力；借还由客户端会话池执行。
 
 ```go
@@ -95,7 +95,7 @@ const (
 |---|---|---|
 | `descriptor` / `status` / `metadata` / `codec` | —— | `status` 不得依赖 protobuf/genproto |
 | `budget` | `status` | |
-| `compressor` | —— | **仅** `framing/grpc`、`binding/grpc` 可依赖 |
+| `compressor` | —— | **仅** `framing/grpc` 可依赖 |
 | `transport` | —— | 不 import `descriptor` / `framing` |
 | `transport/{tcp,ws,udp,http1,http2}` | `transport`、`status` | |
 | `framing` | `transport`、`descriptor`、`metadata`、`budget`、`status` | 不 import `compressor` |
@@ -103,16 +103,13 @@ const (
 | `framing/grpc` | 同 `framing` + `compressor` + `internal/httpstatus` + genproto | 唯一可 import genproto |
 | `framing/wholebody` | 同 `framing` + `internal/httpstatus` | |
 | `stream` / `filter` / `resolver` | 见表意 | |
-| `argos`（根） | `transport`、`framing`、`codec`、`filter` | Config / Protocol / ServiceConfig；不 import `compressor` |
-| `binding/grpc` | `argos`、http2、grpc framing、codec、compressor | TLS / 压缩 Option |
-| `binding/envelope` | `argos`、tcp/ws/udp、envelope framing、codec | `NewTCP` / `NewWS` / `NewUDP` |
-| `binding/wholebody` | `argos`、http1、wholebody framing、codec | 默认 JSON |
+| `argos`（根） | `transport`、`framing`、`codec`、`filter` | Config / ServiceConfig；不 import 具体 transport 实现 |
 | `client` / `server` | 除 `internal/*` 外上述；client 另加 resolver、sessionpool | 唯一组合层 |
 
 关键不变量（摘要）：
 
 1. 全仓一个通用路由器（`server`：Service → Method）。
-2. 不用 gRPC 的程序不得传递依赖 `framing/grpc` / `binding/grpc` / `compressor` / genproto。
+2. 不用 gRPC 的程序不得传递依赖 `framing/grpc` / `compressor` / genproto。
 3. 复用策略只在 `internal/sessionpool`（仅 `client` import）。
 4. 一条连接一个 `AcceptCall` 循环；组合层不为 `example/*` 特判。
 
@@ -126,26 +123,11 @@ const (
 - **Framing**：握手、一条连接几个调用、边界与状态写在哪  
 - **Codec**：消息 ↔ 字节  
 
-```go
-type Protocol struct {
-    Transport TransportFunc
-    Framing   FramingFunc
-    Codec     CodecFunc
-    TransportName, FramingName, CodecName string // 查 Config 上的注册表
-}
-// ResolveProtocol 把名字解析成工厂，再 Assemble()；工厂不得 Dial/Serve
-```
+`ServiceConfig` 上直接放三轴工厂或注册名（`ServiceTransport` / `ServiceTransportName` 等）；`Config.ResolveService` 把名字解析成工厂，再 `Assemble()`。工厂不得 Dial/Serve。
 
-客户端与服务端共用 `Config.Services[name]`：三轴（Transport / Framing / Codec）、客户端 `Target`、服务端 `ServiceListenAddress` 或 `ServiceListener`（同一服务多传输）。
+客户端与服务端共用 `Config.Services[name]`：三轴、客户端 `Target`、服务端 `ServiceListenAddress` 或 `ServiceListener`（同一服务多传输，listener 上再写三轴选项）。
 
-便利预设（返回 `argos.Protocol`）：
-
-```go
-grpcbinding.New(opts...)           // http2 × grpc；WithTLS / WithCompressor
-envelopebinding.NewTCP() / NewWS() / NewUDP()
-wholebodybinding.New()             // http1 × wholebody，默认 JSON
-grpcbinding.Service(opts...)       // 写入 WithService 的 ServiceProtocol
-```
+按名配置时在程序入口调用各实现的 `Register`（例如 `http2.Register(tr)`），把 registry 传给 `WithTransportRegistry` 等；或直接在 `WithService` 里写 `ServiceTransport` 等工厂。
 
 ### 4.2 客户端 / 服务端装配
 
@@ -169,10 +151,22 @@ server: Transport.Serve → Conn → NewServerSession
 ### 4.3 最小用法
 
 ```go
-// 服务端：协议与监听写在 WithService；代码只 Register impl
+tr := transport.NewRegistry()
+_ = transporthttp2.Register(tr)
+fr := framing.NewRegistry()
+_ = framinggrpc.Register(fr)
+co := codec.NewRegistry()
+_ = codecprotobuf.Register(co)
+
+// 服务端：三轴与监听写在 WithService；代码只 Register impl
 srv := server.New(
+    argos.WithTransportRegistry(tr),
+    argos.WithFramingRegistry(fr),
+    argos.WithCodecRegistry(co),
     argos.WithService("echo.v1.EchoService",
-        grpcbinding.Service(),
+        argos.ServiceTransportName(transport.NameHTTP2),
+        argos.ServiceFramingName(framing.NameGRPC),
+        argos.ServiceCodecName(codec.NameProtobuf),
         argos.ServiceListenAddress(":7001"),
     ),
 )
@@ -190,8 +184,13 @@ resp, err := ec.Echo(ctx, &echov1.EchoRequest{Msg: "hi"})
 
 ```go
 cli, err := client.New(
+    argos.WithTransportRegistry(tr),
+    argos.WithFramingRegistry(fr),
+    argos.WithCodecRegistry(co),
     argos.WithServiceName("echo.v1.EchoService"),
-    argos.WithProtocol(grpcbinding.New()),
+    argos.WithTransportName(transport.NameHTTP2),
+    argos.WithFramingName(framing.NameGRPC),
+    argos.WithCodecName(codec.NameProtobuf),
     argos.WithTarget("ip://127.0.0.1:7001"),
 )
 defer cli.Close()
@@ -200,7 +199,7 @@ st, err := cli.Open(ctx, echov1.EchoService_Echo)
 
 多传输示例见 `example/echo`（grpc / envelope×tcp|ws|udp / wholebody×http1）。收门资产：`example/resp`、`example/synth`。
 
-自定义组合：填 `argos.Protocol` 三个工厂，与 `binding/grpc.New` 同型——不必改 `client`/`server`。
+自定义组合：在 `WithService` 里分别 `ServiceTransport` / `ServiceFraming` / `ServiceCodec`（或三个 `*Name`），不必改 `client`/`server`。
 
 ### 4.4 调用收尾（用法约定）
 
@@ -235,10 +234,10 @@ cli, err := client.New(
 
 - **构造时快照并校验**：`client.New` / `server.New` 各自 clone 一份，之后改原对象不影响已建实例；改进程默认对象必须在建任何实例之前（否则是 data race）。
 - **零值 = 默认**；要显式关掉可选限额用 `argos.Disabled`（仅 `MaxIdleSessions` / `SessionIdleTimeout` / `MaxSessionLifetime` 接受，其余字段给 `Disabled` 直接报错）。
-- **端不匹配的 Option 编译期拒绝**：`argos.Option` 两端通用（含 `WithService`），`argos.ClientOption` 只进 `client.New`（`WithServiceName` / `WithTarget` / `WithProtocol` / `WithOpenFilter` / 会话池四项），`argos.ServerOption` 只进 `server.New`（`WithListenAddress` / `WithFilter` / 入站连接三项 / HTTP 两项）。同一份 `*Config` 仍可同时喂给两端。
-- 客户端服务选择的优先级：调用侧 `WithProtocol`（或单轴覆盖）/ `WithTarget` > `Services[name]`；服务名只来自 `WithServiceName`，不随 `WithConfig` 从别的 Client 继承。
+- **端不匹配的 Option 编译期拒绝**：`argos.Option` 两端通用（含 `WithService`），`argos.ClientOption` 只进 `client.New`（`WithServiceName` / `WithTarget` / 三轴 `With*` 或 `JoinClient` / `WithOpenFilter` / 会话池四项），`argos.ServerOption` 只进 `server.New`（`WithListenAddress` / `WithFilter` / 入站连接三项 / HTTP 两项）。同一份 `*Config` 仍可同时喂给两端。
+- 客户端服务选择的优先级：调用侧三轴覆盖 / `WithTarget` > `Services[name]`；服务名只来自 `WithServiceName`，不随 `WithConfig` 从别的 Client 继承。
 - `server.New` 不返回 error：被拒的 Option 组合由 `Run` 报出；`Run` 为每个已 Register 的服务在 `Services` 里启动对应监听。
-- TLS / 压缩在 `binding/grpc.New` 的 Option 里，不在根包。
+- TLS 在 `transport/http2` 的 Option；gRPC 压缩在 `framing/grpc` 的 Option，不在根包。
 
 ### 默认值
 

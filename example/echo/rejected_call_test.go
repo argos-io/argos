@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
-	envelopebinding "github.com/argos-io/argos/binding/envelope"
 	"github.com/argos-io/argos/framing/envelope"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport"
@@ -47,7 +46,8 @@ func TestRejectedCallKeepsConnectionUsable(t *testing.T) {
 	// startEcho keeps the listen address to itself, and a raw peer has to dial
 	// the same server the real client talks to, so pull the address out of the
 	// binding the composition layer builds.
-	ec := startEcho(t, rec.wrap(envelopebinding.NewTCP()))
+	tFn, fFn, cFn := envelopeTCPAxes()
+	ec := startEcho(t, rec.wrapTransport(tFn), fFn, cFn)
 
 	raw, err := net.Dial("tcp", rec.addr(t))
 	if err != nil {
@@ -128,24 +128,20 @@ type listenAddrRecorder struct {
 // the same factory to both the server binding and the client's dialing
 // binding, and only the server-side transport ever binds a listener, so the
 // first recorded transport is the one with an address.
-func (r *listenAddrRecorder) wrap(preset argos.Protocol) argos.Protocol {
-	return argos.Protocol{
-		Transport: func() (transport.Transport, error) {
-			tr, err := preset.Transport()
-			if err != nil {
-				return nil, err
+func (r *listenAddrRecorder) wrapTransport(base argos.TransportFunc) argos.TransportFunc {
+	return func() (transport.Transport, error) {
+		tr, err := base()
+		if err != nil {
+			return nil, err
+		}
+		if a, ok := tr.(hasAddr); ok {
+			r.mu.Lock()
+			if r.tr == nil {
+				r.tr = a
 			}
-			if a, ok := tr.(hasAddr); ok {
-				r.mu.Lock()
-				if r.tr == nil {
-					r.tr = a
-				}
-				r.mu.Unlock()
-			}
-			return tr, nil
-		},
-		Framing: preset.Framing,
-		Codec:   preset.Codec,
+			r.mu.Unlock()
+		}
+		return tr, nil
 	}
 }
 

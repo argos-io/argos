@@ -77,7 +77,7 @@ func TestRecvKeepsStreamResultWhenCancelRaces(t *testing.T) {
 						once: &once, result: tc.result, payload: tc.payload,
 					}, nil
 				}),
-				argos.WithProtocol(sequentialLoopback(t, &dials)),
+				sequentialLoopback(t, &dials),
 				argos.WithTarget(testTarget),
 			)
 			if err != nil {

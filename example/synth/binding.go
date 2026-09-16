@@ -44,12 +44,34 @@ var (
 	_ codec.Named = rawCodec{}
 )
 
-// NewTCP returns a Protocol preset for synth Framing × tcp (Sequential).
-func NewTCP(opts ...Option) argos.Protocol {
+func tcpFactories(opts ...Option) (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
 	captured := append([]Option(nil), opts...)
-	return argos.Protocol{
-		Transport: func() (transport.Transport, error) { return tcp.New(), nil },
-		Framing:   func() (framing.Framing, error) { return New(captured...), nil },
-		Codec:     func() (codec.Codec, error) { return rawCodec{}, nil },
-	}
+	return argos.TransportFunc(func() (transport.Transport, error) { return tcp.New(), nil }),
+		argos.FramingFunc(func() (framing.Framing, error) { return New(captured...), nil }),
+		argos.CodecFunc(func() (codec.Codec, error) { return rawCodec{}, nil })
+}
+
+// ServiceTCP installs synth × tcp on a service entry.
+func ServiceTCP(opts ...Option) argos.ServiceOption {
+	t, f, c := tcpFactories(opts...)
+	return argos.JoinService(
+		argos.ServiceTransport(t),
+		argos.ServiceFraming(f),
+		argos.ServiceCodec(c),
+	)
+}
+
+// ClientTCP is the call-site preset for synth × tcp.
+func ClientTCP(opts ...Option) argos.ClientOption {
+	t, f, c := tcpFactories(opts...)
+	return argos.JoinClient(
+		argos.WithTransport(t),
+		argos.WithFraming(f),
+		argos.WithCodec(c),
+	)
+}
+
+// TCPAxes returns the three factories (tests that wrap transport).
+func TCPAxes(opts ...Option) (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
+	return tcpFactories(opts...)
 }

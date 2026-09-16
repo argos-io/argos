@@ -316,7 +316,6 @@ func assertTransitiveNoGRPC(t *testing.T, label string, patterns ...string) {
 	}
 	forbidden := []string{
 		modulePath + "/framing/grpc",
-		modulePath + "/binding/grpc",
 		modulePath + "/compressor",
 		"google.golang.org/genproto",
 	}

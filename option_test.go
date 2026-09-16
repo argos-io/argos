@@ -37,7 +37,7 @@ func TestWithServiceStoresProtocolAndTarget(t *testing.T) {
 	cfg, err := argos.ClientConfig(
 		argos.WithConfig(&argos.Config{}),
 		argos.WithService("echo.v1.EchoService",
-			argos.ServiceProtocol(markerProtocol(1)),
+			markerCodec(1),
 			argos.ServiceTarget("ip://127.0.0.1:7001")),
 		argos.WithService("other.Svc",
 			argos.ServiceTarget("ip://127.0.0.1:7002")),
@@ -63,7 +63,7 @@ func TestWithServiceMergesIntoExistingEntry(t *testing.T) {
 	cfg, err := argos.ClientConfig(
 		argos.WithConfig(&argos.Config{
 			Services: map[string]argos.ServiceConfig{
-				"echo.v1.EchoService": {Protocol: markerProtocol(1)},
+				"echo.v1.EchoService": {Codec: stubCodecFactory(1)},
 			},
 		}),
 		argos.WithService("echo.v1.EchoService", argos.ServiceTarget("ip://127.0.0.1:7001")),
@@ -191,7 +191,7 @@ func TestSelectedServiceLayering(t *testing.T) {
 	t.Parallel()
 	const service = "echo.v1.EchoService"
 	entry := argos.WithService(service,
-		argos.ServiceProtocol(markerProtocol(2)),
+		markerCodec(2),
 		argos.ServiceTarget("ip://127.0.0.1:7001"))
 
 	for _, tc := range []struct {
@@ -212,7 +212,7 @@ func TestSelectedServiceLayering(t *testing.T) {
 			name: "call site beats the services entry",
 			opts: []argos.ClientOption{
 				argos.WithServiceName(service), entry,
-				argos.WithProtocol(markerProtocol(3)),
+				argos.WithCodec(stubCodecFactory(3)),
 				argos.WithTarget("ip://127.0.0.1:9999"),
 			},
 			wantName:   service,
@@ -257,7 +257,7 @@ func TestSelectionNotInheritedThroughWithConfig(t *testing.T) {
 	first, err := argos.ClientConfig(
 		argos.WithServiceName("echo.v1.EchoService"),
 		argos.WithTarget("ip://127.0.0.1:7001"),
-		argos.WithProtocol(markerProtocol(1)),
+		argos.WithCodec(stubCodecFactory(1)),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -417,10 +417,12 @@ func noopOpenFilter() filter.OpenFilter {
 	}
 }
 
-func markerProtocol(id int) argos.Protocol {
-	return argos.Protocol{
-		Codec: func() (codec.Codec, error) { return &stubCodec{id: id}, nil },
-	}
+func stubCodecFactory(id int) argos.CodecFunc {
+	return func() (codec.Codec, error) { return &stubCodec{id: id}, nil }
+}
+
+func markerCodec(id int) argos.ServiceOption {
+	return argos.ServiceCodec(stubCodecFactory(id))
 }
 
 func protocolCodecID(t *testing.T, sc argos.ServiceConfig) int {

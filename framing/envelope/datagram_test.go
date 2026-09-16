@@ -384,7 +384,7 @@ func TestBindingNewRejectsOversizedUDP(t *testing.T) {
 		MaxMessageSize: 4 << 20,
 		MaxFrameSize:   4 << 20,
 	}
-	p := argos.Protocol{
+	sc := argos.ServiceConfig{
 		Transport: func() (transport.Transport, error) { return udp.New(), nil },
 		Framing: func() (framing.Framing, error) {
 			if err := envelope.CheckDatagramLimits(cfg.MaxFrameSize, cfg.MaxMessageSize, udp.MaxDatagramSize); err != nil {
@@ -394,7 +394,7 @@ func TestBindingNewRejectsOversizedUDP(t *testing.T) {
 		},
 		Codec: func() (codec.Codec, error) { return rawCodec{}, nil },
 	}
-	_, _, _, err := p.Assemble()
+	_, _, _, err := sc.Assemble()
 	if err == nil {
 		t.Fatal("Assemble: want size-gate error")
 	}

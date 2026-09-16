@@ -25,7 +25,7 @@ func TestCallStreamLeakReturnsAdmission(t *testing.T) {
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(slots),
 		argos.WithMaxBufferedBytes(slots*16*1024*1024),
-		argos.WithProtocol(freshLoopback(t, nil, nil, nil)),
+		freshLoopback(t, nil, nil, nil),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
@@ -71,7 +71,7 @@ func TestHeaderReportsCancellationAfterCancelledRecv(t *testing.T) {
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
-		argos.WithProtocol(freshLoopback(t, nil, nil, nil)),
+		freshLoopback(t, nil, nil, nil),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {

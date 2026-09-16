@@ -1,17 +1,18 @@
-package codec
+package framing
 
 import "fmt"
 
-// Well-known codec names for configuration.
+// Well-known framing names for configuration.
 const (
-	NameProtobuf = "protobuf"
-	NameJSON     = "json"
+	NameEnvelope  = "envelope"
+	NameGRPC      = "grpc"
+	NameWholebody = "wholebody"
 )
 
-// Factory builds a Codec.
-type Factory func() (Codec, error)
+// Factory builds a Framing. It must not Dial or Serve.
+type Factory func() (Framing, error)
 
-// Registry maps names to codec factories.
+// Registry maps names to framing factories.
 type Registry struct {
 	m map[string]Factory
 }
@@ -24,20 +25,20 @@ func NewRegistry() *Registry {
 // Register records name -> factory.
 func (r *Registry) Register(name string, fn Factory) error {
 	if r == nil {
-		return fmt.Errorf("codec: nil Registry")
+		return fmt.Errorf("framing: nil Registry")
 	}
 	if name == "" {
-		return fmt.Errorf("codec: empty name")
+		return fmt.Errorf("framing: empty name")
 	}
 	if fn == nil {
-		return fmt.Errorf("codec: nil Factory for %q", name)
+		return fmt.Errorf("framing: nil Factory for %q", name)
 	}
 	if r.m == nil {
 		r.m = make(map[string]Factory)
 	}
 	if existing, ok := r.m[name]; ok {
 		if fmt.Sprintf("%p", existing) != fmt.Sprintf("%p", fn) {
-			return fmt.Errorf("codec: %q already registered", name)
+			return fmt.Errorf("framing: %q already registered", name)
 		}
 		return nil
 	}
@@ -48,11 +49,11 @@ func (r *Registry) Register(name string, fn Factory) error {
 // Lookup returns the factory for name.
 func (r *Registry) Lookup(name string) (Factory, error) {
 	if r == nil || r.m == nil {
-		return nil, fmt.Errorf("codec: %q not registered", name)
+		return nil, fmt.Errorf("framing: %q not registered", name)
 	}
 	fn, ok := r.m[name]
 	if !ok {
-		return nil, fmt.Errorf("codec: %q not registered", name)
+		return nil, fmt.Errorf("framing: %q not registered", name)
 	}
 	return fn, nil
 }

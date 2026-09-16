@@ -16,10 +16,6 @@ func New() codec.Codec { return codecImpl{} }
 
 func (codecImpl) CodecName() string { return "json" }
 
-func init() {
-	codec.Register("json", New)
-}
-
 func (codecImpl) Marshal(v any) ([]byte, error) {
 	m, err := asMessage(v)
 	if err != nil {

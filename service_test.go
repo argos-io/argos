@@ -11,35 +11,37 @@ import (
 	"github.com/argos-io/argos/transport"
 )
 
-func TestProtocolAssembleReturnsIndependentInstances(t *testing.T) {
+func TestServiceConfigAssembleReturnsIndependentInstances(t *testing.T) {
 	t.Parallel()
 	var n atomic.Int64
-	p := argos.Protocol{
-		Transport: func() (transport.Transport, error) {
-			id := int(n.Add(1))
-			return &stubTransport{id: id}, nil
-		},
-		Framing: func() (framing.Framing, error) {
-			id := int(n.Add(1))
-			return &stubFraming{id: id}, nil
-		},
-		Codec: func() (codec.Codec, error) {
-			id := int(n.Add(1))
-			return &stubCodec{id: id}, nil
-		},
+	transportFn := func() (transport.Transport, error) {
+		id := int(n.Add(1))
+		return &stubTransport{id: id}, nil
+	}
+	framingFn := func() (framing.Framing, error) {
+		id := int(n.Add(1))
+		return &stubFraming{id: id}, nil
+	}
+	codecFn := func() (codec.Codec, error) {
+		id := int(n.Add(1))
+		return &stubCodec{id: id}, nil
 	}
 
 	cfg, err := argos.ClientConfig(
 		argos.WithConfig(&argos.Config{}),
 		argos.WithServiceName("echo.v1.EchoService"),
-		argos.WithProtocol(p),
+		argos.JoinClient(
+			argos.WithTransport(transportFn),
+			argos.WithFraming(framingFn),
+			argos.WithCodec(codecFn),
+		),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, sel := cfg.SelectedService()
 	if sel.Transport == nil || sel.Framing == nil || sel.Codec == nil {
-		t.Fatal("protocol not stored")
+		t.Fatal("axes not stored")
 	}
 
 	tr1, fr1, co1, err := sel.Assemble()

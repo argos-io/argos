@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/framing"
@@ -31,17 +32,15 @@ func TestProtocolAssembleOncePerServerStart(t *testing.T) {
 		return st.Send(req)
 	}
 
-	protocol := argos.Protocol{
-		Transport: func() (transport.Transport, error) {
-			calls.Add(1)
-			return tr, nil
-		},
-		Framing: func() (framing.Framing, error) { return fr, nil },
-		Codec:   testProtocol(tr, fr).Codec,
-	}
-
 	srv := server.New(argos.WithService(svcName,
-		argos.ServiceProtocol(protocol),
+		argos.JoinService(
+			argos.ServiceTransport(func() (transport.Transport, error) {
+				calls.Add(1)
+				return tr, nil
+			}),
+			argos.ServiceFraming(func() (framing.Framing, error) { return fr, nil }),
+			argos.ServiceCodec(func() (codec.Codec, error) { return rawCodec{}, nil }),
+		),
 		argos.ServiceListenAddress("127.0.0.1:0"),
 	))
 	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: h}); err != nil {
@@ -155,19 +154,19 @@ func TestFactoryIsolationAcrossListeners(t *testing.T) {
 	tr1, tr2 := newTestTransport(), newTestTransport()
 	fr1, fr2 := fake.NewFraming(framing.Sequential), fake.NewFraming(framing.Sequential)
 
-	mk := func(tr transport.Transport, fr framing.Framing) argos.Protocol {
-		return argos.Protocol{
-			Transport: func() (transport.Transport, error) {
+	listenerAxes := func(tr transport.Transport, fr framing.Framing) argos.ServiceOption {
+		return argos.JoinService(
+			argos.ServiceTransport(func() (transport.Transport, error) {
 				calls.Add(1)
 				return tr, nil
-			},
-			Framing: func() (framing.Framing, error) { return fr, nil },
-			Codec:   testProtocol(tr, fr).Codec,
-		}
+			}),
+			argos.ServiceFraming(func() (framing.Framing, error) { return fr, nil }),
+			argos.ServiceCodec(func() (codec.Codec, error) { return rawCodec{}, nil }),
+		)
 	}
 	srv := server.New(argos.WithService(svcName,
-		argos.ServiceListener("127.0.0.1:1", mk(tr1, fr1)),
-		argos.ServiceListener("127.0.0.1:2", mk(tr2, fr2)),
+		argos.ServiceListener("127.0.0.1:1", listenerAxes(tr1, fr1)),
+		argos.ServiceListener("127.0.0.1:2", listenerAxes(tr2, fr2)),
 	))
 	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
 		return nil
@@ -190,7 +189,7 @@ func TestRejectedOptionsSurfaceFromRun(t *testing.T) {
 	fr := fake.NewFraming(framing.Sequential)
 	srv := server.New(
 		argos.WithMaxConcurrentCalls(-5),
-		argos.WithService(svcName, argos.ServiceProtocol(testProtocol(tr, fr)), argos.ServiceListenAddress("127.0.0.1:0")),
+		argos.WithService(svcName, testServiceAxes(tr, fr), argos.ServiceListenAddress("127.0.0.1:0")),
 	)
 	t.Cleanup(func() { _ = srv.Close() })
 

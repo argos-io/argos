@@ -13,12 +13,11 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
-	grpcbinding "github.com/argos-io/argos/binding/grpc"
-	"github.com/argos-io/argos/binding/grpc/internal/testpb"
 	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/compressor/gzip"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
+	"github.com/argos-io/argos/framing/grpc/internal/testpb"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/status"
@@ -253,7 +252,7 @@ type argosServer struct {
 	tr   *argoshttp2.Transport
 }
 
-func startArgosEchoServer(t *testing.T, bindOpts []grpcbinding.Option, extra ...argos.ServerOption) *argosServer {
+func startArgosEchoServer(t *testing.T, bindOpts []composeOpt, extra ...argos.ServerOption) *argosServer {
 	t.Helper()
 	// The session limits are client-only, so what used to be one option list
 	// for this server is now a Config plus the server-side extras the caller
@@ -270,11 +269,9 @@ func startArgosEchoServer(t *testing.T, bindOpts []grpcbinding.Option, extra ...
 
 	var srvTr *argoshttp2.Transport
 	bound := make(chan struct{})
-	preset := grpcbinding.New(bindOpts...)
-	ep := grpcServerProtocol(preset, &srvTr, bound)
 	srv := server.New(append(append([]argos.ServerOption{argos.WithConfig(cfg)}, extra...),
 		argos.WithService(interopService,
-			argos.ServiceProtocol(ep),
+			grpcServerService(bindOpts, &srvTr, bound),
 			argos.ServiceListenAddress(cfg.ListenAddress),
 		))...)
 	if err := srv.Register(interopDesc(), argosEchoHandlers()); err != nil {
@@ -291,7 +288,7 @@ func startArgosEchoServer(t *testing.T, bindOpts []grpcbinding.Option, extra ...
 	return &argosServer{srv: srv, addr: addr, tr: srvTr}
 }
 
-func newArgosClient(t *testing.T, addr string, bindOpts []grpcbinding.Option, extra ...argos.ClientOption) *client.Client {
+func newArgosClient(t *testing.T, addr string, bindOpts []composeOpt, extra ...argos.ClientOption) *client.Client {
 	t.Helper()
 	cfg := &argos.Config{
 		MaxConcurrentCalls:     64,
@@ -299,10 +296,15 @@ func newArgosClient(t *testing.T, addr string, bindOpts []grpcbinding.Option, ex
 		MaxIdleSessions:        8,
 		MaxSessionsPerEndpoint: 8,
 	}
+	tFn, fFn, cFn := axesFrom(bindOpts...)
 	cli, err := client.New(append([]argos.ClientOption{
 		argos.WithConfig(cfg),
 		argos.WithServiceName(interopService),
-		argos.WithProtocol(grpcbinding.New(bindOpts...)),
+		argos.JoinClient(
+			argos.WithTransport(tFn),
+			argos.WithFraming(fFn),
+			argos.WithCodec(cFn),
+		),
 		argos.WithTarget("ip://" + addr),
 	}, extra...)...)
 	if err != nil {
@@ -468,20 +470,20 @@ func interopTransports(t *testing.T) []interopTransport {
 	}
 }
 
-func (tr interopTransport) argosServerOpts() []grpcbinding.Option {
+func (tr interopTransport) argosServerOpts() []composeOpt {
 	if tr.srvTLS == nil {
 		return nil
 	}
-	return []grpcbinding.Option{grpcbinding.WithServerTLS(tr.srvTLS)}
+	return []composeOpt{WithServerTLS(tr.srvTLS)}
 }
 
-func (tr interopTransport) argosClientOpts() []grpcbinding.Option {
+func (tr interopTransport) argosClientOpts() []composeOpt {
 	if tr.cliTLS == nil {
 		return nil
 	}
-	return []grpcbinding.Option{
-		grpcbinding.WithClientTLS(tr.cliTLS),
-		grpcbinding.WithAuthority("127.0.0.1"),
+	return []composeOpt{
+		WithClientTLS(tr.cliTLS),
+		WithAuthority("127.0.0.1"),
 	}
 }
 
@@ -958,9 +960,9 @@ func TestInteropDetailsAdoptMessage(t *testing.T) {
 // --- gzip smoke both directions ---
 
 func TestInteropGzipSmoke(t *testing.T) {
-	compOpts := []grpcbinding.Option{
-		grpcbinding.WithCompressor(gzip.New()),
-		grpcbinding.WithSendCompressor(gzip.Name),
+	compOpts := []composeOpt{
+		WithCompressor(gzip.New()),
+		WithSendCompressor(gzip.Name),
 	}
 
 	t.Run("argos_server_grpcgo_client", func(t *testing.T) {

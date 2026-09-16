@@ -8,57 +8,19 @@ import (
 	"github.com/argos-io/argos/transport"
 )
 
-// Protocol is Transport × Framing × Codec. Each axis is a factory: every Client
-// and every server listen surface invokes them once and owns the result.
-type Protocol struct {
-	Transport TransportFunc
-	Framing   FramingFunc
-	Codec     CodecFunc
-	// TransportName, FramingName and CodecName select registered factories on
-	// Config when the matching factory field is nil (text configuration).
+// ServiceConfig holds per-service settings: Transport, Framing and Codec (each
+// a factory or a registered name), client target, and server listen address(es).
+// Populate via WithService; Clients select an entry with WithServiceName, and
+// server.Run materialises listeners for every registered service that has a
+// complete entry here.
+type ServiceConfig struct {
+	Transport     TransportFunc
+	Framing       FramingFunc
+	Codec         CodecFunc
 	TransportName string
 	FramingName   string
 	CodecName     string
-}
 
-// Assemble builds fresh instances. Factories must not Dial or Serve.
-func (p Protocol) Assemble() (transport.Transport, framing.Framing, codec.Codec, error) {
-	if p.Transport == nil || p.Framing == nil || p.Codec == nil {
-		return nil, nil, nil, fmt.Errorf("argos: incomplete protocol (Transport, Framing, Codec required)")
-	}
-	tr, err := p.Transport()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	fr, err := p.Framing()
-	if err != nil {
-		if tr != nil {
-			_ = tr.Close()
-		}
-		return nil, nil, nil, err
-	}
-	cd, err := p.Codec()
-	if err != nil {
-		if tr != nil {
-			_ = tr.Close()
-		}
-		if c, ok := fr.(interface{ Close() error }); ok {
-			_ = c.Close()
-		}
-		return nil, nil, nil, err
-	}
-	if tr == nil || fr == nil || cd == nil {
-		return nil, nil, nil, fmt.Errorf("argos: protocol factory returned nil component")
-	}
-	return tr, fr, cd, nil
-}
-
-// ServiceConfig holds per-service settings: protocol (Transport × Framing × Codec),
-// client target, and server listen address(es). Populate via WithService; Clients
-// select an entry with WithServiceName, and server.Run materialises listeners for
-// every registered service that has a complete entry here.
-type ServiceConfig struct {
-	Protocol
 	Target        string // client dial target (e.g. ip://host:port)
 	ListenAddress string // server bind when Listeners is empty
 
@@ -66,8 +28,8 @@ type ServiceConfig struct {
 }
 
 type serviceListen struct {
-	address  string
-	protocol Protocol
+	address string
+	axes    ServiceConfig // transport / framing / codec (+ names) for this surface
 }
 
 // ServiceOption configures one ServiceConfig entry during WithService.
@@ -78,6 +40,17 @@ type ServiceOption interface {
 type serviceOptionFunc func(*ServiceConfig)
 
 func (f serviceOptionFunc) applyService(sc *ServiceConfig) { f(sc) }
+
+// JoinService applies several service options in order (typical preset).
+func JoinService(opts ...ServiceOption) ServiceOption {
+	return serviceOptionFunc(func(sc *ServiceConfig) {
+		for _, o := range opts {
+			if o != nil {
+				o.applyService(sc)
+			}
+		}
+	})
+}
 
 // ServiceTransport sets the transport factory for a service entry.
 func ServiceTransport(fn TransportFunc) ServiceOption {
@@ -109,11 +82,6 @@ func ServiceCodecName(name string) ServiceOption {
 	return serviceOptionFunc(func(sc *ServiceConfig) { sc.CodecName = name })
 }
 
-// ServiceProtocol sets all three axes at once (typical preset).
-func ServiceProtocol(p Protocol) ServiceOption {
-	return serviceOptionFunc(func(sc *ServiceConfig) { sc.Protocol = p })
-}
-
 // ServiceTarget sets the client dial target (e.g. ip://127.0.0.1:7001).
 func ServiceTarget(target string) ServiceOption {
 	return serviceOptionFunc(func(sc *ServiceConfig) { sc.Target = target })
@@ -125,22 +93,30 @@ func ServiceListenAddress(addr string) ServiceOption {
 	return serviceOptionFunc(func(sc *ServiceConfig) { sc.ListenAddress = addr })
 }
 
-// ServiceListener adds a server listen surface for this service (protocol + address).
-// Use multiple listeners to expose the same registered impl on several transports.
-func ServiceListener(address string, p Protocol) ServiceOption {
+// ServiceListener adds a server listen surface for this service (address +
+// per-listener transport / framing / codec options). Use multiple listeners to
+// expose the same registered impl on several transports.
+func ServiceListener(address string, opts ...ServiceOption) ServiceOption {
 	return serviceOptionFunc(func(sc *ServiceConfig) {
-		sc.listeners = append(sc.listeners, serviceListen{address: address, protocol: p})
+		var l serviceListen
+		l.address = address
+		for _, o := range opts {
+			if o != nil {
+				o.applyService(&l.axes)
+			}
+		}
+		sc.listeners = append(sc.listeners, l)
 	})
 }
 
 // ServiceListenPlan is one server listen surface derived from ServiceConfig.
 type ServiceListenPlan struct {
-	Address  string
-	Protocol Protocol
+	Address string
+	Axes    ServiceConfig
 }
 
 // ServerListenPlans returns listen surfaces for this service (server-side).
-// cfg resolves named axes before checking completeness.
+// cfg resolves registered names before checking completeness.
 func (sc ServiceConfig) ServerListenPlans(cfg *Config, fallbackListen string) ([]ServiceListenPlan, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("argos: nil Config")
@@ -148,7 +124,7 @@ func (sc ServiceConfig) ServerListenPlans(cfg *Config, fallbackListen string) ([
 	if len(sc.listeners) > 0 {
 		out := make([]ServiceListenPlan, 0, len(sc.listeners))
 		for _, l := range sc.listeners {
-			p, err := cfg.ResolveProtocol(l.protocol)
+			axes, err := cfg.ResolveService(l.axes)
 			if err != nil {
 				return nil, fmt.Errorf("listener %q: %w", l.address, err)
 			}
@@ -159,11 +135,11 @@ func (sc ServiceConfig) ServerListenPlans(cfg *Config, fallbackListen string) ([
 			if addr == "" {
 				return nil, fmt.Errorf("listener missing address (set ServiceListenAddress or Config.ListenAddress)")
 			}
-			out = append(out, ServiceListenPlan{Address: addr, Protocol: p})
+			out = append(out, ServiceListenPlan{Address: addr, Axes: axes})
 		}
 		return out, nil
 	}
-	p, err := cfg.ResolveProtocol(sc.Protocol)
+	axes, err := cfg.ResolveService(sc)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +150,40 @@ func (sc ServiceConfig) ServerListenPlans(cfg *Config, fallbackListen string) ([
 	if addr == "" {
 		return nil, fmt.Errorf("missing listen address (ServiceListenAddress or Config.ListenAddress)")
 	}
-	return []ServiceListenPlan{{Address: addr, Protocol: p}}, nil
+	return []ServiceListenPlan{{Address: addr, Axes: axes}}, nil
+}
+
+// Assemble builds fresh Transport, Framing and Codec instances. Call after
+// ResolveService; factories must not Dial or Serve.
+func (sc ServiceConfig) Assemble() (transport.Transport, framing.Framing, codec.Codec, error) {
+	if sc.Transport == nil || sc.Framing == nil || sc.Codec == nil {
+		return nil, nil, nil, fmt.Errorf("argos: incomplete service axes (Transport, Framing, Codec required)")
+	}
+	tr, err := sc.Transport()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	fr, err := sc.Framing()
+	if err != nil {
+		if tr != nil {
+			_ = tr.Close()
+		}
+		return nil, nil, nil, err
+	}
+	cd, err := sc.Codec()
+	if err != nil {
+		if tr != nil {
+			_ = tr.Close()
+		}
+		if c, ok := fr.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+		return nil, nil, nil, err
+	}
+	if tr == nil || fr == nil || cd == nil {
+		return nil, nil, nil, fmt.Errorf("argos: axis factory returned nil component")
+	}
+	return tr, fr, cd, nil
 }
 
 func cloneServiceConfig(sc ServiceConfig) ServiceConfig {
@@ -185,10 +194,10 @@ func cloneServiceConfig(sc ServiceConfig) ServiceConfig {
 	return out
 }
 
-// ProtocolListenKey identifies a deduplicated listen surface (address + axes).
-func ProtocolListenKey(addr string, p Protocol) string {
-	if p.Transport != nil || p.Framing != nil || p.Codec != nil {
-		return fmt.Sprintf("%s|%p|%p|%p", addr, p.Transport, p.Framing, p.Codec)
+// ServiceListenKey identifies a deduplicated listen surface (address + axes).
+func ServiceListenKey(addr string, sc ServiceConfig) string {
+	if sc.Transport != nil || sc.Framing != nil || sc.Codec != nil {
+		return fmt.Sprintf("%s|%p|%p|%p", addr, sc.Transport, sc.Framing, sc.Codec)
 	}
-	return fmt.Sprintf("%s|%s|%s|%s", addr, p.TransportName, p.FramingName, p.CodecName)
+	return fmt.Sprintf("%s|%s|%s|%s", addr, sc.TransportName, sc.FramingName, sc.CodecName)
 }

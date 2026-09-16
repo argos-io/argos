@@ -20,7 +20,7 @@ import (
 // the session; they are not per-call overrides.
 //
 // Only protocol-agnostic limits belong here. Compression is a framing/grpc
-// construction concern injected by binding/grpc Options (§3.1-10); Config
+// construction concern for gRPC framing (§3.1-10); Config
 // must not grow compression fields.
 type Config struct {
 	MaxMessageSize  int64

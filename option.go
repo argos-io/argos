@@ -3,7 +3,10 @@ package argos
 import (
 	"time"
 
+	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/filter"
+	"github.com/argos-io/argos/framing"
+	"github.com/argos-io/argos/transport"
 )
 
 // ClientOption configures one Client. The apply method is unexported so the
@@ -79,7 +82,7 @@ func WithTarget(target string) ClientOption {
 // service. It wins over the Services entry.
 func WithTransport(fn TransportFunc) ClientOption {
 	return clientOption(func(c *Config) {
-		c.protocolOverrides.Transport = fn
+		c.overrideTransport = fn
 		c.hasTransportOverride = true
 	})
 }
@@ -87,7 +90,7 @@ func WithTransport(fn TransportFunc) ClientOption {
 // WithFraming overrides the framing factory for this Client's selected service.
 func WithFraming(fn FramingFunc) ClientOption {
 	return clientOption(func(c *Config) {
-		c.protocolOverrides.Framing = fn
+		c.overrideFraming = fn
 		c.hasFramingOverride = true
 	})
 }
@@ -95,20 +98,48 @@ func WithFraming(fn FramingFunc) ClientOption {
 // WithCodec overrides the codec factory for this Client's selected service.
 func WithCodec(fn CodecFunc) ClientOption {
 	return clientOption(func(c *Config) {
-		c.protocolOverrides.Codec = fn
+		c.overrideCodec = fn
 		c.hasCodecOverride = true
 	})
 }
 
-// WithProtocol overrides all three protocol factories for this Client's
-// selected service (typical preset at the call site).
-func WithProtocol(p Protocol) ClientOption {
+// WithTransportName overrides the transport registry name for this Client.
+func WithTransportName(name string) ClientOption {
 	return clientOption(func(c *Config) {
-		c.protocolOverrides = p
-		c.hasTransportOverride = p.Transport != nil
-		c.hasFramingOverride = p.Framing != nil
-		c.hasCodecOverride = p.Codec != nil
+		c.overrideTransportName = name
+		c.hasTransportNameOverride = true
 	})
+}
+
+// WithFramingName overrides the framing registry name for this Client.
+func WithFramingName(name string) ClientOption {
+	return clientOption(func(c *Config) {
+		c.overrideFramingName = name
+		c.hasFramingNameOverride = true
+	})
+}
+
+// WithCodecName overrides the codec registry name for this Client.
+func WithCodecName(name string) ClientOption {
+	return clientOption(func(c *Config) {
+		c.overrideCodecName = name
+		c.hasCodecNameOverride = true
+	})
+}
+
+type joinClientOption []ClientOption
+
+func (j joinClientOption) applyClient(c *Config) {
+	for _, o := range j {
+		if o != nil {
+			o.applyClient(c)
+		}
+	}
+}
+
+// JoinClient applies several client options in order.
+func JoinClient(opts ...ClientOption) ClientOption {
+	return joinClientOption(opts)
 }
 
 // WithFilter appends a server-side Filter (outermost first when chained later).
@@ -123,6 +154,21 @@ func WithOpenFilter(f filter.OpenFilter) ClientOption {
 	return clientOption(func(c *Config) {
 		c.OpenFilters = append(c.OpenFilters, f)
 	})
+}
+
+// WithTransportRegistry attaches a transport name registry for ServiceTransportName.
+func WithTransportRegistry(r *transport.Registry) Option {
+	return option(func(c *Config) { c.transportReg = r })
+}
+
+// WithFramingRegistry attaches a framing name registry for ServiceFramingName.
+func WithFramingRegistry(r *framing.Registry) Option {
+	return option(func(c *Config) { c.framingReg = r })
+}
+
+// WithCodecRegistry attaches a codec name registry for ServiceCodecName.
+func WithCodecRegistry(r *codec.Registry) Option {
+	return option(func(c *Config) { c.codecReg = r })
 }
 
 // WithService stores or merges per-service settings under fullName (IDL full

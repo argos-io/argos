@@ -43,9 +43,9 @@ type Server struct {
 }
 
 type listenReg struct {
-	protocol argos.Protocol
-	cfg      *argos.Config
-	name     string
+	axes argos.ServiceConfig
+	cfg  *argos.Config
+	name string
 }
 
 type routeEntry struct {
@@ -172,7 +172,7 @@ func (s *Server) Run(ctx context.Context) error {
 	lives := make([]*liveBinding, 0, len(regs))
 	var startErr error
 	for _, reg := range regs {
-		tr, fr, cd, err := reg.protocol.Assemble()
+		tr, fr, cd, err := reg.axes.Assemble()
 		if err != nil {
 			startErr = fmt.Errorf("server: listen %q: %w", reg.name, err)
 			break
@@ -412,7 +412,7 @@ func (s *Server) buildListenRegs() ([]listenReg, error) {
 			return nil, fmt.Errorf("server: service %q: %w", svcName, err)
 		}
 		for i, plan := range plans {
-			key := argos.ProtocolListenKey(plan.Address, plan.Protocol)
+			key := argos.ServiceListenKey(plan.Address, plan.Axes)
 			if _, dup := seen[key]; dup {
 				continue
 			}
@@ -423,9 +423,9 @@ func (s *Server) buildListenRegs() ([]listenReg, error) {
 				cfg.ListenAddress = plan.Address
 			}
 			regs = append(regs, listenReg{
-				protocol: plan.Protocol,
-				cfg:      cfg,
-				name:     fmt.Sprintf("%s-%d", svcName, i),
+				axes: plan.Axes,
+				cfg:  cfg,
+				name: fmt.Sprintf("%s-%d", svcName, i),
 			})
 		}
 	}

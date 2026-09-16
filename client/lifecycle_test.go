@@ -18,9 +18,9 @@ import (
 	"github.com/argos-io/argos/transport"
 )
 
-// freshLoopback returns a Protocol whose Assemble builds a new Transport×Framing
+// freshLoopback returns a client preset whose Assemble builds a new Transport×Framing
 // pair (factory-once / isolation tests).
-func freshLoopback(t *testing.T, factoryCalls *atomic.Int64, dialed *[]*fake.ByteConn, dialMu *sync.Mutex) argos.Protocol {
+func freshLoopback(t *testing.T, factoryCalls *atomic.Int64, dialed *[]*fake.ByteConn, dialMu *sync.Mutex) argos.ClientOption {
 	t.Helper()
 	var current atomic.Pointer[loopbackPair]
 	build := func() *loopbackPair {
@@ -44,32 +44,31 @@ func freshLoopback(t *testing.T, factoryCalls *atomic.Int64, dialed *[]*fake.Byt
 		current.Store(p)
 		return p
 	}
-	return argos.Protocol{
-		Transport: func() (transport.Transport, error) {
+	return argos.JoinClient(
+		argos.WithTransport(func() (transport.Transport, error) {
 			if p := current.Load(); p != nil {
 				return p.tr, nil
 			}
 			return build().tr, nil
-		},
-		Framing: func() (framing.Framing, error) {
+		}),
+		argos.WithFraming(func() (framing.Framing, error) {
 			if p := current.Load(); p != nil {
 				return p.f, nil
 			}
 			return build().f, nil
-		},
-		Codec: func() (codec.Codec, error) { return bytesCodec{}, nil },
-	}
+		}),
+		argos.WithCodec(func() (codec.Codec, error) { return bytesCodec{}, nil }),
+	)
 }
 
 func TestProtocolAssembleOncePerClient(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int64
-	protocol := freshLoopback(t, &calls, nil, nil)
 	cli, err := client.New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
-		argos.WithProtocol(protocol),
+		freshLoopback(t, &calls, nil, nil),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
@@ -98,8 +97,8 @@ func TestClientsFromSameFactoryIsolated(t *testing.T) {
 	var framings []*fake.Framing
 	var mu sync.Mutex
 
-	protocol := argos.Protocol{
-		Transport: func() (transport.Transport, error) {
+	isolatedPreset := argos.JoinClient(
+		argos.WithTransport(func() (transport.Transport, error) {
 			calls.Add(1)
 			f := fake.NewFraming(framing.Sequential)
 			tr := &loopTransport{
@@ -114,15 +113,15 @@ func TestClientsFromSameFactoryIsolated(t *testing.T) {
 			framings = append(framings, f)
 			mu.Unlock()
 			return tr, nil
-		},
-		Framing: func() (framing.Framing, error) {
+		}),
+		argos.WithFraming(func() (framing.Framing, error) {
 			mu.Lock()
 			fr := framings[len(framings)-1]
 			mu.Unlock()
 			return fr, nil
-		},
-		Codec: func() (codec.Codec, error) { return bytesCodec{}, nil },
-	}
+		}),
+		argos.WithCodec(func() (codec.Codec, error) { return bytesCodec{}, nil }),
+	)
 
 	cfg := &argos.Config{
 		MaxConcurrentCalls: 4,
@@ -130,12 +129,12 @@ func TestClientsFromSameFactoryIsolated(t *testing.T) {
 	}
 
 	cli1, err := client.New(argos.WithConfig(cfg),
-		argos.WithServiceName(testService), argos.WithTarget(testTarget), argos.WithProtocol(protocol))
+		argos.WithServiceName(testService), argos.WithTarget(testTarget), isolatedPreset)
 	if err != nil {
 		t.Fatalf("client.New #1: %v", err)
 	}
 	cli2, err := client.New(argos.WithConfig(cfg),
-		argos.WithServiceName(testService), argos.WithTarget(testTarget), argos.WithProtocol(protocol))
+		argos.WithServiceName(testService), argos.WithTarget(testTarget), isolatedPreset)
 	if err != nil {
 		t.Fatalf("client.New #2: %v", err)
 	}
@@ -186,7 +185,7 @@ func TestCloseDrainsIdleSessions(t *testing.T) {
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithMaxIdleSessions(4),
-		argos.WithProtocol(fn),
+		fn,
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
@@ -250,7 +249,7 @@ func TestCallStreamLeakReportsPhaseLeak(t *testing.T) {
 				leaked.Store(true)
 			}
 		}),
-		argos.WithProtocol(freshLoopback(t, nil, nil, nil)),
+		freshLoopback(t, nil, nil, nil),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
@@ -349,7 +348,7 @@ func TestDroppedClientReleasesItsResources(t *testing.T) {
 				info.Store(ci)
 				reported.Store(true)
 			}),
-			argos.WithProtocol(fixedLoopback(tr, fake.NewFraming(framing.Sequential))),
+			fixedLoopback(tr, fake.NewFraming(framing.Sequential)),
 			argos.WithTarget(testTarget),
 		)
 		if err != nil {

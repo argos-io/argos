@@ -106,11 +106,11 @@ func New(opts ...argos.ClientOption) (*Client, error) {
 	}
 
 	target := sel.Target
-	protocol, err := cfg.ResolveProtocol(sel.Protocol)
+	axes, err := cfg.ResolveService(sel)
 	if err != nil {
 		return nil, fmt.Errorf("client: service %q: %w", service, err)
 	}
-	tr, fr, cd, err := protocol.Assemble()
+	tr, fr, cd, err := axes.Assemble()
 	if err != nil {
 		return nil, fmt.Errorf("client: service %q: %w", service, err)
 	}

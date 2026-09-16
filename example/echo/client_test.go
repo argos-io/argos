@@ -8,38 +8,34 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
-	envelopebinding "github.com/argos-io/argos/binding/envelope"
-	grpcbinding "github.com/argos-io/argos/binding/grpc"
-	wholebodybinding "github.com/argos-io/argos/binding/wholebody"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport/udp"
 )
 
 func TestClientEchoTransports(t *testing.T) {
 	cases := []struct {
-		name     string
-		protocol argos.Protocol
-		tune     func(*argos.Config)
+		name string
+		axes func() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc)
+		tune func(*argos.Config)
 	}{
-		{name: "grpc_http2", protocol: grpcbinding.New()},
-		{name: "envelope_tcp", protocol: envelopebinding.NewTCP()},
-		{name: "envelope_ws", protocol: envelopebinding.NewWS()},
+		{name: "grpc_http2", axes: grpcAxes},
+		{name: "envelope_tcp", axes: envelopeTCPAxes},
+		{name: "envelope_ws", axes: envelopeWSAxes},
 		{
-			name:     "envelope_udp",
-			protocol: envelopebinding.NewUDP(),
-			// A call has to fit in one datagram, and both ends must agree on
-			// that, which is what sharing the Config buys here.
+			name: "envelope_udp",
+			axes: envelopeUDPAxes,
 			tune: func(cfg *argos.Config) {
 				cfg.MaxFrameSize = udp.MaxDatagramSize
 				cfg.MaxMessageSize = 32 << 10
 			},
 		},
-		{name: "wholebody_http1", protocol: wholebodybinding.New()},
+		{name: "wholebody_http1", axes: wholebodyHTTP1Axes},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ec := startEcho(t, tc.protocol, tc.tune)
+			tr, fr, cd := tc.axes()
+			ec := startEcho(t, tr, fr, cd, tc.tune)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			resp, err := ec.Echo(ctx, &EchoRequest{Msg: tc.name})
@@ -55,17 +51,18 @@ func TestClientEchoTransports(t *testing.T) {
 
 func TestWatchStreaming(t *testing.T) {
 	cases := []struct {
-		name     string
-		protocol argos.Protocol
+		name string
+		axes func() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc)
 	}{
-		{name: "grpc_http2", protocol: grpcbinding.New()},
-		{name: "envelope_tcp", protocol: envelopebinding.NewTCP()},
-		{name: "envelope_ws", protocol: envelopebinding.NewWS()},
+		{name: "grpc_http2", axes: grpcAxes},
+		{name: "envelope_tcp", axes: envelopeTCPAxes},
+		{name: "envelope_ws", axes: envelopeWSAxes},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ec := startEcho(t, tc.protocol)
+			tr, fr, cd := tc.axes()
+			ec := startEcho(t, tr, fr, cd)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			stream, err := ec.Watch(ctx, &WatchRequest{Msg: tc.name})
@@ -93,19 +90,17 @@ func TestWatchStreaming(t *testing.T) {
 
 func TestClientMetadataPassesAuthFilter(t *testing.T) {
 	cases := []struct {
-		name     string
-		protocol argos.Protocol
+		name string
+		axes func() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc)
 	}{
-		{name: "grpc_http2", protocol: grpcbinding.New()},
-		{name: "envelope_tcp", protocol: envelopebinding.NewTCP()},
+		{name: "grpc_http2", axes: grpcAxes},
+		{name: "envelope_tcp", axes: envelopeTCPAxes},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ec := startEcho(t, tc.protocol, func(cfg *argos.Config) {
-				// The two chains are plain fields on the one Config both ends
-				// start from, so the server-side and client-side halves of
-				// this test's auth cannot drift apart.
+			tr, fr, cd := tc.axes()
+			ec := startEcho(t, tr, fr, cd, func(cfg *argos.Config) {
 				cfg.Filters = append(cfg.Filters, ServerAuth)
 				cfg.OpenFilters = append(cfg.OpenFilters, ClientAuth)
 			})
@@ -123,7 +118,8 @@ func TestClientMetadataPassesAuthFilter(t *testing.T) {
 }
 
 func TestServerAuthRejectsMissingToken(t *testing.T) {
-	ec := startEcho(t, grpcbinding.New(), func(cfg *argos.Config) {
+	tr, fr, cd := grpcAxes()
+	ec := startEcho(t, tr, fr, cd, func(cfg *argos.Config) {
 		cfg.Filters = append(cfg.Filters, ServerAuth)
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

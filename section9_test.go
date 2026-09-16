@@ -25,7 +25,7 @@ var section9Checklist = []section9Evidence{
 	// §9-1: milestone-0 probes → formal suites (probe/ deleted in 1.17).
 	{id: "§9-1a", title: "OpenStream before response headers", pkg: "./transport/http2", test: "TestOpenStreamReturnsBeforeResponseHeaders"},
 	{id: "§9-1b", title: "HTTP/1 OpenStream before response headers", pkg: "./transport/http1", test: "TestOpenStreamReturnsBeforeResponseHeaders"},
-	{id: "§9-1c", title: "gRPC interop smoke (h2c unary)", pkg: "./binding/grpc", test: "TestH2CUnaryEcho"},
+	{id: "§9-1c", title: "gRPC interop smoke (h2c unary)", pkg: "./framing/grpc", test: "TestH2CUnaryEcho"},
 	{id: "§9-1d", title: "envelope sequential N calls one dial", pkg: "./framing/envelope", test: "TestSequentialNCallsOneDial"},
 	{id: "§9-1e", title: "server AcceptCall loop survives handler error", pkg: "./server", test: "TestHandlerErrorDoesNotEndLoop"},
 	{id: "§9-1f", title: "Shutdown wakes idle AcceptCall", pkg: "./server", test: "TestShutdownIdleConnExitsQuickly"},
@@ -59,14 +59,14 @@ var section9Checklist = []section9Evidence{
 	{id: "§9-5e", title: "carrier hygiene: server drain residuals", pkg: "./framing/envelope", test: "TestServerDrainResidualsNextCall"},
 
 	// §9-6: gRPC interop formal gate.
-	{id: "§9-6a", title: "interop h2c unary echo", pkg: "./binding/grpc", test: "TestH2CUnaryEcho"},
-	{id: "§9-6b", title: "interop TLS/ALPN unary echo", pkg: "./binding/grpc", test: "TestTLSALPNUnaryEcho"},
-	{id: "§9-6c", title: "interop metadata binary + trailers", pkg: "./binding/grpc", test: "TestInteropMetadata_BinaryAndTrailers"},
-	{id: "§9-6d", title: "interop trailers-only", pkg: "./binding/grpc", test: "TestInteropTrailersOnly"},
-	{id: "§9-6e", title: "interop 4-shape × h2c/TLS", pkg: "./binding/grpc", test: "TestInteropOK_Shapes"},
-	{id: "§9-6f", title: "interop 17 codes × h2c/TLS unary", pkg: "./binding/grpc", test: "TestInteropStatusCodes_Unary"},
-	{id: "§9-6g", title: "interop zero-message client-stream × TLS", pkg: "./binding/grpc", test: "TestInteropZeroMessageClientStream"},
-	{id: "§9-6h", title: "interop half-close timing × TLS", pkg: "./binding/grpc", test: "TestInteropHalfCloseTiming"},
+	{id: "§9-6a", title: "interop h2c unary echo", pkg: "./framing/grpc", test: "TestH2CUnaryEcho"},
+	{id: "§9-6b", title: "interop TLS/ALPN unary echo", pkg: "./framing/grpc", test: "TestTLSALPNUnaryEcho"},
+	{id: "§9-6c", title: "interop metadata binary + trailers", pkg: "./framing/grpc", test: "TestInteropMetadata_BinaryAndTrailers"},
+	{id: "§9-6d", title: "interop trailers-only", pkg: "./framing/grpc", test: "TestInteropTrailersOnly"},
+	{id: "§9-6e", title: "interop 4-shape × h2c/TLS", pkg: "./framing/grpc", test: "TestInteropOK_Shapes"},
+	{id: "§9-6f", title: "interop 17 codes × h2c/TLS unary", pkg: "./framing/grpc", test: "TestInteropStatusCodes_Unary"},
+	{id: "§9-6g", title: "interop zero-message client-stream × TLS", pkg: "./framing/grpc", test: "TestInteropZeroMessageClientStream"},
+	{id: "§9-6h", title: "interop half-close timing × TLS", pkg: "./framing/grpc", test: "TestInteropHalfCloseTiming"},
 	{id: "§9-6i", title: "gRPC MaxMessageSize boundary", pkg: "./framing/grpc", test: "TestMaxMessageSizeBoundary"},
 	{id: "§9-6j", title: "gRPC compression bomb MaxMessageSize", pkg: "./framing/grpc", test: "TestCompressionBombMaxMessageSize", softGap: "custom Compressor↔grpc-go adapter and details conflict/corrupt remain framing-level only; not re-duplicated as full interop cells"},
 

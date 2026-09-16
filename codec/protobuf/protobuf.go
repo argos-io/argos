@@ -15,10 +15,6 @@ func New() codec.Codec { return codecImpl{} }
 
 func (codecImpl) CodecName() string { return "protobuf" }
 
-func init() {
-	codec.Register("protobuf", New)
-}
-
 func (codecImpl) Marshal(v any) ([]byte, error) {
 	m, err := asMessage(v)
 	if err != nil {

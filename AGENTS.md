@@ -27,12 +27,11 @@ compressor/  compressor/{gzip,grpccodec}/
 stream/  filter/
 resolver/  resolver/ip/
 client/  server/
-binding/  binding/{envelope,grpc,wholebody}/
 internal/fake/  internal/sessionpool/  internal/httpstatus/
 internal/codegen/  internal/codegen/{ir,frontend,gen,stub,check}/
 cmd/argos/
 example/{echo,resp,synth}/
-argos 根包（Config/Option/Protocol）
+argos 根包（Config/Option/ServiceConfig）
 Makefile · .github/workflows/ci.yml · invariants_test.go
 ```
 

@@ -45,16 +45,15 @@ func testConfig() *argos.Config {
 	}
 }
 
-func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ...argos.ServerOption) (addr string, preset argos.Protocol) {
+func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ...argos.ServerOption) (addr string, baseT argos.TransportFunc, baseF argos.FramingFunc, baseC argos.CodecFunc) {
 	t.Helper()
-	preset = NewTCP()
+	baseT, baseF, baseC = TCPAxes()
 	var addrTr hasAddr
 	bound := make(chan struct{})
 	tc := testConfig()
-	ep := synthServerProtocol(preset, &addrTr, bound)
 	srv := server.New(append(append([]argos.ServerOption{argos.WithConfig(tc)}, extra...),
 		argos.WithService(ServiceName,
-			argos.ServiceProtocol(ep),
+			synthServerService(baseT, baseF, baseC, &addrTr, bound),
 			argos.ServiceListenAddress(tc.ListenAddress),
 		))...)
 
@@ -78,36 +77,36 @@ func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ..
 		if a := addrTr.Addr(); a != nil {
 			addr = a.String()
 			t.Cleanup(func() { _ = srv.Close() })
-			return addr, preset
+			return addr, baseT, baseF, baseC
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("listener not ready")
-	return "", argos.Protocol{}
+	return "", nil, nil, nil
 }
 
-func countingClientProtocol(preset argos.Protocol, dials *atomic.Int64) argos.Protocol {
-	return argos.Protocol{
-		Transport: func() (transport.Transport, error) {
-			tr, err := preset.Transport()
+func countingClient(baseT argos.TransportFunc, baseF argos.FramingFunc, baseC argos.CodecFunc, dials *atomic.Int64) argos.ClientOption {
+	return argos.JoinClient(
+		argos.WithTransport(func() (transport.Transport, error) {
+			tr, err := baseT()
 			if err != nil {
 				return nil, err
 			}
 			return &countingTransport{Transport: tr, dials: dials}, nil
-		},
-		Framing: preset.Framing,
-		Codec:   preset.Codec,
-	}
+		}),
+		argos.WithFraming(baseF),
+		argos.WithCodec(baseC),
+	)
 }
 
-func synthServerProtocol(preset argos.Protocol, addrOut *hasAddr, bound chan struct{}) argos.Protocol {
+func synthServerService(baseT argos.TransportFunc, baseF argos.FramingFunc, baseC argos.CodecFunc, addrOut *hasAddr, bound chan struct{}) argos.ServiceOption {
 	var tr transport.Transport
-	return argos.Protocol{
-		Transport: func() (transport.Transport, error) {
+	return argos.JoinService(
+		argos.ServiceTransport(func() (transport.Transport, error) {
 			if tr != nil {
 				return tr, nil
 			}
-			got, err := preset.Transport()
+			got, err := baseT()
 			if err != nil {
 				return nil, err
 			}
@@ -123,18 +122,18 @@ func synthServerProtocol(preset argos.Protocol, addrOut *hasAddr, bound chan str
 				close(bound)
 			}
 			return tr, nil
-		},
-		Framing: preset.Framing,
-		Codec:   preset.Codec,
-	}
+		}),
+		argos.ServiceFraming(baseF),
+		argos.ServiceCodec(baseC),
+	)
 }
 
-func newSynthClient(t *testing.T, addr string, preset argos.Protocol, extra ...argos.ClientOption) *client.Client {
+func newSynthClient(t *testing.T, addr string, preset argos.ClientOption, extra ...argos.ClientOption) *client.Client {
 	t.Helper()
 	cli, err := client.New(append([]argos.ClientOption{
 		argos.WithConfig(testConfig()),
 		argos.WithServiceName(ServiceName),
-		argos.WithProtocol(preset),
+		preset,
 		argos.WithTarget("ip://" + addr),
 	}, extra...)...)
 	if err != nil {
@@ -285,8 +284,8 @@ func TestCustomMethodFieldRouting(t *testing.T) {
 			return status.Error(status.Unimplemented, "not in this test")
 		},
 	}
-	addr, preset := startSynthServer(t, handlers)
-	cli := newSynthClient(t, addr, preset)
+	addr, _, _, _ := startSynthServer(t, handlers)
+	cli := newSynthClient(t, addr, ClientTCP())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -383,8 +382,8 @@ func TestSendHeadersUnimplemented(t *testing.T) {
 		"Echo":      func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 		"Exclusive": func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 	}
-	addr, preset := startSynthServer(t, handlers)
-	cli := newSynthClient(t, addr, preset)
+	addr, _, _, _ := startSynthServer(t, handlers)
+	cli := newSynthClient(t, addr, ClientTCP())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cs, err := cli.Open(ctx, descriptor.MustMethod(MethodPing, descriptor.Unary))
@@ -438,8 +437,8 @@ func TestConnStateFromContext(t *testing.T) {
 		"Echo":      func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 		"Exclusive": func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 	}
-	addr, preset := startSynthServer(t, handlers)
-	cli := newSynthClient(t, addr, preset)
+	addr, _, _, _ := startSynthServer(t, handlers)
+	cli := newSynthClient(t, addr, ClientTCP())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cs, err := cli.Open(ctx, descriptor.MustMethod(MethodPing, descriptor.Unary))
@@ -536,14 +535,14 @@ func TestExclusiveKeepsConnectionOutOfPool(t *testing.T) {
 	}
 
 	var dials atomic.Int64
-	base := NewTCP()
-	clientPreset := countingClientProtocol(base, &dials)
+	baseT, baseF, baseC := TCPAxes()
+	clientPreset := countingClient(baseT, baseF, baseC, &dials)
 
 	var addrTr hasAddr
 	bound := make(chan struct{})
 	tc := testConfig()
 	srv := server.New(argos.WithConfig(tc), argos.WithService(ServiceName,
-		argos.ServiceProtocol(synthServerProtocol(base, &addrTr, bound)),
+		synthServerService(baseT, baseF, baseC, &addrTr, bound),
 		argos.ServiceListenAddress(tc.ListenAddress),
 	))
 	methods := []descriptor.Method{
@@ -636,8 +635,8 @@ func TestSequentialReuseAfterPing(t *testing.T) {
 		"Exclusive": func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 	}
 	var dials atomic.Int64
-	addr, preset := startSynthServer(t, handlers)
-	cli := newSynthClient(t, addr, countingClientProtocol(preset, &dials))
+	addr, baseT, baseF, baseC := startSynthServer(t, handlers)
+	cli := newSynthClient(t, addr, countingClient(baseT, baseF, baseC, &dials))
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
 		cs, err := cli.Open(ctx, descriptor.MustMethod(MethodPing, descriptor.Unary))

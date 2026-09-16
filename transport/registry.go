@@ -1,17 +1,21 @@
-package codec
+package transport
 
 import "fmt"
 
-// Well-known codec names for configuration.
+// Well-known transport names for configuration.
 const (
-	NameProtobuf = "protobuf"
-	NameJSON     = "json"
+	NameTCP   = "tcp"
+	NameWS    = "ws"
+	NameUDP   = "udp"
+	NameHTTP1 = "http1"
+	NameHTTP2 = "http2"
 )
 
-// Factory builds a Codec.
-type Factory func() (Codec, error)
+// Factory builds a Transport. It must not Dial or Serve.
+type Factory func() (Transport, error)
 
-// Registry maps names to codec factories.
+// Registry maps names to transport factories. Populate at the program edge
+// (main, tests) via concrete package Register functions.
 type Registry struct {
 	m map[string]Factory
 }
@@ -21,23 +25,24 @@ func NewRegistry() *Registry {
 	return &Registry{m: make(map[string]Factory)}
 }
 
-// Register records name -> factory.
+// Register records name -> factory. Same name and same factory pointer is a
+// no-op; a different factory returns an error.
 func (r *Registry) Register(name string, fn Factory) error {
 	if r == nil {
-		return fmt.Errorf("codec: nil Registry")
+		return fmt.Errorf("transport: nil Registry")
 	}
 	if name == "" {
-		return fmt.Errorf("codec: empty name")
+		return fmt.Errorf("transport: empty name")
 	}
 	if fn == nil {
-		return fmt.Errorf("codec: nil Factory for %q", name)
+		return fmt.Errorf("transport: nil Factory for %q", name)
 	}
 	if r.m == nil {
 		r.m = make(map[string]Factory)
 	}
 	if existing, ok := r.m[name]; ok {
 		if fmt.Sprintf("%p", existing) != fmt.Sprintf("%p", fn) {
-			return fmt.Errorf("codec: %q already registered", name)
+			return fmt.Errorf("transport: %q already registered", name)
 		}
 		return nil
 	}
@@ -48,11 +53,11 @@ func (r *Registry) Register(name string, fn Factory) error {
 // Lookup returns the factory for name.
 func (r *Registry) Lookup(name string) (Factory, error) {
 	if r == nil || r.m == nil {
-		return nil, fmt.Errorf("codec: %q not registered", name)
+		return nil, fmt.Errorf("transport: %q not registered", name)
 	}
 	fn, ok := r.m[name]
 	if !ok {
-		return nil, fmt.Errorf("codec: %q not registered", name)
+		return nil, fmt.Errorf("transport: %q not registered", name)
 	}
 	return fn, nil
 }

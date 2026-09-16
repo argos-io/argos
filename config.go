@@ -5,7 +5,10 @@ import (
 	"math"
 	"time"
 
+	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/filter"
+	"github.com/argos-io/argos/framing"
+	"github.com/argos-io/argos/transport"
 )
 
 const (
@@ -83,10 +86,10 @@ type Config struct {
 	// server.Run starts listeners declared for each registered service.
 	Services map[string]ServiceConfig
 
-	// Named axis factories for text configuration (RegisterTransport / Lookup).
-	transportRegistry map[string]TransportFunc
-	framingRegistry   map[string]FramingFunc
-	codecRegistry     map[string]CodecFunc
+	// Axis registries for name resolution (set via WithTransportRegistry, …).
+	transportReg *transport.Registry
+	framingReg   *framing.Registry
+	codecReg     *codec.Registry
 
 	// CallErrorObserver receives per-call local transport errors (§7.5).
 	CallErrorObserver func(CallInfo, error)
@@ -95,15 +98,23 @@ type Config struct {
 	// that contract is enforced by server, not here.
 	ConnErrorObserver func(ConnInfo, error)
 
-	// serviceName, targetOverride and protocolOverrides hold call-site choices
-	// for one Client. They are not exported: a shared Config has no single
-	// service name, and Clone must not inherit another Client's selection.
-	serviceName          string
-	targetOverride       string
-	protocolOverrides    Protocol
-	hasTransportOverride bool
-	hasFramingOverride   bool
-	hasCodecOverride     bool
+	// serviceName, targetOverride and axis overrides hold call-site choices for
+	// one Client. They are not exported: a shared Config has no single service
+	// name, and Clone must not inherit another Client's selection.
+	serviceName              string
+	targetOverride           string
+	overrideTransport        TransportFunc
+	overrideFraming          FramingFunc
+	overrideCodec            CodecFunc
+	overrideTransportName    string
+	overrideFramingName      string
+	overrideCodecName        string
+	hasTransportOverride     bool
+	hasFramingOverride       bool
+	hasCodecOverride         bool
+	hasTransportNameOverride bool
+	hasFramingNameOverride   bool
+	hasCodecNameOverride     bool
 }
 
 // defaultConfig is the process-wide default. It is mutable on purpose: a
@@ -157,7 +168,7 @@ func Defaults() Config {
 // A nil receiver clones the built-in defaults.
 //
 // The copy carries no service selection: WithServiceName, WithTarget and
-// WithProtocol belong to the Client that named them, not to the configuration.
+// per-axis overrides belong to the Client that named them, not to the configuration.
 // Without this, a Config taken from one Client and reused as another's
 // WithConfig base would silently make the second Client open calls for the
 // first one's service, and the missing-service-name guard would never fire.
@@ -169,10 +180,18 @@ func (c *Config) Clone() *Config {
 	out := *c
 	out.serviceName = ""
 	out.targetOverride = ""
-	out.protocolOverrides = Protocol{}
+	out.overrideTransport = nil
+	out.overrideFraming = nil
+	out.overrideCodec = nil
+	out.overrideTransportName = ""
+	out.overrideFramingName = ""
+	out.overrideCodecName = ""
 	out.hasTransportOverride = false
 	out.hasFramingOverride = false
 	out.hasCodecOverride = false
+	out.hasTransportNameOverride = false
+	out.hasFramingNameOverride = false
+	out.hasCodecNameOverride = false
 	if c.Filters != nil {
 		out.Filters = append([]filter.Filter(nil), c.Filters...)
 	}
@@ -185,9 +204,9 @@ func (c *Config) Clone() *Config {
 			out.Services[k] = cloneServiceConfig(v)
 		}
 	}
-	out.transportRegistry = cloneRegistry(c.transportRegistry)
-	out.framingRegistry = cloneRegistry(c.framingRegistry)
-	out.codecRegistry = cloneRegistry(c.codecRegistry)
+	out.transportReg = c.transportReg.Clone()
+	out.framingReg = c.framingReg.Clone()
+	out.codecReg = c.codecReg.Clone()
 	return &out
 }
 
@@ -257,13 +276,22 @@ func (c *Config) SelectedService() (string, ServiceConfig) {
 		sel = sc
 	}
 	if c.hasTransportOverride {
-		sel.Transport = c.protocolOverrides.Transport
+		sel.Transport = c.overrideTransport
 	}
 	if c.hasFramingOverride {
-		sel.Framing = c.protocolOverrides.Framing
+		sel.Framing = c.overrideFraming
 	}
 	if c.hasCodecOverride {
-		sel.Codec = c.protocolOverrides.Codec
+		sel.Codec = c.overrideCodec
+	}
+	if c.hasTransportNameOverride {
+		sel.TransportName = c.overrideTransportName
+	}
+	if c.hasFramingNameOverride {
+		sel.FramingName = c.overrideFramingName
+	}
+	if c.hasCodecNameOverride {
+		sel.CodecName = c.overrideCodecName
 	}
 	if c.targetOverride != "" {
 		sel.Target = c.targetOverride

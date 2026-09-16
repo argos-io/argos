@@ -9,45 +9,58 @@ import (
 	"github.com/argos-io/argos/transport"
 )
 
-func TestNamedAxisRegistryLookup(t *testing.T) {
+func TestNamedAxisRegistryLookup_missingAxes(t *testing.T) {
 	t.Parallel()
-	cfg := argos.Defaults()
-	if err := cfg.RegisterTransport("test-tcp", argos.TransportFunc(func() (transport.Transport, error) {
+	tr := transport.NewRegistry()
+	if err := tr.Register("test-tcp", func() (transport.Transport, error) {
 		return &stubTransport{id: 1}, nil
-	})); err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cfg.LookupTransport("test-tcp"); err != nil {
+	cfg, err := argos.ClientConfig(
+		argos.WithTransportRegistry(tr),
+		argos.WithServiceName("svc"),
+		argos.WithService("svc",
+			argos.ServiceTransportName("test-tcp"),
+			argos.ServiceTarget("ip://127.0.0.1:9"),
+		),
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (&cfg).ResolveProtocol(argos.Protocol{TransportName: "test-tcp"}); err == nil {
-		t.Fatal("ResolveProtocol: want error for missing framing/codec")
+	_, sel := cfg.SelectedService()
+	if _, err := cfg.ResolveService(sel); err == nil {
+		t.Fatal("ResolveService: want error for missing framing/codec")
 	}
 }
 
 func TestServiceConfigByName(t *testing.T) {
 	t.Parallel()
 	var transportCalls int
-	base := argos.Defaults()
-	if err := base.RegisterTransport("loop", argos.TransportFunc(func() (transport.Transport, error) {
+	tr := transport.NewRegistry()
+	if err := tr.Register("loop", func() (transport.Transport, error) {
 		transportCalls++
 		return &stubTransport{id: 1}, nil
-	})); err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := base.RegisterFraming("loop", argos.FramingFunc(func() (framing.Framing, error) {
+	fr := framing.NewRegistry()
+	if err := fr.Register("loop", func() (framing.Framing, error) {
 		return &stubFraming{id: 1}, nil
-	})); err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := base.RegisterCodec("loop", argos.CodecFunc(func() (codec.Codec, error) {
+	co := codec.NewRegistry()
+	if err := co.Register("loop", func() (codec.Codec, error) {
 		return &stubCodec{id: 1}, nil
-	})); err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 
 	clientCfg, err := argos.ClientConfig(
-		argos.WithConfig(&base),
+		argos.WithTransportRegistry(tr),
+		argos.WithFramingRegistry(fr),
+		argos.WithCodecRegistry(co),
 		argos.WithServiceName("svc"),
 		argos.WithService("svc",
 			argos.ServiceTransportName("loop"),
@@ -60,11 +73,11 @@ func TestServiceConfigByName(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, sel := clientCfg.SelectedService()
-	p, err := clientCfg.ResolveProtocol(sel.Protocol)
+	axes, err := clientCfg.ResolveService(sel)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := p.Assemble(); err != nil {
+	if _, _, _, err := axes.Assemble(); err != nil {
 		t.Fatal(err)
 	}
 	if transportCalls != 1 {
