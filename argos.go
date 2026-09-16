@@ -1,18 +1,16 @@
-// Package argos holds Config, the Option sets that layer over it, and
-// BindingFunc.
+// Package argos holds Config, the Option sets that layer over it, and the
+// Transport / Framing / Codec factory types that make up a protocol.
 //
-// Config is a plain struct with a process-wide default behind DefaultConfig:
-// a program tunes it during start-up and every client.New / server.New that
-// names no Config of its own starts from it. A call site that needs something
-// else passes options — WithConfig to name a different base, or any of the
-// With* options to change single fields. Zero fields are filled with the
-// built-in defaults, so a Config literal only names what it changes.
+// Config is a plain struct with a process-wide default behind DefaultConfig.
+// Per-service client settings (protocol + target) live in Config.Services;
+// declarative server listen surfaces live in Config.Endpoints. Application
+// code registers implementations with server.Register; generated stubs call
+// client.New with WithServiceName.
 //
-// There is no protocol registry: BindingFunc constructs a fresh
-// Transport×Framing×Codec triple per Client/Binding; it must not Dial or
-// Serve. Configuration is code only — no file format, no reload.
+// There is no protocol registry: presets in binding/* fill ServiceConfig or
+// EndpointConfig in one shot so cross-axis values stay consistent. Configuration
+// is code only — no file format, no reload.
 //
-// Connection-dimension defaults (MaxIdleSessions, SessionIdleTimeout,
-// MaxSessionLifetime, MaxInboundConns, MaxInboundConnIdle, MaxInboundConnAge)
-// are confirmed by task 7.5 load evidence in example/resp/LOAD.md (§6.1).
+// Connection-dimension defaults are confirmed by task 7.5 load evidence in
+// example/resp/LOAD.md (§6.1).
 package argos

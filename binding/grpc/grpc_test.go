@@ -24,6 +24,7 @@ import (
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/stream"
+	"github.com/argos-io/argos/transport"
 	argoshttp2 "github.com/argos-io/argos/transport/http2"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
@@ -62,6 +63,43 @@ type harness struct {
 	srvTr  *argoshttp2.Transport
 }
 
+func grpcServerProtocol(preset argos.Protocol, srvTr **argoshttp2.Transport, bound chan struct{}) argos.Protocol {
+	var pair struct {
+		tr *argoshttp2.Transport
+	}
+	build := func() error {
+		tr, err := preset.Transport()
+		if err != nil {
+			return err
+		}
+		h2, ok := tr.(*argoshttp2.Transport)
+		if !ok {
+			return errors.New("binding/grpc test: Transport is not *http2.Transport")
+		}
+		pair.tr = h2
+		*srvTr = h2
+		select {
+		case <-bound:
+		default:
+			close(bound)
+		}
+		return nil
+	}
+	return argos.Protocol{
+		Transport: func() (transport.Transport, error) {
+			if pair.tr != nil {
+				return pair.tr, nil
+			}
+			if err := build(); err != nil {
+				return nil, err
+			}
+			return pair.tr, nil
+		},
+		Framing: preset.Framing,
+		Codec:   preset.Codec,
+	}
+}
+
 func waitAddr(t *testing.T, tr *argoshttp2.Transport) string {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -93,25 +131,10 @@ func startEcho(t *testing.T, srvOpts, cliOpts []grpcbinding.Option) *harness {
 
 	var srvTr *argoshttp2.Transport
 	bound := make(chan struct{})
-	srvFn := grpcbinding.New(srvOpts...)
+	preset := grpcbinding.New(srvOpts...)
 	srv := server.New(argos.WithConfig(cfg))
-	if err := srv.AddBinding(func() (argos.Binding, error) {
-		b, err := srvFn()
-		if err != nil {
-			return b, err
-		}
-		tr, ok := b.Transport.(*argoshttp2.Transport)
-		if !ok {
-			return argos.Binding{}, errors.New("binding/grpc test: Transport is not *http2.Transport")
-		}
-		srvTr = tr
-		select {
-		case <-bound:
-		default:
-			close(bound)
-		}
-		return b, nil
-	}); err != nil {
+	ep := grpcServerProtocol(preset, &srvTr, bound)
+	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: ep}); err != nil {
 		t.Fatal(err)
 	}
 	if err := srv.Register(echoDesc(), map[string]filter.Handler{"Echo": echoHandler}); err != nil {
@@ -121,7 +144,7 @@ func startEcho(t *testing.T, srvOpts, cliOpts []grpcbinding.Option) *harness {
 	select {
 	case <-bound:
 	case <-time.After(3 * time.Second):
-		t.Fatal("server BindingFunc not invoked")
+		t.Fatal("server protocol not assembled")
 	}
 	addr := waitAddr(t, srvTr)
 	t.Cleanup(func() { _ = srv.Close() })
@@ -129,7 +152,7 @@ func startEcho(t *testing.T, srvOpts, cliOpts []grpcbinding.Option) *harness {
 	cli, err := client.New(
 		argos.WithConfig(cfg),
 		argos.WithServiceName(echoService),
-		argos.WithBinding(grpcbinding.New(cliOpts...)),
+		argos.WithProtocol(grpcbinding.New(cliOpts...)),
 		argos.WithTarget("ip://"+addr),
 	)
 	if err != nil {
@@ -249,29 +272,29 @@ func TestCompressorGzipSmoke(t *testing.T) {
 	}
 }
 
-func TestBindingFuncIndependentInstances(t *testing.T) {
-	fn := grpcbinding.New(grpcbinding.WithCodec(protobuf.New()))
-	b1, err := fn()
+func TestProtocolAssembleIndependentInstances(t *testing.T) {
+	p := grpcbinding.New(grpcbinding.WithCodec(protobuf.New()))
+	tr1, fr1, _, err := p.Assemble()
 	if err != nil {
 		t.Fatal(err)
 	}
-	b2, err := fn()
+	tr2, fr2, _, err := p.Assemble()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b1.Transport == b2.Transport {
-		t.Fatal("Transport instances shared across BindingFunc calls")
+	if tr1 == tr2 {
+		t.Fatal("Transport instances shared across Assemble calls")
 	}
-	if b1.Framing == b2.Framing {
-		t.Fatal("Framing instances shared across BindingFunc calls")
+	if fr1 == fr2 {
+		t.Fatal("Framing instances shared across Assemble calls")
 	}
-	_ = b1.Transport.Close()
-	_ = b2.Transport.Close()
+	_ = tr1.Close()
+	_ = tr2.Close()
 }
 
 func TestSendCompressorRequiresInjection(t *testing.T) {
-	fn := grpcbinding.New(grpcbinding.WithSendCompressor(gzip.Name))
-	_, err := fn()
+	p := grpcbinding.New(grpcbinding.WithSendCompressor(gzip.Name))
+	_, err := p.Framing()
 	if err == nil {
 		t.Fatal("expected error when send compressor is not configured")
 	}

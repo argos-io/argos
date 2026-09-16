@@ -13,6 +13,7 @@ import (
 	envelopebinding "github.com/argos-io/argos/binding/envelope"
 	"github.com/argos-io/argos/framing/envelope"
 	"github.com/argos-io/argos/status"
+	"github.com/argos-io/argos/transport"
 )
 
 // The raw peer picks its own call ID; envelope×tcp carries the ID on every
@@ -127,22 +128,24 @@ type listenAddrRecorder struct {
 // the same factory to both the server binding and the client's dialing
 // binding, and only the server-side transport ever binds a listener, so the
 // first recorded transport is the one with an address.
-func (r *listenAddrRecorder) wrap(fn argos.BindingFunc) argos.BindingFunc {
-	return func() (argos.Binding, error) {
-		b, err := fn()
-		if err != nil {
-			return b, err
-		}
-		tr, ok := b.Transport.(hasAddr)
-		if !ok {
-			return b, nil
-		}
-		r.mu.Lock()
-		if r.tr == nil {
-			r.tr = tr
-		}
-		r.mu.Unlock()
-		return b, nil
+func (r *listenAddrRecorder) wrap(preset argos.Protocol) argos.Protocol {
+	return argos.Protocol{
+		Transport: func() (transport.Transport, error) {
+			tr, err := preset.Transport()
+			if err != nil {
+				return nil, err
+			}
+			if a, ok := tr.(hasAddr); ok {
+				r.mu.Lock()
+				if r.tr == nil {
+					r.tr = a
+				}
+				r.mu.Unlock()
+			}
+			return tr, nil
+		},
+		Framing: preset.Framing,
+		Codec:   preset.Codec,
 	}
 }
 

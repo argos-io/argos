@@ -45,29 +45,14 @@ func testConfig() *argos.Config {
 	}
 }
 
-func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ...argos.ServerOption) (addr string, fn argos.BindingFunc) {
+func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ...argos.ServerOption) (addr string, preset argos.Protocol) {
 	t.Helper()
-	fn = NewTCP()
+	preset = NewTCP()
 	var addrTr hasAddr
 	bound := make(chan struct{})
 	srv := server.New(append([]argos.ServerOption{argos.WithConfig(testConfig())}, extra...)...)
-	if err := srv.AddBinding(func() (argos.Binding, error) {
-		b, err := fn()
-		if err != nil {
-			return b, err
-		}
-		tr, ok := b.Transport.(hasAddr)
-		if !ok {
-			t.Fatal("tcp transport missing Addr()")
-		}
-		addrTr = tr
-		select {
-		case <-bound:
-		default:
-			close(bound)
-		}
-		return b, nil
-	}); err != nil {
+	ep := synthServerProtocol(preset, &addrTr, bound)
+	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: ep}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -84,27 +69,70 @@ func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ..
 	select {
 	case <-bound:
 	case <-time.After(3 * time.Second):
-		t.Fatal("BindingFunc not invoked")
+		t.Fatal("protocol not assembled")
 	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if a := addrTr.Addr(); a != nil {
 			addr = a.String()
 			t.Cleanup(func() { _ = srv.Close() })
-			return addr, fn
+			return addr, preset
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("listener not ready")
-	return "", nil
+	return "", argos.Protocol{}
 }
 
-func newSynthClient(t *testing.T, addr string, fn argos.BindingFunc, extra ...argos.ClientOption) *client.Client {
+func countingClientProtocol(preset argos.Protocol, dials *atomic.Int64) argos.Protocol {
+	return argos.Protocol{
+		Transport: func() (transport.Transport, error) {
+			tr, err := preset.Transport()
+			if err != nil {
+				return nil, err
+			}
+			return &countingTransport{Transport: tr, dials: dials}, nil
+		},
+		Framing: preset.Framing,
+		Codec:   preset.Codec,
+	}
+}
+
+func synthServerProtocol(preset argos.Protocol, addrOut *hasAddr, bound chan struct{}) argos.Protocol {
+	var tr transport.Transport
+	return argos.Protocol{
+		Transport: func() (transport.Transport, error) {
+			if tr != nil {
+				return tr, nil
+			}
+			got, err := preset.Transport()
+			if err != nil {
+				return nil, err
+			}
+			a, ok := got.(hasAddr)
+			if !ok {
+				return nil, errors.New("synth: tcp transport missing Addr()")
+			}
+			tr = got
+			*addrOut = a
+			select {
+			case <-bound:
+			default:
+				close(bound)
+			}
+			return tr, nil
+		},
+		Framing: preset.Framing,
+		Codec:   preset.Codec,
+	}
+}
+
+func newSynthClient(t *testing.T, addr string, preset argos.Protocol, extra ...argos.ClientOption) *client.Client {
 	t.Helper()
 	cli, err := client.New(append([]argos.ClientOption{
 		argos.WithConfig(testConfig()),
 		argos.WithServiceName(ServiceName),
-		argos.WithBinding(fn),
+		argos.WithProtocol(preset),
 		argos.WithTarget("ip://" + addr),
 	}, extra...)...)
 	if err != nil {
@@ -255,8 +283,8 @@ func TestCustomMethodFieldRouting(t *testing.T) {
 			return status.Error(status.Unimplemented, "not in this test")
 		},
 	}
-	addr, fn := startSynthServer(t, handlers)
-	cli := newSynthClient(t, addr, fn)
+	addr, preset := startSynthServer(t, handlers)
+	cli := newSynthClient(t, addr, preset)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -353,8 +381,8 @@ func TestSendHeadersUnimplemented(t *testing.T) {
 		"Echo":      func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 		"Exclusive": func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 	}
-	addr, fn := startSynthServer(t, handlers)
-	cli := newSynthClient(t, addr, fn)
+	addr, preset := startSynthServer(t, handlers)
+	cli := newSynthClient(t, addr, preset)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cs, err := cli.Open(ctx, descriptor.MustMethod(MethodPing, descriptor.Unary))
@@ -408,8 +436,8 @@ func TestConnStateFromContext(t *testing.T) {
 		"Echo":      func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 		"Exclusive": func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 	}
-	addr, fn := startSynthServer(t, handlers)
-	cli := newSynthClient(t, addr, fn)
+	addr, preset := startSynthServer(t, handlers)
+	cli := newSynthClient(t, addr, preset)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cs, err := cli.Open(ctx, descriptor.MustMethod(MethodPing, descriptor.Unary))
@@ -506,32 +534,13 @@ func TestExclusiveKeepsConnectionOutOfPool(t *testing.T) {
 	}
 
 	var dials atomic.Int64
-	fn := func() (argos.Binding, error) {
-		b, err := NewTCP()()
-		if err != nil {
-			return b, err
-		}
-		inner := b.Transport
-		b.Transport = &countingTransport{Transport: inner, dials: &dials}
-		return b, nil
-	}
+	base := NewTCP()
+	clientPreset := countingClientProtocol(base, &dials)
 
 	var addrTr hasAddr
 	bound := make(chan struct{})
 	srv := server.New(argos.WithConfig(testConfig()))
-	if err := srv.AddBinding(func() (argos.Binding, error) {
-		b, err := NewTCP()()
-		if err != nil {
-			return b, err
-		}
-		addrTr = b.Transport.(hasAddr)
-		select {
-		case <-bound:
-		default:
-			close(bound)
-		}
-		return b, nil
-	}); err != nil {
+	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: synthServerProtocol(base, &addrTr, bound)}); err != nil {
 		t.Fatal(err)
 	}
 	methods := []descriptor.Method{
@@ -551,7 +560,7 @@ func TestExclusiveKeepsConnectionOutOfPool(t *testing.T) {
 	addr := waitTCPAddr(t, addrTr.(transport.Transport))
 	t.Cleanup(func() { _ = srv.Close() })
 
-	cli := newSynthClient(t, addr, fn)
+	cli := newSynthClient(t, addr, clientPreset)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -624,16 +633,8 @@ func TestSequentialReuseAfterPing(t *testing.T) {
 		"Exclusive": func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 	}
 	var dials atomic.Int64
-	fn := func() (argos.Binding, error) {
-		b, err := NewTCP()()
-		if err != nil {
-			return b, err
-		}
-		b.Transport = &countingTransport{Transport: b.Transport, dials: &dials}
-		return b, nil
-	}
-	addr, _ := startSynthServer(t, handlers)
-	cli := newSynthClient(t, addr, fn)
+	addr, preset := startSynthServer(t, handlers)
+	cli := newSynthClient(t, addr, countingClientProtocol(preset, &dials))
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
 		cs, err := cli.Open(ctx, descriptor.MustMethod(MethodPing, descriptor.Unary))

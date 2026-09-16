@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/stream"
@@ -31,12 +32,12 @@ func TestWithFilterAndOpenFilterStored(t *testing.T) {
 	}
 }
 
-func TestWithServiceStoresBindingAndTarget(t *testing.T) {
+func TestWithServiceStoresProtocolAndTarget(t *testing.T) {
 	t.Parallel()
 	cfg, err := argos.ClientConfig(
 		argos.WithConfig(&argos.Config{}),
 		argos.WithService("echo.v1.EchoService",
-			argos.ServiceBinding(markerBinding(1)),
+			argos.ServiceProtocol(markerProtocol(1)),
 			argos.ServiceTarget("ip://127.0.0.1:7001")),
 		argos.WithService("other.Svc",
 			argos.ServiceTarget("ip://127.0.0.1:7002")),
@@ -45,24 +46,24 @@ func TestWithServiceStoresBindingAndTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	sc, ok := cfg.Services["echo.v1.EchoService"]
-	if !ok || sc.Binding == nil || sc.Target != "ip://127.0.0.1:7001" {
+	if !ok || sc.Codec == nil || sc.Target != "ip://127.0.0.1:7001" {
 		t.Fatalf("echo service: %+v ok=%v", sc, ok)
 	}
 	other, ok := cfg.Services["other.Svc"]
-	if !ok || other.Target != "ip://127.0.0.1:7002" || other.Binding != nil {
+	if !ok || other.Target != "ip://127.0.0.1:7002" || other.Codec != nil {
 		t.Fatalf("other service: %+v ok=%v", other, ok)
 	}
 }
 
-// TestWithServiceMergesIntoExistingEntry: a generated stub may name the Binding
-// and the caller only the Target, so the second WithService must not wipe the
-// half the first one filled in.
+// TestWithServiceMergesIntoExistingEntry: a generated stub may name the
+// protocol and the caller only the Target, so the second WithService must not
+// wipe the half the first one filled in.
 func TestWithServiceMergesIntoExistingEntry(t *testing.T) {
 	t.Parallel()
 	cfg, err := argos.ClientConfig(
 		argos.WithConfig(&argos.Config{
 			Services: map[string]argos.ServiceConfig{
-				"echo.v1.EchoService": {Binding: markerBinding(1)},
+				"echo.v1.EchoService": {Protocol: markerProtocol(1)},
 			},
 		}),
 		argos.WithService("echo.v1.EchoService", argos.ServiceTarget("ip://127.0.0.1:7001")),
@@ -74,8 +75,8 @@ func TestWithServiceMergesIntoExistingEntry(t *testing.T) {
 	if sc.Target != "ip://127.0.0.1:7001" {
 		t.Errorf("Target = %q", sc.Target)
 	}
-	if got := bindingID(t, sc.Binding); got != 1 {
-		t.Errorf("Binding id = %d, want the entry already in the base", got)
+	if got := protocolCodecID(t, sc); got != 1 {
+		t.Errorf("protocol id = %d, want the entry already in the base", got)
 	}
 }
 
@@ -189,9 +190,8 @@ func TestNilOptionRejected(t *testing.T) {
 func TestSelectedServiceLayering(t *testing.T) {
 	t.Parallel()
 	const service = "echo.v1.EchoService"
-	withFallback := argos.WithConfig(&argos.Config{Binding: markerBinding(1)})
 	entry := argos.WithService(service,
-		argos.ServiceBinding(markerBinding(2)),
+		argos.ServiceProtocol(markerProtocol(2)),
 		argos.ServiceTarget("ip://127.0.0.1:7001"))
 
 	for _, tc := range []struct {
@@ -202,14 +202,8 @@ func TestSelectedServiceLayering(t *testing.T) {
 		wantTarget string
 	}{
 		{
-			name:     "config binding is the floor",
-			opts:     []argos.ClientOption{withFallback, argos.WithServiceName(service)},
-			wantName: service,
-			wantID:   1,
-		},
-		{
-			name:       "services entry beats config binding",
-			opts:       []argos.ClientOption{withFallback, argos.WithServiceName(service), entry},
+			name:       "services entry supplies protocol and target",
+			opts:       []argos.ClientOption{argos.WithServiceName(service), entry},
 			wantName:   service,
 			wantID:     2,
 			wantTarget: "ip://127.0.0.1:7001",
@@ -217,8 +211,8 @@ func TestSelectedServiceLayering(t *testing.T) {
 		{
 			name: "call site beats the services entry",
 			opts: []argos.ClientOption{
-				withFallback, argos.WithServiceName(service), entry,
-				argos.WithBinding(markerBinding(3)),
+				argos.WithServiceName(service), entry,
+				argos.WithProtocol(markerProtocol(3)),
 				argos.WithTarget("ip://127.0.0.1:9999"),
 			},
 			wantName:   service,
@@ -229,9 +223,9 @@ func TestSelectedServiceLayering(t *testing.T) {
 			// No WithServiceName selects no entry at all, so the entry's Target
 			// stays out of the way instead of leaking into an unnamed Client.
 			name:     "no service name selects nothing",
-			opts:     []argos.ClientOption{withFallback, entry},
+			opts:     []argos.ClientOption{entry},
 			wantName: "",
-			wantID:   1,
+			wantID:   0,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -244,8 +238,8 @@ func TestSelectedServiceLayering(t *testing.T) {
 			if name != tc.wantName {
 				t.Errorf("service name = %q, want %q", name, tc.wantName)
 			}
-			if got := bindingID(t, sel.Binding); got != tc.wantID {
-				t.Errorf("Binding id = %d, want %d", got, tc.wantID)
+			if got := protocolCodecID(t, sel); got != tc.wantID {
+				t.Errorf("protocol id = %d, want %d", got, tc.wantID)
 			}
 			if sel.Target != tc.wantTarget {
 				t.Errorf("Target = %q, want %q", sel.Target, tc.wantTarget)
@@ -256,14 +250,14 @@ func TestSelectedServiceLayering(t *testing.T) {
 
 // A Config that one Client already built from carries that Client's call-site
 // selection. Reusing it as another Client's base used to hand over the service
-// name, target and Binding too, so the second Client silently opened calls for
+// name, target and protocol too, so the second Client silently opened calls for
 // the first one's service and the missing-service-name guard never fired.
 func TestSelectionNotInheritedThroughWithConfig(t *testing.T) {
 	t.Parallel()
 	first, err := argos.ClientConfig(
 		argos.WithServiceName("echo.v1.EchoService"),
 		argos.WithTarget("ip://127.0.0.1:7001"),
-		argos.WithBinding(markerBinding(1)),
+		argos.WithProtocol(markerProtocol(1)),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -279,8 +273,8 @@ func TestSelectionNotInheritedThroughWithConfig(t *testing.T) {
 	if sel.Target != "" {
 		t.Errorf("Target = %q, want none inherited", sel.Target)
 	}
-	if sel.Binding != nil {
-		t.Errorf("Binding id %d inherited from the other Client's call site", bindingID(t, sel.Binding))
+	if sel.Codec != nil {
+		t.Errorf("protocol id %d inherited from the other Client's call site", protocolCodecID(t, sel))
 	}
 }
 
@@ -422,27 +416,24 @@ func noopOpenFilter() filter.OpenFilter {
 	}
 }
 
-// markerBinding returns a BindingFunc identifiable by the id it stamps on what
-// it builds: BindingFunc values themselves cannot be compared, so layering
-// tests have to call the winner to find out which one it was.
-func markerBinding(id int) argos.BindingFunc {
-	return func() (argos.Binding, error) {
-		return argos.Binding{Codec: &stubCodec{id: id}}, nil
+func markerProtocol(id int) argos.Protocol {
+	return argos.Protocol{
+		Codec: func() (codec.Codec, error) { return &stubCodec{id: id}, nil },
 	}
 }
 
-func bindingID(t *testing.T, fn argos.BindingFunc) int {
+func protocolCodecID(t *testing.T, sc argos.ServiceConfig) int {
 	t.Helper()
-	if fn == nil {
-		t.Fatal("no BindingFunc selected")
+	if sc.Codec == nil {
+		return 0
 	}
-	b, err := fn()
+	cd, err := sc.Codec()
 	if err != nil {
-		t.Fatalf("BindingFunc: %v", err)
+		t.Fatalf("Codec factory: %v", err)
 	}
-	c, ok := b.Codec.(*stubCodec)
+	c, ok := cd.(*stubCodec)
 	if !ok {
-		t.Fatalf("Codec = %T, want *stubCodec", b.Codec)
+		t.Fatalf("Codec = %T, want *stubCodec", cd)
 	}
 	return c.id
 }

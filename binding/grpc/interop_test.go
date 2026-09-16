@@ -270,25 +270,10 @@ func startArgosEchoServer(t *testing.T, bindOpts []grpcbinding.Option, extra ...
 
 	var srvTr *argoshttp2.Transport
 	bound := make(chan struct{})
-	srvFn := grpcbinding.New(bindOpts...)
+	preset := grpcbinding.New(bindOpts...)
 	srv := server.New(append([]argos.ServerOption{argos.WithConfig(cfg)}, extra...)...)
-	if err := srv.AddBinding(func() (argos.Binding, error) {
-		b, err := srvFn()
-		if err != nil {
-			return b, err
-		}
-		tr, ok := b.Transport.(*argoshttp2.Transport)
-		if !ok {
-			return argos.Binding{}, errors.New("binding/grpc interop: Transport is not *http2.Transport")
-		}
-		srvTr = tr
-		select {
-		case <-bound:
-		default:
-			close(bound)
-		}
-		return b, nil
-	}); err != nil {
+	ep := grpcServerProtocol(preset, &srvTr, bound)
+	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: ep}); err != nil {
 		t.Fatal(err)
 	}
 	if err := srv.Register(interopDesc(), argosEchoHandlers()); err != nil {
@@ -298,7 +283,7 @@ func startArgosEchoServer(t *testing.T, bindOpts []grpcbinding.Option, extra ...
 	select {
 	case <-bound:
 	case <-time.After(3 * time.Second):
-		t.Fatal("argos server BindingFunc not invoked")
+		t.Fatal("argos server protocol not assembled")
 	}
 	addr := waitAddr(t, srvTr)
 	t.Cleanup(func() { _ = srv.Close() })
@@ -316,7 +301,7 @@ func newArgosClient(t *testing.T, addr string, bindOpts []grpcbinding.Option, ex
 	cli, err := client.New(append([]argos.ClientOption{
 		argos.WithConfig(cfg),
 		argos.WithServiceName(interopService),
-		argos.WithBinding(grpcbinding.New(bindOpts...)),
+		argos.WithProtocol(grpcbinding.New(bindOpts...)),
 		argos.WithTarget("ip://" + addr),
 	}, extra...)...)
 	if err != nil {

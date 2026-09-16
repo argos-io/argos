@@ -14,7 +14,7 @@ import (
 // how much one inbound message may allocate. The binding must refuse it rather
 // than forward it.
 func TestNegativeMaxReadBytesRejected(t *testing.T) {
-	_, err := bindenvelope.NewWS(bindenvelope.WithMaxReadBytes(-1))()
+	_, err := bindenvelope.NewWS(bindenvelope.WithMaxReadBytes(-1)).Transport()
 	if err == nil {
 		t.Fatal("NewWS accepted a negative read limit")
 	}
@@ -22,8 +22,7 @@ func TestNegativeMaxReadBytesRejected(t *testing.T) {
 		t.Fatalf("err = %v, want it to name the negative limit", err)
 	}
 
-	// Zero still means "keep the transport default".
-	if _, err := bindenvelope.NewWS(bindenvelope.WithMaxReadBytes(0))(); err != nil {
+	if _, err := bindenvelope.NewWS(bindenvelope.WithMaxReadBytes(0)).Transport(); err != nil {
 		t.Fatalf("NewWS with zero: %v", err)
 	}
 }
@@ -32,19 +31,17 @@ func TestNegativeMaxReadBytesRejected(t *testing.T) {
 // start and fail at the first large message, closing the connection with 1009
 // and taking unrelated calls with it.
 func TestFrameSizeAboveWSReadLimitRejectedAtStart(t *testing.T) {
-	b, err := bindenvelope.NewWS()()
+	_, fr, _, err := bindenvelope.NewWS().Assemble()
 	if err != nil {
 		t.Fatal(err)
 	}
-	checker, ok := b.Framing.(interface {
+	checker, ok := fr.(interface {
 		CheckConfig(framing.Config) error
 	})
 	if !ok {
 		t.Fatal("envelope Framing no longer exposes CheckConfig")
 	}
 
-	// Default ws read limit is DefaultMaxReadBytes; one frame needs the body
-	// plus the length prefix, so exactly at the limit is already too large.
 	over := ws.DefaultMaxReadBytes
 	if err := checker.CheckConfig(framing.Config{MaxFrameSize: over}); err == nil {
 		t.Fatalf("CheckConfig accepted MaxFrameSize %d against a %d read limit",
@@ -60,11 +57,11 @@ func TestFrameSizeAboveWSReadLimitRejectedAtStart(t *testing.T) {
 // The declared wire limit is opt-in: tcp has no per-message ceiling, so the
 // check must stay silent there.
 func TestNonWSBindingsHaveNoWireLimitCheck(t *testing.T) {
-	b, err := bindenvelope.NewTCP()()
+	_, fr, _, err := bindenvelope.NewTCP().Assemble()
 	if err != nil {
 		t.Fatal(err)
 	}
-	checker := b.Framing.(interface {
+	checker := fr.(interface {
 		CheckConfig(framing.Config) error
 	})
 	if err := checker.CheckConfig(framing.Config{MaxFrameSize: 1 << 30}); err != nil {
@@ -80,6 +77,6 @@ func TestMaxInboundWireBytesIgnoresNonPositive(t *testing.T) {
 		CheckConfig(framing.Config) error
 	})
 	if err := checker.CheckConfig(framing.Config{MaxFrameSize: 1 << 30}); err != nil {
-		t.Fatalf("zero wire limit should be inert: %v", err)
+		t.Fatalf("non-positive wire limit should opt out: %v", err)
 	}
 }

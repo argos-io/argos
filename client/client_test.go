@@ -12,6 +12,7 @@ import (
 
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/client"
+	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/framing"
@@ -73,26 +74,53 @@ func (t *loopTransport) Close() error {
 	return nil
 }
 
-// sequentialLoopback starts a fake Sequential server for each dialed BytePipe.
-func sequentialLoopback(t *testing.T, dials *atomic.Int64) argos.BindingFunc {
-	t.Helper()
-	f := fake.NewFraming(framing.Sequential)
-	tr := &loopTransport{
-		dial: func(ctx context.Context, endpoint string) (transport.Conn, error) {
-			if dials != nil {
-				dials.Add(1)
-			}
-			cli, srv := fake.BytePipe()
-			go runEchoServer(t, f, srv)
-			return cli, nil
-		},
+type loopbackPair struct {
+	tr *loopTransport
+	f  *fake.Framing
+}
+
+func fixedLoopback(tr transport.Transport, fr framing.Framing) argos.Protocol {
+	return argos.Protocol{
+		Transport: func() (transport.Transport, error) { return tr, nil },
+		Framing:   func() (framing.Framing, error) { return fr, nil },
+		Codec:     func() (codec.Codec, error) { return bytesCodec{}, nil },
 	}
-	return func() (argos.Binding, error) {
-		return argos.Binding{
-			Transport: tr,
-			Framing:   f,
-			Codec:     bytesCodec{},
-		}, nil
+}
+
+// sequentialLoopback starts a fake Sequential server for each dialed BytePipe.
+func sequentialLoopback(t *testing.T, dials *atomic.Int64) argos.Protocol {
+	t.Helper()
+	var current atomic.Pointer[loopbackPair]
+	build := func() *loopbackPair {
+		f := fake.NewFraming(framing.Sequential)
+		tr := &loopTransport{
+			dial: func(ctx context.Context, endpoint string) (transport.Conn, error) {
+				if dials != nil {
+					dials.Add(1)
+				}
+				cli, srv := fake.BytePipe()
+				go runEchoServer(t, f, srv)
+				return cli, nil
+			},
+		}
+		p := &loopbackPair{tr: tr, f: f}
+		current.Store(p)
+		return p
+	}
+	return argos.Protocol{
+		Transport: func() (transport.Transport, error) {
+			if p := current.Load(); p != nil {
+				return p.tr, nil
+			}
+			return build().tr, nil
+		},
+		Framing: func() (framing.Framing, error) {
+			if p := current.Load(); p != nil {
+				return p.f, nil
+			}
+			return build().f, nil
+		},
+		Codec: func() (codec.Codec, error) { return bytesCodec{}, nil },
 	}
 }
 
@@ -149,7 +177,7 @@ func newTestClient(t *testing.T, opts ...argos.ClientOption) *client.Client {
 		argos.WithMaxConcurrentCalls(8),
 		argos.WithMaxBufferedBytes(8 * 16 * 1024 * 1024), // 8 × default perCall
 		argos.WithMaxIdleSessions(8),
-		argos.WithBinding(sequentialLoopback(t, nil)),
+		argos.WithProtocol(sequentialLoopback(t, nil)),
 		argos.WithTarget(testTarget),
 	}
 	cli, err := client.New(append(base, opts...)...)
@@ -230,7 +258,7 @@ func TestNewWithoutServiceNameFails(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			opts := append(tc.opts,
-				argos.WithBinding(sequentialLoopback(t, nil)),
+				argos.WithProtocol(sequentialLoopback(t, nil)),
 				argos.WithTarget(testTarget),
 			)
 			_, err := client.New(opts...)
@@ -251,7 +279,7 @@ func TestNewFailsWhenConcurrentTimesPerCallExceedsBuffered(t *testing.T) {
 	_, err := client.New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(128),
-		argos.WithBinding(sequentialLoopback(t, nil)),
+		argos.WithProtocol(sequentialLoopback(t, nil)),
 		argos.WithTarget(testTarget),
 	)
 	if err == nil {
@@ -281,7 +309,7 @@ func TestSessionReusableAfterCall(t *testing.T) {
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithMaxIdleSessions(4),
 		argos.WithHandshakeTimeout(50*time.Millisecond),
-		argos.WithBinding(sequentialLoopback(t, &dials)),
+		argos.WithProtocol(sequentialLoopback(t, &dials)),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
@@ -354,9 +382,7 @@ func TestCallerCancelAbortsCall(t *testing.T) {
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
-		argos.WithBinding(func() (argos.Binding, error) {
-			return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
-		}),
+		argos.WithProtocol(fixedLoopback(tr, f)),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
@@ -409,7 +435,7 @@ func TestOpenFilterShortCircuitNeverDials(t *testing.T) {
 		argos.WithOpenFilter(func(ctx context.Context, m descriptor.Method, next filter.OpenFunc) (stream.Stream, error) {
 			return nil, want
 		}),
-		argos.WithBinding(sequentialLoopback(t, &dials)),
+		argos.WithProtocol(sequentialLoopback(t, &dials)),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
@@ -439,9 +465,7 @@ func TestDialFailureMapsUnavailable(t *testing.T) {
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
-		argos.WithBinding(func() (argos.Binding, error) {
-			return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
-		}),
+		argos.WithProtocol(fixedLoopback(tr, f)),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
@@ -478,9 +502,7 @@ func TestHandshakeTimeoutMapsDeadlineExceeded(t *testing.T) {
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
 		argos.WithHandshakeTimeout(30*time.Millisecond),
-		argos.WithBinding(func() (argos.Binding, error) {
-			return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
-		}),
+		argos.WithProtocol(fixedLoopback(tr, f)),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
@@ -529,9 +551,7 @@ func TestHandshakeTimeoutBeforeOpenFilterNext(t *testing.T) {
 			nextOK.Add(1)
 			return st, nil
 		}),
-		argos.WithBinding(func() (argos.Binding, error) {
-			return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
-		}),
+		argos.WithProtocol(fixedLoopback(tr, f)),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
@@ -564,9 +584,7 @@ func TestNarrowInterfaceAssertStaysConfigError(t *testing.T) {
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
-		argos.WithBinding(func() (argos.Binding, error) {
-			return argos.Binding{Transport: tr, Framing: f, Codec: bytesCodec{}}, nil
-		}),
+		argos.WithProtocol(fixedLoopback(tr, f)),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {

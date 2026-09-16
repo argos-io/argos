@@ -5,6 +5,8 @@ import (
 
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/codec"
+	"github.com/argos-io/argos/framing"
+	"github.com/argos-io/argos/transport"
 	"github.com/argos-io/argos/transport/tcp"
 )
 
@@ -42,14 +44,12 @@ var (
 	_ codec.Named = rawCodec{}
 )
 
-// NewTCP returns a BindingFunc for synth Framing × tcp (Sequential).
-// Each invocation returns fresh Transport and Framing instances.
-func NewTCP(opts ...Option) argos.BindingFunc {
-	return func() (argos.Binding, error) {
-		return argos.Binding{
-			Transport: tcp.New(),
-			Framing:   New(opts...),
-			Codec:     rawCodec{},
-		}, nil
+// NewTCP returns a Protocol preset for synth Framing × tcp (Sequential).
+func NewTCP(opts ...Option) argos.Protocol {
+	captured := append([]Option(nil), opts...)
+	return argos.Protocol{
+		Transport: func() (transport.Transport, error) { return tcp.New(), nil },
+		Framing:   func() (framing.Framing, error) { return New(captured...), nil },
+		Codec:     func() (codec.Codec, error) { return rawCodec{}, nil },
 	}
 }

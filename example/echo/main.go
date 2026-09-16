@@ -18,63 +18,50 @@ import (
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
-	// Tuning that belongs to the program rather than to one binding goes on the
-	// process default, once, before anything is built: this server only echoes
-	// short strings, so the 4 MiB message default is more than it will ever
-	// need. Every server.New / client.New that does not name a Config of its
-	// own starts from here.
 	argos.DefaultConfig().MaxMessageSize = 1 << 20
 
-	// New takes options only and reports no error, so a rejected option set
-	// surfaces on AddBinding and Run — both checked below.
 	srv := server.New()
 	impl := echov1.NewEchoImpl()
 
-	// A binding is the unit of server configuration: its listen address, and
-	// anything only its transport needs, travel with it to AddBinding.
-	bindings := []struct {
+	endpoints := []struct {
 		name string
-		fn   argos.BindingFunc
+		ep   argos.EndpointConfig
 		opts []argos.ServerOption
 	}{
 		{
 			name: "grpc/http2",
-			fn:   grpcbinding.New(),
+			ep:   argos.EndpointConfig{Protocol: grpcbinding.New()},
 			opts: []argos.ServerOption{argos.WithListenAddress(":9090")},
 		},
 		{
 			name: "envelope/tcp",
-			fn:   envelopebinding.NewTCP(),
+			ep:   argos.EndpointConfig{Protocol: envelopebinding.NewTCP()},
 			opts: []argos.ServerOption{argos.WithListenAddress(":7000")},
 		},
 		{
 			name: "envelope/ws",
-			fn:   envelopebinding.NewWS(),
+			ep:   argos.EndpointConfig{Protocol: envelopebinding.NewWS()},
 			opts: []argos.ServerOption{argos.WithListenAddress(":8081")},
 		},
 		{
 			name: "envelope/udp",
-			fn:   envelopebinding.NewUDP(),
+			ep:   argos.EndpointConfig{Protocol: envelopebinding.NewUDP()},
 			opts: []argos.ServerOption{
 				argos.WithListenAddress(":7001"),
-				// Datagram budget: keep frames/messages under
-				// udp.MaxDatagramSize. Only this transport has to fit a call
-				// into one datagram, so the limits stay on its binding instead
-				// of shrinking the whole process.
 				argos.WithMaxFrameSize(65507),
 				argos.WithMaxMessageSize(32 << 10),
 			},
 		},
 		{
 			name: "wholebody/http1",
-			fn:   wholebodybinding.New(),
+			ep:   argos.EndpointConfig{Protocol: wholebodybinding.New()},
 			opts: []argos.ServerOption{argos.WithListenAddress(":8080")},
 		},
 	}
 
-	for _, b := range bindings {
-		if err := srv.AddBinding(b.fn, b.opts...); err != nil {
-			slog.Error("AddBinding", "binding", b.name, "err", err)
+	for _, b := range endpoints {
+		if err := srv.AddEndpoint(b.ep, b.opts...); err != nil {
+			slog.Error("AddEndpoint", "endpoint", b.name, "err", err)
 			os.Exit(1)
 		}
 	}

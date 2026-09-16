@@ -18,7 +18,7 @@ import (
 	"github.com/argos-io/argos/transport"
 )
 
-func TestBindingFuncOncePerServerStart(t *testing.T) {
+func TestProtocolAssembleOncePerServerStart(t *testing.T) {
 	var calls atomic.Int64
 	tr := newTestTransport()
 	fr := fake.NewFraming(framing.Sequential)
@@ -31,11 +31,17 @@ func TestBindingFuncOncePerServerStart(t *testing.T) {
 		return st.Send(req)
 	}
 
+	protocol := argos.Protocol{
+		Transport: func() (transport.Transport, error) {
+			calls.Add(1)
+			return tr, nil
+		},
+		Framing: func() (framing.Framing, error) { return fr, nil },
+		Codec:   testProtocol(tr, fr).Codec,
+	}
+
 	srv := server.New()
-	err := srv.AddBinding(func() (argos.Binding, error) {
-		calls.Add(1)
-		return argos.Binding{Transport: tr, Framing: fr, Codec: rawCodec{}}, nil
-	})
+	err := srv.AddEndpoint(argos.EndpointConfig{Protocol: protocol})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,10 +54,9 @@ func TestBindingFuncOncePerServerStart(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Close() })
 
 	if got := calls.Load(); got != 1 {
-		t.Fatalf("BindingFunc calls after Run = %d, want 1", got)
+		t.Fatalf("protocol assemble calls after Run = %d, want 1", got)
 	}
 
-	// Multiple accepted conns must not re-invoke the factory.
 	for i := 0; i < 3; i++ {
 		client, serverConn := fake.BytePipe()
 		tr.Offer(serverConn)
@@ -61,7 +66,7 @@ func TestBindingFuncOncePerServerStart(t *testing.T) {
 		_ = call.Close()
 	}
 	if got := calls.Load(); got != 1 {
-		t.Fatalf("BindingFunc calls after accepts = %d, want 1", got)
+		t.Fatalf("protocol assemble calls after accepts = %d, want 1", got)
 	}
 }
 
@@ -141,29 +146,32 @@ func TestCloseIdempotent(t *testing.T) {
 	if err := srv.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
 	}
-	// Shutdown after Close is a no-op.
 	if err := srv.Shutdown(context.Background()); err != nil {
 		t.Fatalf("Shutdown after Close: %v", err)
 	}
 }
 
-func TestFactoryIsolationAcrossBindings(t *testing.T) {
+func TestFactoryIsolationAcrossEndpoints(t *testing.T) {
 	var calls atomic.Int64
 	tr1, tr2 := newTestTransport(), newTestTransport()
 	fr1, fr2 := fake.NewFraming(framing.Sequential), fake.NewFraming(framing.Sequential)
 
 	srv := server.New()
 
-	mk := func(tr transport.Transport, fr framing.Framing) argos.BindingFunc {
-		return func() (argos.Binding, error) {
-			calls.Add(1)
-			return argos.Binding{Transport: tr, Framing: fr, Codec: rawCodec{}}, nil
+	mk := func(tr transport.Transport, fr framing.Framing) argos.Protocol {
+		return argos.Protocol{
+			Transport: func() (transport.Transport, error) {
+				calls.Add(1)
+				return tr, nil
+			},
+			Framing: func() (framing.Framing, error) { return fr, nil },
+			Codec:   testProtocol(tr, fr).Codec,
 		}
 	}
-	if err := srv.AddBinding(mk(tr1, fr1)); err != nil {
+	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: mk(tr1, fr1)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.AddBinding(mk(tr2, fr2)); err != nil {
+	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: mk(tr2, fr2)}); err != nil {
 		t.Fatal(err)
 	}
 	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
@@ -178,29 +186,24 @@ func TestFactoryIsolationAcrossBindings(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Close() })
 
 	if got := calls.Load(); got != 2 {
-		t.Fatalf("BindingFunc calls = %d, want 2 (once per binding)", got)
+		t.Fatalf("protocol assemble calls = %d, want 2 (once per endpoint)", got)
 	}
 }
 
-// New has no error return, so a rejected option set must be remembered and
-// reported by the first call where it can matter: AddBinding and Run. A Server
-// that silently ran with the built-in defaults instead would hide the misuse.
-func TestRejectedOptionsSurfaceFromAddBindingAndRun(t *testing.T) {
+func TestRejectedOptionsSurfaceFromAddEndpointAndRun(t *testing.T) {
 	tr := newTestTransport()
 	fr := fake.NewFraming(framing.Sequential)
 	srv := server.New(argos.WithMaxConcurrentCalls(-5))
 	t.Cleanup(func() { _ = srv.Close() })
 
-	addErr := srv.AddBinding(func() (argos.Binding, error) {
-		return argos.Binding{Transport: tr, Framing: fr, Codec: rawCodec{}}, nil
-	})
+	addErr := srv.AddEndpoint(argos.EndpointConfig{Protocol: testProtocol(tr, fr)})
 	if addErr == nil {
-		t.Fatal("AddBinding succeeded on a Server built from a rejected option set")
+		t.Fatal("AddEndpoint succeeded on a Server built from a rejected option set")
 	}
 	if !strings.Contains(addErr.Error(), "MaxConcurrentCalls") {
-		t.Fatalf("AddBinding: %v, want the error to name MaxConcurrentCalls", addErr)
+		t.Fatalf("AddEndpoint: %v, want the error to name MaxConcurrentCalls", addErr)
 	}
 	if err := srv.Run(context.Background()); !errors.Is(err, addErr) {
-		t.Fatalf("Run: %v, want the same rejection AddBinding reported (%v)", err, addErr)
+		t.Fatalf("Run: %v, want the same rejection AddEndpoint reported (%v)", err, addErr)
 	}
 }

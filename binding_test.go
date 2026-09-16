@@ -2,59 +2,69 @@ package argos_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 
 	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/transport"
 )
 
-func TestBindingFuncReturnsIndependentInstances(t *testing.T) {
+func TestProtocolAssembleReturnsIndependentInstances(t *testing.T) {
 	t.Parallel()
-	var n int
-	fn := argos.BindingFunc(func() (argos.Binding, error) {
-		n++
-		return argos.Binding{
-			Transport: &stubTransport{id: n},
-			Framing:   &stubFraming{id: n},
-			Codec:     &stubCodec{id: n},
-		}, nil
-	})
+	var n atomic.Int64
+	p := argos.Protocol{
+		Transport: func() (transport.Transport, error) {
+			id := int(n.Add(1))
+			return &stubTransport{id: id}, nil
+		},
+		Framing: func() (framing.Framing, error) {
+			id := int(n.Add(1))
+			return &stubFraming{id: id}, nil
+		},
+		Codec: func() (codec.Codec, error) {
+			id := int(n.Add(1))
+			return &stubCodec{id: id}, nil
+		},
+	}
 
-	cfg, err := argos.ClientConfig(argos.WithConfig(&argos.Config{}), argos.WithBinding(fn))
+	cfg, err := argos.ClientConfig(
+		argos.WithConfig(&argos.Config{}),
+		argos.WithServiceName("echo.v1.EchoService"),
+		argos.WithProtocol(p),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// WithBinding is a call-site override, not the Config.Binding fallback, so
-	// SelectedService is the only way to read back what the Client will use.
 	_, sel := cfg.SelectedService()
-	if sel.Binding == nil {
-		t.Fatal("Binding not stored")
+	if sel.Transport == nil || sel.Framing == nil || sel.Codec == nil {
+		t.Fatal("protocol not stored")
 	}
 
-	b1, err := sel.Binding()
+	tr1, fr1, co1, err := sel.Assemble()
 	if err != nil {
 		t.Fatal(err)
 	}
-	b2, err := sel.Binding()
+	tr2, fr2, co2, err := sel.Assemble()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	tr1 := b1.Transport.(*stubTransport)
-	tr2 := b2.Transport.(*stubTransport)
-	if tr1 == tr2 || tr1.id == tr2.id {
-		t.Fatalf("Transport reused: %#v vs %#v", tr1, tr2)
+	st1 := tr1.(*stubTransport)
+	st2 := tr2.(*stubTransport)
+	if st1 == st2 || st1.id == st2.id {
+		t.Fatalf("Transport reused: %#v vs %#v", st1, st2)
 	}
-	fr1 := b1.Framing.(*stubFraming)
-	fr2 := b2.Framing.(*stubFraming)
-	if fr1 == fr2 || fr1.id == fr2.id {
-		t.Fatalf("Framing reused: %#v vs %#v", fr1, fr2)
+	sf1 := fr1.(*stubFraming)
+	sf2 := fr2.(*stubFraming)
+	if sf1 == sf2 || sf1.id == sf2.id {
+		t.Fatalf("Framing reused: %#v vs %#v", sf1, sf2)
 	}
-	co1 := b1.Codec.(*stubCodec)
-	co2 := b2.Codec.(*stubCodec)
-	if co1 == co2 || co1.id == co2.id {
-		t.Fatalf("Codec reused: %#v vs %#v", co1, co2)
+	sc1 := co1.(*stubCodec)
+	sc2 := co2.(*stubCodec)
+	if sc1 == sc2 || sc1.id == sc2.id {
+		t.Fatalf("Codec reused: %#v vs %#v", sc1, sc2)
 	}
 }
 

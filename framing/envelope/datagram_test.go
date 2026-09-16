@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/framing/envelope"
@@ -383,19 +384,19 @@ func TestBindingNewRejectsOversizedUDP(t *testing.T) {
 		MaxMessageSize: 4 << 20,
 		MaxFrameSize:   4 << 20,
 	}
-	fn := argos.BindingFunc(func() (argos.Binding, error) {
-		if err := envelope.CheckDatagramLimits(cfg.MaxFrameSize, cfg.MaxMessageSize, udp.MaxDatagramSize); err != nil {
-			return argos.Binding{}, err
-		}
-		return argos.Binding{
-			Transport: udp.New(),
-			Framing:   envelope.New(envelope.WithOneCallPerConn()),
-			Codec:     rawCodec{},
-		}, nil
-	})
-	_, err := fn()
+	p := argos.Protocol{
+		Transport: func() (transport.Transport, error) { return udp.New(), nil },
+		Framing: func() (framing.Framing, error) {
+			if err := envelope.CheckDatagramLimits(cfg.MaxFrameSize, cfg.MaxMessageSize, udp.MaxDatagramSize); err != nil {
+				return nil, err
+			}
+			return envelope.New(envelope.WithOneCallPerConn()), nil
+		},
+		Codec: func() (codec.Codec, error) { return rawCodec{}, nil },
+	}
+	_, _, _, err := p.Assemble()
 	if err == nil {
-		t.Fatal("BindingFunc: want size-gate error")
+		t.Fatal("Assemble: want size-gate error")
 	}
 	if !strings.Contains(err.Error(), "MaxMessageSize") {
 		t.Fatalf("error %q should list MaxMessageSize", err)

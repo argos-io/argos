@@ -60,10 +60,6 @@ func TestDefaultsMatchSection61(t *testing.T) {
 			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
 		}
 	}
-	if d.Binding != nil {
-		t.Errorf("Binding = %v, want nil", d.Binding)
-	}
-
 	pc, err := d.PerCall()
 	if err != nil {
 		t.Fatalf("PerCall: %v", err)

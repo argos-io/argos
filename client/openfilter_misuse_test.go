@@ -26,7 +26,7 @@ func openFilterClientWith(t *testing.T, dials *atomic.Int64, maxSessions int, f 
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithMaxSessionsPerEndpoint(maxSessions),
 		argos.WithOpenFilter(f),
-		argos.WithBinding(sequentialLoopback(t, dials)),
+		argos.WithProtocol(sequentialLoopback(t, dials)),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {

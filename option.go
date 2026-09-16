@@ -61,7 +61,7 @@ func (o configOption) baseConfig() *Config { return o.cfg }
 func WithConfig(cfg *Config) Option { return configOption{cfg: cfg} }
 
 // WithServiceName names the service a Client opens calls for (IDL full name).
-// It also selects which Services entry supplies the Binding and Target.
+// It selects the Services entry that supplies protocol and target.
 // Generated stubs pass their own service name first, so an explicit
 // WithServiceName from the caller overrides it.
 func WithServiceName(fullName string) ClientOption {
@@ -75,10 +75,48 @@ func WithTarget(target string) ClientOption {
 	return clientOption(func(c *Config) { c.targetOverride = target })
 }
 
-// WithBinding sets the BindingFunc this Client assembles. It wins over both
-// the Services entry for the selected service and Config.Binding.
-func WithBinding(fn BindingFunc) ClientOption {
-	return clientOption(func(c *Config) { c.bindingOverride = fn })
+// WithTransport overrides the transport factory for this Client's selected
+// service. It wins over the Services entry.
+func WithTransport(fn TransportFunc) ClientOption {
+	return clientOption(func(c *Config) {
+		c.protocolOverrides.Transport = fn
+		c.hasTransportOverride = true
+	})
+}
+
+// WithFraming overrides the framing factory for this Client's selected service.
+func WithFraming(fn FramingFunc) ClientOption {
+	return clientOption(func(c *Config) {
+		c.protocolOverrides.Framing = fn
+		c.hasFramingOverride = true
+	})
+}
+
+// WithCodec overrides the codec factory for this Client's selected service.
+func WithCodec(fn CodecFunc) ClientOption {
+	return clientOption(func(c *Config) {
+		c.protocolOverrides.Codec = fn
+		c.hasCodecOverride = true
+	})
+}
+
+// WithProtocol overrides all three protocol factories for this Client's
+// selected service (typical preset at the call site).
+func WithProtocol(p Protocol) ClientOption {
+	return clientOption(func(c *Config) {
+		c.protocolOverrides = p
+		c.hasTransportOverride = p.Transport != nil
+		c.hasFramingOverride = p.Framing != nil
+		c.hasCodecOverride = p.Codec != nil
+	})
+}
+
+// WithEndpoint appends a declarative server listen surface to the Config.
+// server.Run materialises every entry before code-added AddEndpoint calls.
+func WithEndpoint(ep EndpointConfig) ServerOption {
+	return serverOption(func(c *Config) {
+		c.Endpoints = append(c.Endpoints, ep)
+	})
 }
 
 // WithFilter appends a server-side Filter (outermost first when chained later).
@@ -226,7 +264,7 @@ func WithMaxSessionLifetime(d time.Duration) ClientOption {
 	return clientOption(func(c *Config) { c.MaxSessionLifetime = d })
 }
 
-// WithMaxInboundConns sets server in-use connections per Binding.
+// WithMaxInboundConns sets server in-use connections per endpoint.
 func WithMaxInboundConns(n int) ServerOption {
 	return serverOption(func(c *Config) { c.MaxInboundConns = n })
 }

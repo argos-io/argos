@@ -69,10 +69,10 @@ type Config struct {
 	HTTPReadHeaderTimeout time.Duration // server-only; no off state
 	HTTPIdleTimeout       time.Duration // server-only; no off state
 
-	// Binding is the fallback factory for services without their own. A
-	// Services entry wins over it, and WithBinding wins over both.
-	// Nil is allowed until a Client path requires it.
-	Binding BindingFunc
+	// Endpoints are declarative server listen surfaces (protocol + address).
+	// server.Run starts each entry before any code-added endpoints from
+	// AddEndpoint. Handlers still come only from Register.
+	Endpoints []EndpointConfig
 
 	// ListenAddress is the server-only bind address passed to Transport.Serve
 	// as transport.WithListenAddress (e.g. "127.0.0.1:0"). Empty is ignored;
@@ -83,8 +83,8 @@ type Config struct {
 	Filters []filter.Filter
 	// OpenFilters are client-side OpenFilter chain entries (outermost first).
 	OpenFilters []filter.OpenFilter
-	// Services holds per-service Binding/Target entries keyed by IDL full name.
-	// A Client selects one of them with WithServiceName.
+	// Services holds per-service protocol and target keyed by IDL full name.
+	// A Client selects one with WithServiceName.
 	Services map[string]ServiceConfig
 
 	// CallErrorObserver receives per-call local transport errors (§7.5).
@@ -94,14 +94,15 @@ type Config struct {
 	// that contract is enforced by server, not here.
 	ConnErrorObserver func(ConnInfo, error)
 
-	// serviceName, targetOverride and bindingOverride hold what
-	// WithServiceName / WithTarget / WithBinding selected at the call site.
-	// They are not exported fields because a Config shared by many services
-	// has no single service name, and because the call site has to be able to
-	// win over a Services entry that the shared Config already carries.
-	serviceName     string
-	targetOverride  string
-	bindingOverride BindingFunc
+	// serviceName, targetOverride and protocolOverrides hold call-site choices
+	// for one Client. They are not exported: a shared Config has no single
+	// service name, and Clone must not inherit another Client's selection.
+	serviceName          string
+	targetOverride       string
+	protocolOverrides    Protocol
+	hasTransportOverride bool
+	hasFramingOverride   bool
+	hasCodecOverride     bool
 }
 
 // defaultConfig is the process-wide default. It is mutable on purpose: a
@@ -155,7 +156,7 @@ func Defaults() Config {
 // A nil receiver clones the built-in defaults.
 //
 // The copy carries no service selection: WithServiceName, WithTarget and
-// WithBinding belong to the Client that named them, not to the configuration.
+// WithProtocol belong to the Client that named them, not to the configuration.
 // Without this, a Config taken from one Client and reused as another's
 // WithConfig base would silently make the second Client open calls for the
 // first one's service, and the missing-service-name guard would never fire.
@@ -167,7 +168,13 @@ func (c *Config) Clone() *Config {
 	out := *c
 	out.serviceName = ""
 	out.targetOverride = ""
-	out.bindingOverride = nil
+	out.protocolOverrides = Protocol{}
+	out.hasTransportOverride = false
+	out.hasFramingOverride = false
+	out.hasCodecOverride = false
+	if c.Endpoints != nil {
+		out.Endpoints = append([]EndpointConfig(nil), c.Endpoints...)
+	}
 	if c.Filters != nil {
 		out.Filters = append([]filter.Filter(nil), c.Filters...)
 	}
@@ -237,25 +244,25 @@ func finish(cfg *Config) (*Config, error) {
 	return cfg, nil
 }
 
-// SelectedService reports the service this Config opens calls for and the
-// Binding and Target that apply to it. Later layers win:
-//
-//	WithBinding / WithTarget  >  Services[name]  >  Config.Binding
+// SelectedService reports the service this Client opens calls for and the
+// merged ServiceConfig. Per-axis call-site overrides win over the Services
+// entry; WithTarget wins over ServiceConfig.Target.
 func (c *Config) SelectedService() (string, ServiceConfig) {
 	if c == nil {
 		return "", ServiceConfig{}
 	}
-	sel := ServiceConfig{Binding: c.Binding}
+	sel := ServiceConfig{}
 	if sc, ok := c.Services[c.serviceName]; ok {
-		if sc.Binding != nil {
-			sel.Binding = sc.Binding
-		}
-		if sc.Target != "" {
-			sel.Target = sc.Target
-		}
+		sel = sc
 	}
-	if c.bindingOverride != nil {
-		sel.Binding = c.bindingOverride
+	if c.hasTransportOverride {
+		sel.Transport = c.protocolOverrides.Transport
+	}
+	if c.hasFramingOverride {
+		sel.Framing = c.protocolOverrides.Framing
+	}
+	if c.hasCodecOverride {
+		sel.Codec = c.protocolOverrides.Codec
 	}
 	if c.targetOverride != "" {
 		sel.Target = c.targetOverride

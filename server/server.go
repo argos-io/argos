@@ -20,11 +20,11 @@ import (
 // admit → route → Accept → Filter → Finish/Close (§4.1 / §5.2).
 type Server struct {
 	cfg    *argos.Config
-	cfgErr error // option set New rejected; returned by AddBinding and Run
+	cfgErr error // option set New rejected; returned by AddEndpoint and Run
 	admit  *admitGate
 
 	mu             sync.Mutex
-	bindings       []bindingReg
+	endpoints      []endpointReg
 	routes         map[string]map[string]routeEntry // service → method → entry
 	running        bool
 	ran            bool
@@ -43,10 +43,10 @@ type Server struct {
 	serveErr atomic.Pointer[error]
 }
 
-type bindingReg struct {
-	fn   argos.BindingFunc
-	cfg  *argos.Config
-	name string
+type endpointReg struct {
+	protocol argos.Protocol
+	cfg      *argos.Config
+	name     string
 }
 
 type routeEntry struct {
@@ -69,7 +69,7 @@ type liveBinding struct {
 // one named by argos.WithConfig, or the process default.
 //
 // New does not return an error so that a Server value is always usable as a
-// receiver. A rejected option set is remembered and returned by AddBinding and
+// receiver. A rejected option set is remembered and returned by AddEndpoint and
 // Run, which is the first point where it can matter.
 func New(opts ...argos.ServerOption) *Server {
 	cfg, err := argos.ServerConfig(opts...)
@@ -93,36 +93,37 @@ func New(opts ...argos.ServerOption) *Server {
 	}
 }
 
-// AddBinding registers a BindingFunc. Options overlay the server Config for
-// this binding. Must be called before Run.
-func (s *Server) AddBinding(fn argos.BindingFunc, opts ...argos.ServerOption) error {
+// AddEndpoint registers a listen surface (protocol + optional address in ep).
+// Options overlay the server Config for this endpoint. Must be called before Run.
+func (s *Server) AddEndpoint(ep argos.EndpointConfig, opts ...argos.ServerOption) error {
 	if s.cfgErr != nil {
 		return s.cfgErr
 	}
-	if fn == nil {
-		return fmt.Errorf("server: nil BindingFunc")
+	if ep.Transport == nil || ep.Framing == nil || ep.Codec == nil {
+		return fmt.Errorf("server: endpoint missing Transport, Framing, or Codec")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.ran || s.running {
-		return fmt.Errorf("server: AddBinding after Run")
+		return fmt.Errorf("server: AddEndpoint after Run")
 	}
 	if s.closed {
 		return fmt.Errorf("server: closed")
 	}
 	cfg := s.cfg
 	if len(opts) > 0 {
-		// WithConfig names the base wherever it appears, so prepending the
-		// server Config keeps a per-binding WithConfig in charge if the caller
-		// passes one.
 		var err error
 		cfg, err = argos.ServerConfig(append([]argos.ServerOption{argos.WithConfig(s.cfg)}, opts...)...)
 		if err != nil {
 			return err
 		}
 	}
-	name := fmt.Sprintf("binding-%d", len(s.bindings))
-	s.bindings = append(s.bindings, bindingReg{fn: fn, cfg: cfg, name: name})
+	if ep.ListenAddress != "" {
+		cfg = cfg.Clone()
+		cfg.ListenAddress = ep.ListenAddress
+	}
+	name := fmt.Sprintf("endpoint-%d", len(s.endpoints))
+	s.endpoints = append(s.endpoints, endpointReg{protocol: ep.Protocol, cfg: cfg, name: name})
 	return nil
 }
 
@@ -168,8 +169,8 @@ func (s *Server) Register(d descriptor.Service, handlers map[string]filter.Handl
 	return nil
 }
 
-// Run starts all bindings (factory once each) and blocks until they exit or
-// ctx is canceled. Only one successful Run is allowed.
+// Run starts every endpoint declared on Config.Endpoints and every endpoint
+// added with AddEndpoint, then blocks until they exit or ctx is canceled.
 func (s *Server) Run(ctx context.Context) error {
 	if s.cfgErr != nil {
 		return s.cfgErr
@@ -186,11 +187,27 @@ func (s *Server) Run(ctx context.Context) error {
 		s.mu.Unlock()
 		return fmt.Errorf("server: Run already called")
 	}
-	if len(s.bindings) == 0 {
-		s.mu.Unlock()
-		return fmt.Errorf("server: no bindings")
+	regs := append([]endpointReg(nil), s.endpoints...)
+	for i, ep := range s.cfg.Endpoints {
+		if ep.Transport == nil || ep.Framing == nil || ep.Codec == nil {
+			s.mu.Unlock()
+			return fmt.Errorf("server: Config.Endpoints[%d]: incomplete protocol", i)
+		}
+		cfg := s.cfg
+		if ep.ListenAddress != "" {
+			cfg = cfg.Clone()
+			cfg.ListenAddress = ep.ListenAddress
+		}
+		regs = append(regs, endpointReg{
+			protocol: ep.Protocol,
+			cfg:      cfg,
+			name:     fmt.Sprintf("config-endpoint-%d", i),
+		})
 	}
-	bindings := append([]bindingReg(nil), s.bindings...)
+	if len(regs) == 0 {
+		s.mu.Unlock()
+		return fmt.Errorf("server: no endpoints (declare Config.Endpoints or call AddEndpoint)")
+	}
 	routes := cloneRoutes(s.routes)
 	s.running = true
 	s.ran = true
@@ -199,60 +216,53 @@ func (s *Server) Run(ctx context.Context) error {
 	s.runCancel = runCancel
 	s.mu.Unlock()
 
-	lives := make([]*liveBinding, 0, len(bindings))
+	lives := make([]*liveBinding, 0, len(regs))
 	var startErr error
-	for _, b := range bindings {
-		triple, err := b.fn()
+	for _, reg := range regs {
+		tr, fr, cd, err := reg.protocol.Assemble()
 		if err != nil {
-			startErr = err
+			startErr = fmt.Errorf("server: endpoint %q: %w", reg.name, err)
 			break
 		}
-		if triple.Transport == nil || triple.Framing == nil || triple.Codec == nil {
-			startErr = fmt.Errorf("server: BindingFunc returned nil component")
-			closeTriple(triple)
-			break
-		}
-		// Let the Framing reject size limits its carrier cannot deliver, before
-		// Serve. Framings that do not implement CheckConfig opt out.
-		if checker, ok := triple.Framing.(interface {
+		if checker, ok := fr.(interface {
 			CheckConfig(framing.Config) error
 		}); ok {
 			if err := checker.CheckConfig(framing.Config{
-				MaxMessageSize:         b.cfg.MaxMessageSize,
-				MaxFrameSize:           b.cfg.MaxFrameSize,
-				MaxMetadataSize:        b.cfg.MaxMetadataSize,
-				MaxInboundMetadataSize: b.cfg.MaxInboundMetadataSize,
-				ReadAheadMessages:      b.cfg.ReadAheadMessages,
-				OpenTimeout:            b.cfg.OpenTimeout,
-				MaxDrainBytes:          b.cfg.MaxDrainBytes,
+				MaxMessageSize:         reg.cfg.MaxMessageSize,
+				MaxFrameSize:           reg.cfg.MaxFrameSize,
+				MaxMetadataSize:        reg.cfg.MaxMetadataSize,
+				MaxInboundMetadataSize: reg.cfg.MaxInboundMetadataSize,
+				ReadAheadMessages:      reg.cfg.ReadAheadMessages,
+				OpenTimeout:            reg.cfg.OpenTimeout,
+				MaxDrainBytes:          reg.cfg.MaxDrainBytes,
 			}); err != nil {
-				startErr = fmt.Errorf("server: binding %q: %w", b.name, err)
-				closeTriple(triple)
+				startErr = fmt.Errorf("server: endpoint %q: %w", reg.name, err)
+				closeComponents(tr, fr, cd)
 				break
 			}
 		}
 		codecName := ""
-		if n, ok := triple.Codec.(codec.Named); ok {
+		if n, ok := cd.(codec.Named); ok {
 			codecName = n.CodecName()
 		}
 		lb := &liveBinding{
-			name:    b.name,
-			tr:      triple.Transport,
-			framing: triple.Framing,
-			codec:   triple.Codec,
-			cfg:     b.cfg,
-			reuse:   triple.Framing.Reuse(),
+			name:    reg.name,
+			tr:      tr,
+			framing: fr,
+			codec:   cd,
+			cfg:     reg.cfg,
+			reuse:   fr.Reuse(),
 			sessSpec: framing.SessionSpec{
 				CodecName: codecName,
 				Config: framing.Config{
-					MaxMessageSize:  b.cfg.MaxMessageSize,
-					MaxFrameSize:    b.cfg.MaxFrameSize,
-					MaxMetadataSize: b.cfg.MaxMetadataSize,
+					MaxMessageSize:  reg.cfg.MaxMessageSize,
+					MaxFrameSize:    reg.cfg.MaxFrameSize,
+					MaxMetadataSize: reg.cfg.MaxMetadataSize,
 
-					MaxInboundMetadataSize: b.cfg.MaxInboundMetadataSize,
-					ReadAheadMessages:      b.cfg.ReadAheadMessages,
-					OpenTimeout:            b.cfg.OpenTimeout,
-					MaxDrainBytes:          b.cfg.MaxDrainBytes,
+					MaxInboundMetadataSize: reg.cfg.MaxInboundMetadataSize,
+					ReadAheadMessages:      reg.cfg.ReadAheadMessages,
+					OpenTimeout:            reg.cfg.OpenTimeout,
+					MaxDrainBytes:          reg.cfg.MaxDrainBytes,
 				},
 			},
 		}
@@ -436,14 +446,14 @@ func cloneRoutes(in map[string]map[string]routeEntry) map[string]map[string]rout
 	return out
 }
 
-func closeTriple(b argos.Binding) {
-	if c, ok := b.Codec.(io.Closer); ok {
+func closeComponents(tr transport.Transport, fr framing.Framing, cd codec.Codec) {
+	if c, ok := cd.(io.Closer); ok {
 		_ = c.Close()
 	}
-	if c, ok := b.Framing.(io.Closer); ok {
+	if c, ok := fr.(io.Closer); ok {
 		_ = c.Close()
 	}
-	if b.Transport != nil {
-		_ = b.Transport.Close()
+	if tr != nil {
+		_ = tr.Close()
 	}
 }

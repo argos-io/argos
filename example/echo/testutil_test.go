@@ -2,13 +2,15 @@ package echov1
 
 import (
 	"context"
-	"errors"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/server"
+	"github.com/argos-io/argos/transport"
 
 	_ "github.com/argos-io/argos/resolver/ip"
 )
@@ -48,7 +50,58 @@ func waitAddr(t *testing.T, a hasAddr) string {
 	return ""
 }
 
-// startEchoServer starts a server with fn and returns the options that reach
+// serverProtocol wraps a preset so the server endpoint can capture the listen
+// Transport's Addr after Assemble.
+func serverProtocol(t *testing.T, preset argos.Protocol, addrTr *hasAddr, bound chan struct{}) argos.Protocol {
+	t.Helper()
+	var pair atomic.Pointer[struct {
+		tr transport.Transport
+		fr framing.Framing
+	}]
+	build := func() {
+		tr, err := preset.Transport()
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, ok := tr.(hasAddr)
+		if !ok {
+			t.Fatal("example/echo: Transport does not implement Addr()")
+		}
+		*addrTr = a
+		select {
+		case <-bound:
+		default:
+			close(bound)
+		}
+		fr, err := preset.Framing()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pair.Store(&struct {
+			tr transport.Transport
+			fr framing.Framing
+		}{tr: tr, fr: fr})
+	}
+	return argos.Protocol{
+		Transport: func() (transport.Transport, error) {
+			if p := pair.Load(); p != nil {
+				return p.tr, nil
+			}
+			build()
+			return pair.Load().tr, nil
+		},
+		Framing: func() (framing.Framing, error) {
+			if p := pair.Load(); p != nil {
+				return p.fr, nil
+			}
+			build()
+			return pair.Load().fr, nil
+		},
+		Codec: preset.Codec,
+	}
+}
+
+// startEchoServer starts a server with preset and returns the options that reach
 // it. Both ends share one Config: WithConfig names the same base for the
 // server and for the client, so a test that has to tune a limit — the datagram
 // budget, a filter chain — writes it once and both ends of the call agree.
@@ -56,7 +109,7 @@ func waitAddr(t *testing.T, a hasAddr) string {
 //
 // The returned options carry no service name on purpose: the generated stub
 // supplies its own.
-func startEchoServer(t *testing.T, fn argos.BindingFunc, tune ...func(*argos.Config)) []argos.ClientOption {
+func startEchoServer(t *testing.T, preset argos.Protocol, tune ...func(*argos.Config)) []argos.ClientOption {
 	t.Helper()
 
 	cfg := baseConfig()
@@ -68,26 +121,9 @@ func startEchoServer(t *testing.T, fn argos.BindingFunc, tune ...func(*argos.Con
 
 	var addrTr hasAddr
 	bound := make(chan struct{})
-	// server.New reports no error; a Config it rejects surfaces on the
-	// AddBinding below.
 	srv := server.New(argos.WithConfig(cfg), argos.WithListenAddress(testListenAddr))
-	if err := srv.AddBinding(func() (argos.Binding, error) {
-		b, err := fn()
-		if err != nil {
-			return b, err
-		}
-		tr, ok := b.Transport.(hasAddr)
-		if !ok {
-			return argos.Binding{}, errors.New("example/echo: Transport does not implement Addr()")
-		}
-		addrTr = tr
-		select {
-		case <-bound:
-		default:
-			close(bound)
-		}
-		return b, nil
-	}); err != nil {
+	ep := serverProtocol(t, preset, &addrTr, bound)
+	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: ep}); err != nil {
 		t.Fatal(err)
 	}
 	if err := RegisterEchoService(srv, NewEchoImpl()); err != nil {
@@ -97,25 +133,28 @@ func startEchoServer(t *testing.T, fn argos.BindingFunc, tune ...func(*argos.Con
 	select {
 	case <-bound:
 	case <-time.After(3 * time.Second):
-		t.Fatal("server BindingFunc not invoked")
+		t.Fatal("server protocol not assembled")
+	}
+	if addrTr == nil {
+		t.Fatal("listener Addr not captured")
 	}
 	addr := waitAddr(t, addrTr)
 	t.Cleanup(func() { _ = srv.Close() })
 
 	return []argos.ClientOption{
 		argos.WithConfig(cfg),
-		argos.WithBinding(fn),
+		argos.WithProtocol(preset),
 		argos.WithTarget("ip://" + addr),
 	}
 }
 
-// startEcho starts a server with fn and returns a stub client dialing its
+// startEcho starts a server with preset and returns a stub client dialing its
 // Addr. The stub owns the Client it built, so closing the stub is what
 // releases the session pool.
-func startEcho(t *testing.T, fn argos.BindingFunc, tune ...func(*argos.Config)) EchoServiceClient {
+func startEcho(t *testing.T, preset argos.Protocol, tune ...func(*argos.Config)) EchoServiceClient {
 	t.Helper()
 
-	ec, err := NewEchoServiceClient(startEchoServer(t, fn, tune...)...)
+	ec, err := NewEchoServiceClient(startEchoServer(t, preset, tune...)...)
 	if err != nil {
 		t.Fatalf("NewEchoServiceClient: %v", err)
 	}

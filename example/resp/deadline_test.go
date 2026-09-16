@@ -11,7 +11,7 @@ import (
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/example/resp"
-	"github.com/argos-io/argos/transport/tcp"
+	"github.com/argos-io/argos/framing"
 )
 
 // silentRESPPeer accepts connections, answers the HELLO handshake, and then
@@ -53,20 +53,19 @@ func TestCallerDeadlineEndsBlockedRecv(t *testing.T) {
 	target := silentRESPPeer(t)
 
 	var clientFr *resp.Framing
-	clientFn := func() (argos.Binding, error) {
-		// HELLO runs in NewClientSession, so the peer must answer the handshake
-		// before the call is even admitted.
-		clientFr = resp.New()
-		return argos.Binding{
-			Transport: tcp.New(),
-			Framing:   clientFr,
-			Codec:     resp.NewBytesCodec(),
-		}, nil
+	preset := resp.NewBinding()
+	clientPreset := argos.Protocol{
+		Transport: preset.Transport,
+		Framing: func() (framing.Framing, error) {
+			clientFr = resp.New()
+			return clientFr, nil
+		},
+		Codec: preset.Codec,
 	}
 	cli, err := client.New(
 		argos.WithConfig(baseConfig()),
 		argos.WithServiceName(svcName),
-		argos.WithBinding(clientFn),
+		argos.WithProtocol(clientPreset),
 		argos.WithTarget("ip://"+target),
 	)
 	if err != nil {

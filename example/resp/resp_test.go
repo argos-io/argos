@@ -12,12 +12,12 @@ import (
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/example/resp"
 	"github.com/argos-io/argos/filter"
+	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/stream"
 	"github.com/argos-io/argos/transport"
-	"github.com/argos-io/argos/transport/tcp"
 
 	_ "github.com/argos-io/argos/resolver/ip"
 )
@@ -94,35 +94,45 @@ func startRESP(t *testing.T, register func(*server.Server, *resp.Store) error, f
 	var addrTr hasAddr
 	bound := make(chan struct{})
 
-	serverFn := func() (argos.Binding, error) {
-		fr := resp.New(frOpts...)
-		tr := tcp.New()
-		addrTr = tr.(hasAddr)
-		select {
-		case <-bound:
-		default:
-			close(bound)
-		}
-		return argos.Binding{
-			Transport: tr,
-			Framing:   fr,
-			Codec:     resp.NewBytesCodec(),
-		}, nil
+	base := resp.NewBinding(frOpts...)
+	serverPreset := argos.Protocol{
+		Transport: func() (transport.Transport, error) {
+			tr, err := base.Transport()
+			if err != nil {
+				return nil, err
+			}
+			if a, ok := tr.(hasAddr); ok {
+				addrTr = a
+				select {
+				case <-bound:
+				default:
+					close(bound)
+				}
+			}
+			return tr, nil
+		},
+		Framing: base.Framing,
+		Codec:   base.Codec,
 	}
-
-	clientFn := func() (argos.Binding, error) {
-		clientFr = resp.New(frOpts...)
-		tr := tcp.New()
-		return argos.Binding{
-			Transport: &dialCounter{Transport: tr, dials: &dials},
-			Framing:   clientFr,
-			Codec:     resp.NewBytesCodec(),
-		}, nil
+	clientPreset := argos.Protocol{
+		Transport: func() (transport.Transport, error) {
+			tr, err := base.Transport()
+			if err != nil {
+				return nil, err
+			}
+			return &dialCounter{Transport: tr, dials: &dials}, nil
+		},
+		Framing: func() (framing.Framing, error) {
+			fr := resp.New(frOpts...)
+			clientFr = fr
+			return fr, nil
+		},
+		Codec: base.Codec,
 	}
 
 	cfg := baseConfig()
 	srv := server.New(argos.WithConfig(cfg))
-	if err := srv.AddBinding(serverFn); err != nil {
+	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: serverPreset}); err != nil {
 		t.Fatal(err)
 	}
 	if err := register(srv, store); err != nil {
@@ -132,7 +142,7 @@ func startRESP(t *testing.T, register func(*server.Server, *resp.Store) error, f
 	select {
 	case <-bound:
 	case <-time.After(3 * time.Second):
-		t.Fatal("server BindingFunc not invoked")
+		t.Fatal("server protocol not assembled")
 	}
 	addr := waitAddr(t, addrTr)
 	t.Cleanup(func() { _ = srv.Close() })
@@ -140,7 +150,7 @@ func startRESP(t *testing.T, register func(*server.Server, *resp.Store) error, f
 	cli, err := client.New(
 		argos.WithConfig(cfg),
 		argos.WithServiceName(svcName),
-		argos.WithBinding(clientFn),
+		argos.WithProtocol(clientPreset),
 		argos.WithTarget("ip://"+addr),
 	)
 	if err != nil {

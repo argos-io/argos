@@ -1,36 +1,39 @@
-// Package grpc assembles the grpc × http2 Binding: transport/http2,
-// framing/grpc, and a Codec (protobuf by default).
+// Package grpc assembles grpc × http2 × protobuf (by default).
 //
-// Docs may import this package as grpcbinding. Compression and TLS are
-// Options here — not argos.Option — and are forwarded to framing/grpc and
+// Docs may import this package as grpcbinding. Compression and TLS are Options
+// here — not argos.Option — and are forwarded to framing/grpc and
 // transport/http2 respectively (§4.2 / §4.8).
 package grpc
 
 import (
 	"crypto/tls"
-	"fmt"
 
 	"github.com/argos-io/argos"
+	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/codec/protobuf"
+	"github.com/argos-io/argos/framing"
 	grpcframing "github.com/argos-io/argos/framing/grpc"
+	"github.com/argos-io/argos/transport"
 	argoshttp2 "github.com/argos-io/argos/transport/http2"
 )
 
-// New returns a BindingFunc that builds a fresh Transport × Framing × Codec
-// triple on every call. It must not Dial or Serve.
-func New(opts ...Option) argos.BindingFunc {
+// New returns a Protocol preset (http2 × grpc × protobuf unless overridden).
+func New(opts ...Option) argos.Protocol {
 	var o options
 	for _, opt := range opts {
 		if opt != nil {
 			opt.apply(&o)
 		}
 	}
-	return func() (argos.Binding, error) {
-		return assemble(o)
-	}
+	return protocol(o)
 }
 
-func assemble(o options) (argos.Binding, error) {
+// Service returns a ServiceOption that installs New(opts...) on a service entry.
+func Service(opts ...Option) argos.ServiceOption {
+	return argos.ServiceProtocol(New(opts...))
+}
+
+func protocol(o options) argos.Protocol {
 	var http2Opts []argoshttp2.Option
 	if o.serverTLS != nil {
 		http2Opts = append(http2Opts, argoshttp2.WithServerTLS(o.serverTLS))
@@ -38,7 +41,26 @@ func assemble(o options) (argos.Binding, error) {
 	if cli := clientTLSConfig(o); cli != nil {
 		http2Opts = append(http2Opts, argoshttp2.WithClientTLS(cli))
 	}
+	frOpts := frOptsFrom(o)
 
+	return argos.Protocol{
+		Transport: func() (transport.Transport, error) {
+			return argoshttp2.New(http2Opts...), nil
+		},
+		Framing: func() (framing.Framing, error) {
+			return grpcframing.New(frOpts...)
+		},
+		Codec: func() (codec.Codec, error) {
+			cd := o.codec
+			if cd == nil {
+				cd = protobuf.New()
+			}
+			return cd, nil
+		},
+	}
+}
+
+func frOptsFrom(o options) []grpcframing.Option {
 	var frOpts []grpcframing.Option
 	if len(o.compressors) > 0 {
 		frOpts = append(frOpts, grpcframing.WithCompressors(o.compressors...))
@@ -46,22 +68,7 @@ func assemble(o options) (argos.Binding, error) {
 	if o.sendName != "" {
 		frOpts = append(frOpts, grpcframing.WithSendCompressor(o.sendName))
 	}
-
-	fr, err := grpcframing.New(frOpts...)
-	if err != nil {
-		return argos.Binding{}, fmt.Errorf("binding/grpc: framing: %w", err)
-	}
-
-	cd := o.codec
-	if cd == nil {
-		cd = protobuf.New()
-	}
-
-	return argos.Binding{
-		Transport: argoshttp2.New(http2Opts...),
-		Framing:   fr,
-		Codec:     cd,
-	}, nil
+	return frOpts
 }
 
 func clientTLSConfig(o options) *tls.Config {

@@ -32,7 +32,7 @@ internal/fake/  internal/sessionpool/  internal/httpstatus/
 internal/codegen/  internal/codegen/{ir,frontend,gen,stub,check}/
 cmd/argos/
 example/{echo,resp,synth}/
-argos 根包（Config/Option/Binding）
+argos 根包（Config/Option/Protocol）
 Makefile · .github/workflows/ci.yml · invariants_test.go
 ```
 

@@ -61,7 +61,7 @@
 
 要点：
 
-- **没有 `Protocol` 登记表**——组合就是 `argos.BindingFunc`（返回全新三元组的工厂）。
+- **没有协议登记表**——三轴是 `TransportFunc` / `FramingFunc` / `CodecFunc`，装配成 `argos.Protocol`；每个 Client 与每个 server endpoint 各 `Assemble()` 一次，得到互不共享的三元组。
 - **Compressor 不是核心概念**——仅 gRPC 路径使用（`framing/grpc`、`binding/grpc`）。
 - **复用不是第四轴**——`Framing.Reuse()` 声明承载力；借还由客户端会话池执行。
 
@@ -103,7 +103,7 @@ const (
 | `framing/grpc` | 同 `framing` + `compressor` + `internal/httpstatus` + genproto | 唯一可 import genproto |
 | `framing/wholebody` | 同 `framing` + `internal/httpstatus` | |
 | `stream` / `filter` / `resolver` | 见表意 | |
-| `argos`（根） | `transport`、`framing`、`codec`、`filter` | Config / Binding；不 import `compressor` |
+| `argos`（根） | `transport`、`framing`、`codec`、`filter` | Config / Protocol / ServiceConfig；不 import `compressor` |
 | `binding/grpc` | `argos`、http2、grpc framing、codec、compressor | TLS / 压缩 Option |
 | `binding/envelope` | `argos`、tcp/ws/udp、envelope framing、codec | `NewTCP` / `NewWS` / `NewUDP` |
 | `binding/wholebody` | `argos`、http1、wholebody framing、codec | 默认 JSON |
@@ -127,21 +127,23 @@ const (
 - **Codec**：消息 ↔ 字节  
 
 ```go
-type Binding struct {
-    Transport transport.Transport
-    Framing   framing.Framing
-    Codec     codec.Codec
+type Protocol struct {
+    Transport TransportFunc // func() (transport.Transport, error)
+    Framing   FramingFunc
+    Codec     CodecFunc
 }
-
-type BindingFunc func() (Binding, error) // 每次返回全新、互不共享的三元组
+// Protocol.Assemble() → 三个实例；工厂不得 Dial/Serve
 ```
 
-便利工厂：
+客户端在 `Config.Services[name]`（或 `WithProtocol` 等覆盖）里选协议；服务端在 `Config.Endpoints[]` 或 `AddEndpoint` 上声明监听面。
+
+便利预设（返回 `argos.Protocol`）：
 
 ```go
 grpcbinding.New(opts...)           // http2 × grpc；WithTLS / WithCompressor
 envelopebinding.NewTCP() / NewWS() / NewUDP()
 wholebodybinding.New()             // http1 × wholebody，默认 JSON
+grpcbinding.Service(opts...)       // 写入 WithService 的 ServiceProtocol
 ```
 
 ### 4.2 客户端 / 服务端装配
@@ -166,9 +168,9 @@ server: Transport.Serve → Conn → NewServerSession
 ### 4.3 最小用法
 
 ```go
-// 服务端：New 只吃 Option，监听地址跟着 binding 走
+// 服务端：New 只吃 Option；endpoint 携带协议，监听地址可写在 ep 或 WithListenAddress
 srv := server.New()
-_ = srv.AddBinding(grpcbinding.New(), argos.WithListenAddress(":7001"))
+_ = srv.AddEndpoint(argos.EndpointConfig{Protocol: grpcbinding.New()}, argos.WithListenAddress(":7001"))
 // RegisterEchoService(srv, impl) 由生成桩提供
 go srv.Run(ctx)
 
@@ -184,7 +186,7 @@ resp, err := ec.Echo(ctx, &echov1.EchoRequest{Msg: "hi"})
 ```go
 cli, err := client.New(
     argos.WithServiceName("echo.v1.EchoService"),
-    argos.WithBinding(grpcbinding.New()),
+    argos.WithProtocol(grpcbinding.New()),
     argos.WithTarget("ip://127.0.0.1:7001"),
 )
 defer cli.Close()
@@ -193,7 +195,7 @@ st, err := cli.Open(ctx, echov1.EchoService_Echo)
 
 多传输示例见 `example/echo`（grpc / envelope×tcp|ws|udp / wholebody×http1）。收门资产：`example/resp`、`example/synth`。
 
-自定义组合：实现 `BindingFunc`，与 `binding/grpc.New` 同型——不必改 `client`/`server`。
+自定义组合：填 `argos.Protocol` 三个工厂，与 `binding/grpc.New` 同型——不必改 `client`/`server`。
 
 ### 4.4 调用收尾（用法约定）
 
@@ -226,11 +228,11 @@ cli, err := client.New(
 )
 ```
 
-- **构造时快照并校验**：`client.New` / `server.New` / `AddBinding` 各自 clone 一份，之后改原对象不影响已建实例；改进程默认对象必须在建任何实例之前（否则是 data race）。
+- **构造时快照并校验**：`client.New` / `server.New` / `AddEndpoint` 各自 clone 一份，之后改原对象不影响已建实例；改进程默认对象必须在建任何实例之前（否则是 data race）。
 - **零值 = 默认**；要显式关掉可选限额用 `argos.Disabled`（仅 `MaxIdleSessions` / `SessionIdleTimeout` / `MaxSessionLifetime` 接受，其余字段给 `Disabled` 直接报错）。
-- **端不匹配的 Option 编译期拒绝**：`argos.Option` 两端通用，`argos.ClientOption` 只进 `client.New`（`WithServiceName` / `WithTarget` / `WithBinding` / `WithService` / `WithOpenFilter` / 会话池四项），`argos.ServerOption` 只进 `server.New` / `AddBinding`（`WithListenAddress` / `WithFilter` / 入站连接三项 / HTTP 两项）。同一份 `*Config` 仍可同时喂给两端。
-- 服务选择的优先级：`WithBinding` / `WithTarget` > `Services[name]` 条目 > `Config.Binding`；服务名只来自 `WithServiceName`，不随 `WithConfig` 从别的 Client 继承。
-- `server.New` 不返回 error：被拒的 Option 组合由 `AddBinding` / `Run` 报出。
+- **端不匹配的 Option 编译期拒绝**：`argos.Option` 两端通用，`argos.ClientOption` 只进 `client.New`（`WithServiceName` / `WithTarget` / `WithProtocol` / `WithTransport|Framing|Codec` / `WithService` / `WithOpenFilter` / 会话池四项），`argos.ServerOption` 只进 `server.New` / `AddEndpoint`（`WithListenAddress` / `WithEndpoint` / `WithFilter` / 入站连接三项 / HTTP 两项）。同一份 `*Config` 仍可同时喂给两端。
+- 服务选择的优先级：调用侧 `WithProtocol`（或单轴覆盖）/ `WithTarget` > `Services[name]`；服务名只来自 `WithServiceName`，不随 `WithConfig` 从别的 Client 继承。
+- `server.New` 不返回 error：被拒的 Option 组合由 `AddEndpoint` / `Run` 报出。
 - TLS / 压缩在 `binding/grpc.New` 的 Option 里，不在根包。
 
 ### 默认值

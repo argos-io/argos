@@ -31,7 +31,9 @@ type Client struct {
 	service string
 	target  string
 
-	binding argos.Binding
+	tr      transport.Transport
+	framing framing.Framing
+	codec   codec.Codec
 	pool    *sessionpool.Pool
 	perCall int64
 
@@ -85,9 +87,9 @@ func (st *clientLeakState) release() error {
 // names the service the Client opens calls for and is required — generated
 // stubs pass their own.
 //
-// It invokes BindingFunc once (no network I/O) and creates an empty session
-// pool. Target resolution: argos.WithTarget, else the Services entry for the
-// service; a target is required before the first Open that reaches the pool.
+// It assembles the service's protocol once (no network I/O) and creates an
+// empty session pool. Protocol and target come from Config.Services for the
+// selected service name; a target is required before the first Open.
 func New(opts ...argos.ClientOption) (*Client, error) {
 	cfg, err := argos.ClientConfig(opts...)
 	if err != nil {
@@ -103,18 +105,16 @@ func New(opts ...argos.ClientOption) (*Client, error) {
 		return nil, err
 	}
 
-	if sel.Binding == nil {
-		return nil, fmt.Errorf("client: no BindingFunc for service %q", service)
-	}
 	target := sel.Target
-	b, err := sel.Binding()
+	tr, fr, cd, err := sel.Assemble()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("client: service %q: %w", service, err)
 	}
-	if b.Transport == nil || b.Framing == nil || b.Codec == nil {
-		return nil, fmt.Errorf("client: Binding missing Transport, Framing, or Codec")
-	}
-	if err := checkBindingConfig(b.Framing, cfg); err != nil {
+	if err := checkFramingConfig(fr, cfg); err != nil {
+		_ = tr.Close()
+		if c, ok := fr.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
 		return nil, fmt.Errorf("client: %w", err)
 	}
 
@@ -123,7 +123,9 @@ func New(opts ...argos.ClientOption) (*Client, error) {
 		cfg:            cfg,
 		service:        service,
 		target:         target,
-		binding:        b,
+		tr:             tr,
+		framing:        fr,
+		codec:          cd,
 		perCall:        pc,
 		lifetime:       life,
 		cancelLifetime: cancelLife,
@@ -131,14 +133,13 @@ func New(opts ...argos.ClientOption) (*Client, error) {
 	}
 
 	codecName := ""
-	if n, ok := b.Codec.(codec.Named); ok {
+	if n, ok := cd.(codec.Named); ok {
 		codecName = n.CodecName()
 	}
 	// dial closes over the Transport and the lifetime ctx, not over the
 	// Client: the Client holds the pool, so a DialFunc pointing back at the
 	// Client would make the pair reachable from the cleanup hook below and the
 	// hook would never run.
-	tr := b.Transport
 	dial := func(ctx context.Context, endpoint string) (transport.Conn, error) {
 		select {
 		case <-life.Done():
@@ -147,7 +148,7 @@ func New(opts ...argos.ClientOption) (*Client, error) {
 		}
 		return tr.Dial(ctx, transport.DialSpec{Endpoint: endpoint})
 	}
-	c.pool = sessionpool.New(b.Framing, dial, sessionpool.Config{
+	c.pool = sessionpool.New(fr, dial, sessionpool.Config{
 		MaxSessionsPerEndpoint: cfg.MaxSessionsPerEndpoint,
 		MaxIdleSessions:        cfg.MaxIdleSessions,
 		SessionIdleTimeout:     cfg.SessionIdleTimeout,
@@ -196,7 +197,7 @@ func New(opts ...argos.ClientOption) (*Client, error) {
 
 // checkBindingConfig lets a Framing reject size limits its carrier cannot
 // deliver, before any dial. Framings that do not implement it opt out.
-func checkBindingConfig(fr framing.Framing, cfg *argos.Config) error {
+func checkFramingConfig(fr framing.Framing, cfg *argos.Config) error {
 	checker, ok := fr.(interface {
 		CheckConfig(framing.Config) error
 	})
@@ -279,7 +280,7 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 			return nil, mapEstablishErr(err)
 		}
 		gotCall, gotSess = call, sess
-		return stream.Wrap(call, c.binding.Codec), nil
+		return stream.Wrap(call, c.codec), nil
 	}
 
 	// abandonOpen unwinds a call the filter chain opened but will not return.

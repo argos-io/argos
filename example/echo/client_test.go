@@ -17,16 +17,16 @@ import (
 
 func TestClientEchoTransports(t *testing.T) {
 	cases := []struct {
-		name string
-		fn   argos.BindingFunc
-		tune func(*argos.Config)
+		name     string
+		protocol argos.Protocol
+		tune     func(*argos.Config)
 	}{
-		{name: "grpc_http2", fn: grpcbinding.New()},
-		{name: "envelope_tcp", fn: envelopebinding.NewTCP()},
-		{name: "envelope_ws", fn: envelopebinding.NewWS()},
+		{name: "grpc_http2", protocol: grpcbinding.New()},
+		{name: "envelope_tcp", protocol: envelopebinding.NewTCP()},
+		{name: "envelope_ws", protocol: envelopebinding.NewWS()},
 		{
-			name: "envelope_udp",
-			fn:   envelopebinding.NewUDP(),
+			name:     "envelope_udp",
+			protocol: envelopebinding.NewUDP(),
 			// A call has to fit in one datagram, and both ends must agree on
 			// that, which is what sharing the Config buys here.
 			tune: func(cfg *argos.Config) {
@@ -34,12 +34,12 @@ func TestClientEchoTransports(t *testing.T) {
 				cfg.MaxMessageSize = 32 << 10
 			},
 		},
-		{name: "wholebody_http1", fn: wholebodybinding.New()},
+		{name: "wholebody_http1", protocol: wholebodybinding.New()},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ec := startEcho(t, tc.fn, tc.tune)
+			ec := startEcho(t, tc.protocol, tc.tune)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			resp, err := ec.Echo(ctx, &EchoRequest{Msg: tc.name})
@@ -55,17 +55,17 @@ func TestClientEchoTransports(t *testing.T) {
 
 func TestWatchStreaming(t *testing.T) {
 	cases := []struct {
-		name string
-		fn   argos.BindingFunc
+		name     string
+		protocol argos.Protocol
 	}{
-		{name: "grpc_http2", fn: grpcbinding.New()},
-		{name: "envelope_tcp", fn: envelopebinding.NewTCP()},
-		{name: "envelope_ws", fn: envelopebinding.NewWS()},
+		{name: "grpc_http2", protocol: grpcbinding.New()},
+		{name: "envelope_tcp", protocol: envelopebinding.NewTCP()},
+		{name: "envelope_ws", protocol: envelopebinding.NewWS()},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ec := startEcho(t, tc.fn)
+			ec := startEcho(t, tc.protocol)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			stream, err := ec.Watch(ctx, &WatchRequest{Msg: tc.name})
@@ -93,16 +93,16 @@ func TestWatchStreaming(t *testing.T) {
 
 func TestClientMetadataPassesAuthFilter(t *testing.T) {
 	cases := []struct {
-		name string
-		fn   argos.BindingFunc
+		name     string
+		protocol argos.Protocol
 	}{
-		{name: "grpc_http2", fn: grpcbinding.New()},
-		{name: "envelope_tcp", fn: envelopebinding.NewTCP()},
+		{name: "grpc_http2", protocol: grpcbinding.New()},
+		{name: "envelope_tcp", protocol: envelopebinding.NewTCP()},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			ec := startEcho(t, tc.fn, func(cfg *argos.Config) {
+			ec := startEcho(t, tc.protocol, func(cfg *argos.Config) {
 				// The two chains are plain fields on the one Config both ends
 				// start from, so the server-side and client-side halves of
 				// this test's auth cannot drift apart.

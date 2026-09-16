@@ -13,6 +13,7 @@ import (
 
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/client"
+	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/framing"
@@ -137,6 +138,16 @@ type integEnv struct {
 	srvTr  *listenTCP
 }
 
+func integProtocol(tr transport.Transport, frOpts []envelope.Option) argos.Protocol {
+	return argos.Protocol{
+		Transport: func() (transport.Transport, error) { return tr, nil },
+		Framing: func() (framing.Framing, error) {
+			return envelope.New(frOpts...), nil
+		},
+		Codec: func() (codec.Codec, error) { return rawCodec{}, nil },
+	}
+}
+
 func startInteg(t *testing.T) *integEnv {
 	t.Helper()
 	srvTr := newListenTCP("127.0.0.1:0")
@@ -154,13 +165,7 @@ func startInteg(t *testing.T) *integEnv {
 	}
 
 	srv := server.New(argos.WithConfig(cfg))
-	if err := srv.AddBinding(func() (argos.Binding, error) {
-		return argos.Binding{
-			Transport: srvTr,
-			Framing:   envelope.New(frOpts...),
-			Codec:     rawCodec{},
-		}, nil
-	}); err != nil {
+	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: integProtocol(srvTr, frOpts)}); err != nil {
 		t.Fatal(err)
 	}
 	svc := descriptor.MustService(integService, descriptor.MustMethod(integMethod, descriptor.Unary))
@@ -178,13 +183,7 @@ func startInteg(t *testing.T) *integEnv {
 	cli, err := client.New(
 		argos.WithConfig(cfg),
 		argos.WithServiceName(integService),
-		argos.WithBinding(func() (argos.Binding, error) {
-			return argos.Binding{
-				Transport: dials,
-				Framing:   envelope.New(frOpts...),
-				Codec:     rawCodec{},
-			}, nil
-		}),
+		argos.WithProtocol(integProtocol(dials, frOpts)),
 		argos.WithTarget(target),
 	)
 	if err != nil {
@@ -359,9 +358,7 @@ func TestClientEarlyCloseNotReturnedToPool(t *testing.T) {
 		MaxInboundConnAge:      30 * time.Minute,
 	}
 	srv := server.New(argos.WithConfig(cfg))
-	_ = srv.AddBinding(func() (argos.Binding, error) {
-		return argos.Binding{Transport: srvTr, Framing: envelope.New(), Codec: rawCodec{}}, nil
-	})
+	_ = srv.AddEndpoint(argos.EndpointConfig{Protocol: integProtocol(srvTr, nil)})
 	svc := descriptor.MustService(integService, descriptor.MustMethod(integMethod, descriptor.Unary))
 	_ = srv.Register(svc, map[string]filter.Handler{
 		"Echo": func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
@@ -386,9 +383,7 @@ func TestClientEarlyCloseNotReturnedToPool(t *testing.T) {
 	cli, err := client.New(
 		argos.WithConfig(cfg),
 		argos.WithServiceName(integService),
-		argos.WithBinding(func() (argos.Binding, error) {
-			return argos.Binding{Transport: dials, Framing: envelope.New(), Codec: rawCodec{}}, nil
-		}),
+		argos.WithProtocol(integProtocol(dials, nil)),
 		argos.WithTarget("ip://"+addr),
 	)
 	if err != nil {
