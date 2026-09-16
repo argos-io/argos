@@ -50,7 +50,7 @@ type Config struct {
 	MaxSessionsPerEndpoint int
 	MaxIdleSessions        int // 0 = keep no idle sessions
 	SessionIdleTimeout     time.Duration
-	MaxSessionLifetime      time.Duration
+	MaxSessionLifetime     time.Duration
 	HandshakeTimeout       time.Duration // dial + NewClientSession
 	SessionSpec            framing.SessionSpec
 }
@@ -243,11 +243,23 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.Cl
 			b.pendingDial++
 			p.mu.Unlock()
 
-			sess, err := p.dialNew(endpoint)
+			// Deferred: a panic inside dialNew (pluggable Dial or
+			// NewClientSession) must not leave the flight registered. Otherwise
+			// every later Acquire for this endpoint joins a flight nobody will
+			// ever close and blocks until its own ctx expires.
+			var sess framing.ClientSession
+			var err error
+			func() {
+				defer func() {
+					p.mu.Lock()
+					b = p.bucketLocked(endpoint)
+					b.pendingDial--
+					delete(p.flights, endpoint)
+					p.mu.Unlock()
+				}()
+				sess, err = p.dialNew(endpoint)
+			}()
 			p.mu.Lock()
-			b = p.bucketLocked(endpoint)
-			b.pendingDial--
-			delete(p.flights, endpoint)
 			if err != nil {
 				fl.err = err
 				close(fl.done)

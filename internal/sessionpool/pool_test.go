@@ -505,7 +505,7 @@ func TestMaxSessionLifetimeClosesWhenIdle(t *testing.T) {
 	p := sessionpool.New(f, dial, sessionpool.Config{
 		MaxSessionsPerEndpoint: 4,
 		MaxIdleSessions:        4,
-		MaxSessionLifetime:      30 * time.Millisecond,
+		MaxSessionLifetime:     30 * time.Millisecond,
 	})
 	defer p.Close()
 
