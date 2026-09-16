@@ -182,8 +182,22 @@ func (c *clientCarrier) finish(resp *http.Response, err error) bool {
 		c.resp, c.respErr = resp, err
 		c.mu.Unlock()
 		close(c.ready)
+		if err != nil && resp == nil {
+			// No response will arrive: the exchange is over. Without this the
+			// carrier stayed in the in-flight map until the whole StreamConn
+			// closed, for any caller that returns on the error instead of
+			// reaching ResponseTrailers or Abort.
+			c.untrackSelf()
+		}
 	})
 	return won
+}
+
+// untrackSelf removes this carrier from the connection's in-flight map.
+func (c *clientCarrier) untrackSelf() {
+	if c.conn != nil {
+		c.conn.untrack(c)
+	}
 }
 
 func (c *clientCarrier) waitReady() error {
@@ -227,12 +241,19 @@ func (c *clientCarrier) sendErr(err error) error {
 	return transport.WrapSendError(err, true)
 }
 
-// Read reads the response body, waiting for headers first if needed.
+// Read reads the response body, waiting for headers first if needed. The end of
+// the body ends the exchange, so the carrier closes the body and stops being
+// tracked there; net/http needs the Close to release the stream.
 func (c *clientCarrier) Read(p []byte) (int, error) {
 	if err := c.waitReady(); err != nil {
 		return 0, err
 	}
-	return c.resp.Body.Read(p)
+	n, err := c.resp.Body.Read(p)
+	if err != nil {
+		_ = c.resp.Body.Close()
+		c.untrackSelf()
+	}
+	return n, err
 }
 
 // CloseSend ends the request body (HTTP/2 END_STREAM on the request side).

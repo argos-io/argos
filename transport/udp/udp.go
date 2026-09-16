@@ -316,6 +316,13 @@ type Conn struct {
 	// detach removes this Conn from the Transport's tracking map when it
 	// closes, so the map never retains a closed association.
 	detach func()
+
+	// recvMu serialises client reads and owns recvBuf, a reusable
+	// MaxDatagramSize landing area. Returning a slice of a freshly allocated
+	// 64 KiB buffer instead kept the whole array alive for as long as the
+	// caller held the payload.
+	recvMu  sync.Mutex
+	recvBuf []byte
 }
 
 func newClientConn(uc *net.UDPConn) *Conn {
@@ -386,15 +393,20 @@ func (c *Conn) RecvDatagram() ([]byte, error) {
 	if c.uc == nil {
 		return nil, net.ErrClosed
 	}
-	buf := make([]byte, MaxDatagramSize)
-	n, err := c.uc.Read(buf)
+	c.recvMu.Lock()
+	defer c.recvMu.Unlock()
+	if c.recvBuf == nil {
+		c.recvBuf = make([]byte, MaxDatagramSize)
+	}
+	n, err := c.uc.Read(c.recvBuf)
 	if err != nil {
 		if c.closed.Load() {
 			return nil, net.ErrClosed
 		}
 		return nil, err
 	}
-	return buf[:n], nil
+	// Copy out: recvBuf is reused by the next read.
+	return append([]byte(nil), c.recvBuf[:n]...), nil
 }
 
 // SendDatagram writes one UDP datagram. Payloads larger than MaxDatagramSize
