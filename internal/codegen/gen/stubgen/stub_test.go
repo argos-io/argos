@@ -58,7 +58,7 @@ func TestGenerateAllStreamingShapes(t *testing.T) {
 		"errors.Is(err, io.EOF)",
 		"Header() (metadata.Metadata, error)",
 		"Trailer() metadata.Metadata",
-		"NewChatServiceClient(c *client.Client)",
+		"NewChatServiceClient(opts ...argos.ClientOption) (ChatServiceClient, error)",
 	} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("generated source missing %q\n%s", want, source)
@@ -124,5 +124,87 @@ func TestGenerateSameMethodNameAcrossServicesCompiles(t *testing.T) {
 		if !strings.Contains(source, want) {
 			t.Fatalf("generated source missing %q\n%s", want, source)
 		}
+	}
+}
+
+// The constructor carries the service name so a caller never has to repeat it,
+// and it owns the Client it built, which Close has to reach.
+func TestGenerateClientConstructorCarriesServiceName(t *testing.T) {
+	got, err := stubgen.Generate(oneUnaryService("OwnerService", "Do"))
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if _, err := parser.ParseFile(token.NewFileSet(), "sample.argos.go", got, parser.AllErrors); err != nil {
+		t.Fatalf("generated source is not valid Go: %v\n%s", err, got)
+	}
+
+	source := string(got)
+	for _, want := range []string{
+		`"github.com/argos-io/argos"`,
+		`argos.WithServiceName("sample.v1.OwnerService")`,
+		"client.New(append([]argos.ClientOption{",
+		"return &ownerServiceClient{c: c}, nil",
+		"func (c *ownerServiceClient) Close() error {",
+		"return c.c.Close()",
+	} {
+		if !strings.Contains(source, want) {
+			t.Fatalf("generated source missing %q\n%s", want, source)
+		}
+	}
+	// The interface has to expose Close, or the Client the constructor built is
+	// unreachable through the value it returns.
+	iface := source[strings.Index(source, "type OwnerServiceClient interface {"):]
+	iface = iface[:strings.Index(iface, "}")]
+	if !strings.Contains(iface, "Close() error") {
+		t.Fatalf("OwnerServiceClient does not declare Close:\n%s", iface)
+	}
+}
+
+// An RPC named Close would be declared twice with two signatures, in the
+// interface and on the struct. The generator must say so instead of writing a
+// file that no compiler accepts.
+func TestGenerateRejectsRPCNamedClose(t *testing.T) {
+	_, err := stubgen.Generate(oneUnaryService("LifecycleService", "Close"))
+	if err == nil {
+		t.Fatal("Generate accepted an RPC named Close")
+	}
+	for _, want := range []string{"sample.v1.LifecycleService", "Close", "LifecycleServiceClient"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not name %q", err, want)
+		}
+	}
+}
+
+// The constructor passes an appended option slice as a variadic and the client
+// half pulls in an import the server half never names. Neither is visible to a
+// source-text assertion: only the type checker rejects them.
+func TestGeneratedClientConstructorsCompile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles generated code")
+	}
+	compileStub(t, oneUnaryService("OwnerService", "Do"), `	if c, err := sample.NewOwnerServiceClient(); err == nil {
+		if err := c.Close(); err != nil {
+			fmt.Println("Close:", err)
+			return
+		}
+	}
+	fmt.Println("ok")
+`)
+}
+
+func oneUnaryService(serviceGoName, methodGoName string) ir.File {
+	return ir.File{
+		GoPackage:    "sample",
+		ProtoPackage: "sample.v1",
+		InputBase:    "sample",
+		Services: []ir.Service{{
+			GoName:   serviceGoName,
+			FullName: "sample.v1." + serviceGoName,
+			Methods: []ir.Method{{
+				GoName:    methodGoName,
+				FullName:  "sample.v1." + serviceGoName + "." + methodGoName,
+				InputType: "Request", OutputType: "Response",
+			}},
+		}},
 	}
 }

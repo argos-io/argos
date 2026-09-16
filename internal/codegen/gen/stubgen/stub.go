@@ -63,6 +63,10 @@ func Generate(file ir.File) ([]byte, error) {
 	return formatted, nil
 }
 
+// closeMethod is the single method name the generated client interface keeps
+// for itself.
+const closeMethod = "Close"
+
 // stubImports is every package the generated body may reference, in the
 // conventional grouping (standard library first).
 var stubImports = []string{
@@ -70,6 +74,7 @@ var stubImports = []string{
 	"errors",
 	"fmt",
 	"io",
+	"github.com/argos-io/argos",
 	"github.com/argos-io/argos/client",
 	"github.com/argos-io/argos/descriptor",
 	"github.com/argos-io/argos/filter",
@@ -145,6 +150,13 @@ func validateMethod(svc ir.Service, method ir.Method) error {
 	}
 	if strings.Contains(method.FullName, "/") {
 		return fmt.Errorf("codegen: method FullName %q must be protobuf dotted form", method.FullName)
+	}
+	// The client stub owns Close (it releases the Client the constructor built),
+	// so an RPC of that name would be declared twice with two signatures. Failing
+	// here beats emitting a file that does not compile.
+	if method.GoName == closeMethod {
+		return fmt.Errorf("codegen: service %s has RPC %s: it collides with the generated %sClient.%s; rename the RPC",
+			svc.FullName, method.GoName, svc.GoName, closeMethod)
 	}
 	return nil
 }
@@ -379,6 +391,8 @@ func writeClientInterface(b *strings.Builder, svc ir.Service) {
 	for _, method := range svc.Methods {
 		writeClientMethod(b, svc, method)
 	}
+	b.WriteString("\t// Close closes the Client this stub built, releasing its session pool.\n")
+	b.WriteString("\tClose() error\n")
 	b.WriteString("}\n\n")
 
 	for _, method := range svc.Methods {
@@ -444,27 +458,43 @@ func writeClientMethod(b *strings.Builder, svc ir.Service, method ir.Method) {
 func writeClient(b *strings.Builder, svc ir.Service) {
 	clientType := clientStructName(svc.GoName)
 	constructor := "New" + svc.GoName + "Client"
-	short := serviceShortName(svc.GoName)
+
+	// The service name goes in as a literal rather than a read of the emitted
+	// service descriptor, which would tie the constructor to the order the var
+	// block is initialized in.
 	b.WriteString("// ")
 	b.WriteString(constructor)
-	b.WriteString(" wraps c for the ")
-	b.WriteString(short)
-	b.WriteString(" service. c must be created for service ")
-	b.WriteString(strconvQuote(svc.FullName))
-	b.WriteString(".\n")
+	b.WriteString(" builds a Client for ")
+	b.WriteString(svc.FullName)
+	b.WriteString(". The service\n")
+	b.WriteString("// name is built in; an explicit argos.WithServiceName overrides it because\n")
+	b.WriteString("// later options win. Close closes the Client this stub built.\n")
 	b.WriteString("func ")
 	b.WriteString(constructor)
-	b.WriteString("(c *client.Client) ")
+	b.WriteString("(opts ...argos.ClientOption) (")
 	b.WriteString(svc.GoName)
-	b.WriteString("Client {\n")
+	b.WriteString("Client, error) {\n")
+	b.WriteString("\tc, err := client.New(append([]argos.ClientOption{argos.WithServiceName(")
+	b.WriteString(strconvQuote(svc.FullName))
+	b.WriteString(")}, opts...)...)\n")
+	b.WriteString("\tif err != nil {\n")
+	b.WriteString("\t\treturn nil, err\n")
+	b.WriteString("\t}\n")
 	b.WriteString("\treturn &")
 	b.WriteString(clientType)
-	b.WriteString("{c: c}\n")
+	b.WriteString("{c: c}, nil\n")
 	b.WriteString("}\n\n")
+
 	b.WriteString("type ")
 	b.WriteString(clientType)
 	b.WriteString(" struct {\n")
 	b.WriteString("\tc *client.Client\n")
+	b.WriteString("}\n\n")
+
+	b.WriteString("func (c *")
+	b.WriteString(clientType)
+	b.WriteString(") Close() error {\n")
+	b.WriteString("\treturn c.c.Close()\n")
 	b.WriteString("}\n\n")
 
 	for _, method := range svc.Methods {

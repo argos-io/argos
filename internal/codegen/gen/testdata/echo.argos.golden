@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
@@ -73,6 +74,8 @@ func (s *echoServiceWatchServer) Send(msg *Event) error {
 type EchoServiceClient interface {
 	Echo(context.Context, *EchoRequest) (*EchoResponse, error)
 	Watch(context.Context, *WatchRequest) (EchoService_WatchClient, error)
+	// Close closes the Client this stub built, releasing its session pool.
+	Close() error
 }
 
 // EchoService_WatchClient sends and receives messages for a Watch call.
@@ -83,13 +86,23 @@ type EchoService_WatchClient interface {
 	Close() error
 }
 
-// NewEchoServiceClient wraps c for the Echo service. c must be created for service "echo.v1.EchoService".
-func NewEchoServiceClient(c *client.Client) EchoServiceClient {
-	return &echoServiceClient{c: c}
+// NewEchoServiceClient builds a Client for echo.v1.EchoService. The service
+// name is built in; an explicit argos.WithServiceName overrides it because
+// later options win. Close closes the Client this stub built.
+func NewEchoServiceClient(opts ...argos.ClientOption) (EchoServiceClient, error) {
+	c, err := client.New(append([]argos.ClientOption{argos.WithServiceName("echo.v1.EchoService")}, opts...)...)
+	if err != nil {
+		return nil, err
+	}
+	return &echoServiceClient{c: c}, nil
 }
 
 type echoServiceClient struct {
 	c *client.Client
+}
+
+func (c *echoServiceClient) Close() error {
+	return c.c.Close()
 }
 
 func (c *echoServiceClient) Echo(ctx context.Context, req *EchoRequest) (rsp *EchoResponse, err error) {
