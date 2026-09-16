@@ -5,11 +5,11 @@ package argos
 type Phase uint8
 
 const (
-	PhaseOpen Phase = iota // open / parse OPEN
-	PhaseDispatch          // route and Filter/handler
-	PhaseFinish            // write final status
-	PhaseCleanup           // Close and resource reclaim
-	PhaseLeak              // CallStream GC'd without Close (§4.2)
+	PhaseOpen     Phase = iota // open / parse OPEN
+	PhaseDispatch              // route and Filter/handler
+	PhaseFinish                // write final status
+	PhaseCleanup               // Close and resource reclaim
+	PhaseLeak                  // CallStream GC'd without Close (§4.2)
 )
 
 // CallInfo carries diagnostic fields for WithCallErrorObserver.

@@ -18,7 +18,10 @@ func TestParseRejectsBareHostPort(t *testing.T) {
 }
 
 func TestParseRejectsNilContext(t *testing.T) {
-	if _, err := resolver.Parse(nil, "ip://127.0.0.1:7001"); err == nil {
+	// A typed nil, not the literal: passing a nil ctx is exactly what this test
+	// exists to reject.
+	var nilCtx context.Context
+	if _, err := resolver.Parse(nilCtx, "ip://127.0.0.1:7001"); err == nil {
 		t.Fatal("Parse accepted nil context")
 	}
 }

@@ -164,6 +164,8 @@ func TestErrCardinality(t *testing.T) {
 	if errors.Is(plain, status.ErrCardinality) {
 		t.Fatal("plain Internal must not match ErrCardinality")
 	}
+	//lint:ignore SA1032 deliberate reverse-direction check: matching must not
+	// be symmetric here, so both orders are asserted.
 	if errors.Is(status.ErrCardinality, plain) {
 		t.Fatal("ErrCardinality must not match plain Internal")
 	}
@@ -190,9 +192,12 @@ func TestExhaustedSentinels(t *testing.T) {
 		t.Fatal("calls and sessions exhausted must be distinguishable")
 	}
 	plain := status.Error(status.ResourceExhausted, "x")
+	//lint:ignore SA1032 deliberate reverse-direction checks: both orders are
+	// asserted because matching must not be symmetric here.
 	if errors.Is(plain, status.ErrSessionsExhausted) || errors.Is(status.ErrSessionsExhausted, plain) {
 		t.Fatal("plain ResourceExhausted must not match ErrSessionsExhausted")
 	}
+	//lint:ignore SA1032 see above.
 	if errors.Is(plain, status.ErrCallsExhausted) || errors.Is(status.ErrCallsExhausted, plain) {
 		t.Fatal("plain ResourceExhausted must not match ErrCallsExhausted")
 	}
