@@ -14,11 +14,16 @@ test-generate:
 	go run ./cmd/argos generate stub --check example/echo/echo.argos.go \
 		--from proto --proto-path . example/echo/echo.proto
 
-# go vet 与当前 Go 工具链一致；staticcheck 可选
+# go vet + gofmt + staticcheck. The previous recipe chained staticcheck with
+# "|| echo 未安装，跳过": staticcheck exits non-zero when it has findings, so
+# every finding was swallowed and reported as "not installed".
 lint:
 	go vet ./...
-	@command -v staticcheck >/dev/null && staticcheck ./... || \
-		echo "staticcheck 未安装，跳过（go install honnef.co/go/tools/cmd/staticcheck@latest）"
+	@unformatted="$$(gofmt -l .)"; \
+	if [ -n "$$unformatted" ]; then echo "gofmt needed:"; echo "$$unformatted"; exit 1; fi
+	@command -v staticcheck >/dev/null 2>&1 || { \
+		echo "staticcheck 未安装（go install honnef.co/go/tools/cmd/staticcheck@latest）"; exit 1; }
+	staticcheck ./...
 
 # Architecture accept gates (§3 / §3.1 / §9): root Invariant*|Accept*|Section9*.
 accept:
