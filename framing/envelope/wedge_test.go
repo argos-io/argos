@@ -91,10 +91,22 @@ import (
 //     (b)'s re-loop re-enters the accept branch and parks.
 //
 //     The reader serves both the accept and the demux phase, so every error it
-//     sees has to be classified against two different owners. That is the shape
-//     to change: either split the two phases' error handling outright, or give
-//     the reader an explicit idle state it returns to when no accept owns the
-//     connection, instead of re-entering the accept branch with a live ctx.
+//     sees has to be classified against two different owners.
+//
+//     First step of the restructure, also measured with the test running:
+//     extracting the accept phase into its own function with a LOCAL retry loop
+//     for wake-induced expiries (so a retry cannot re-enter the accepting branch
+//     and park, which is what sank attempt (b)). Result: 3/10 failing - better
+//     than the 5/10 baseline, worse than the 2/8 that generation alone reached,
+//     and the wedge is back at random rounds. Not converged.
+//
+//     What remains true across all six attempts: every fix moved the failure
+//     around without removing it, because the reader still serves two owners.
+//     The next attempt should finish the split - a demux phase that RETURNS to
+//     the top level when its call is no longer current (never re-reading, never
+//     handing anything to the accept side) and an explicit idle phase for when
+//     no accept and no call own the connection - rather than adding a seventh
+//     classification rule to the shared loop.
 //
 // Defects 1-3 are what make the failure deterministic today (round 0, 3/3);
 // with them fixed the wedge is gone and only defect 4 remains, intermittently.
