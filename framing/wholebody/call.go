@@ -74,6 +74,18 @@ func checkInboundMeta(cfg framing.Config, md metadata.Metadata) error {
 	return nil
 }
 
+// markBadUnlessLimit poisons the session unless err is a call-scoped inbound
+// limit. Reuse() is Concurrent, so one response exceeding MaxMessageSize or
+// MaxInboundMetadataSize must not drop the endpoint handle out from under the
+// other calls sharing the Conn: the peer is not at fault for the limit we set,
+// and the connection is undamaged.
+func (c *call) markBadUnlessLimit(err error) {
+	if status.CodeOf(err) == status.ResourceExhausted {
+		return
+	}
+	c.markBad()
+}
+
 func (c *call) markBad() {
 	if c.client != nil {
 		c.client.markBad()
@@ -168,7 +180,8 @@ func (c *call) Send(payload []byte) error {
 		data = []byte{}
 	}
 	if c.maxMsg > 0 && int64(len(data)) > c.maxMsg {
-		return fmt.Errorf("framing/wholebody: Send payload %d > max %d", len(data), c.maxMsg)
+		return status.Error(status.ResourceExhausted,
+			fmt.Sprintf("framing/wholebody: Send payload %d > max %d", len(data), c.maxMsg))
 	}
 	cp := append([]byte(nil), data...)
 
@@ -343,7 +356,7 @@ func (c *call) recvClient() ([]byte, func(), error) {
 	}
 	inMD := DecodeMetadata(hs)
 	if err := checkInboundMeta(c.cfg, inMD); err != nil {
-		c.markBad()
+		c.markBadUnlessLimit(err)
 		return nil, nil, err
 	}
 	if c.md != nil {
@@ -360,7 +373,7 @@ func (c *call) recvClient() ([]byte, func(), error) {
 		}
 		body, rerr := readAllLimited(c.body, limit)
 		if rerr != nil && rerr != io.EOF {
-			c.markBad()
+			c.markBadUnlessLimit(rerr)
 			return nil, nil, rerr
 		}
 		stErr := DecodeErrorBody(body, httpstatus.FromHTTP(httpSt))
@@ -373,7 +386,7 @@ func (c *call) recvClient() ([]byte, func(), error) {
 
 	data, err := readAllLimited(c.body, limit)
 	if err != nil {
-		c.markBad()
+		c.markBadUnlessLimit(err)
 		return nil, nil, err
 	}
 	c.mu.Lock()
@@ -433,7 +446,10 @@ func readAllLimited(r io.Reader, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(b)) > limit {
-		return nil, fmt.Errorf("framing/wholebody: message exceeds max size %d", limit)
+		// ResourceExhausted so callers can tell a limit we chose from damage to
+		// the connection; see markBadUnlessLimit.
+		return nil, status.Error(status.ResourceExhausted,
+			fmt.Sprintf("framing/wholebody: message exceeds max size %d", limit))
 	}
 	return b, nil
 }

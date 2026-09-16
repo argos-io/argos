@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -313,6 +314,17 @@ func (c *call) Deadline() (time.Time, bool) {
 	return c.deadline, true
 }
 
+// markBadUnlessLimit poisons the session unless err is a call-scoped inbound
+// limit. Reuse() is Concurrent, so one stream exceeding MaxInboundMetadataSize
+// must not Abort the Carrier and drop the calls sharing the Conn — the same
+// reasoning the LPM size check in recvOne already applies.
+func (c *call) markBadUnlessLimit(err error) {
+	if status.CodeOf(err) == status.ResourceExhausted {
+		return
+	}
+	c.markBad()
+}
+
 func (c *call) markBad() {
 	if c.client != nil {
 		c.client.markBad()
@@ -444,11 +456,13 @@ func (c *call) Send(payload []byte) error {
 	cp := append([]byte(nil), data...)
 	compressed, wire, err := compressMessage(c.sendComp, cp)
 	if err != nil {
-		c.markBad()
-		return err
+		// Local encoder failure: nothing was written, so the connection is
+		// undamaged and the Concurrent session stays usable for other calls.
+		return status.Error(status.Internal, err.Error())
 	}
 	if c.cfg.MaxFrameSize > 0 && int64(len(wire)) > c.cfg.MaxFrameSize {
-		return fmt.Errorf("framing/grpc: Send wire payload %d > max frame %d", len(wire), c.cfg.MaxFrameSize)
+		return status.Error(status.ResourceExhausted,
+			fmt.Sprintf("framing/grpc: Send wire payload %d > max frame %d", len(wire), c.cfg.MaxFrameSize))
 	}
 	if err := WriteLPM(c.body, compressed, wire); err != nil {
 		return c.sendFailed(err)
@@ -560,7 +574,9 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 
 	if c.initiator {
 		if err := c.ensureResponseHeaders(); err != nil {
-			c.markBad()
+			// An inbound metadata limit is call-scoped, like the LPM size check
+			// below: Concurrent streams share a Conn, so it must not Abort.
+			c.markBadUnlessLimit(err)
 			return nil, nil, err
 		}
 	}
@@ -583,6 +599,14 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 		// Call-scoped size limits must not Abort the Carrier: the peer may still
 		// be writing the oversize body, and Concurrent streams share a Conn.
 		if status.CodeOf(err) == status.ResourceExhausted {
+			if errors.Is(err, ErrLPMUnsynced) {
+				// The stream can no longer be parsed, so stop reading it. The
+				// session stays reusable: on http2 this call owns its stream,
+				// and Close tears that down without touching the others.
+				c.mu.Lock()
+				c.sawTerminal = true
+				c.mu.Unlock()
+			}
 			return nil, nil, err
 		}
 		// Non-gRPC HTTP error bodies are not LPM. Before any message, drain and
@@ -701,7 +725,7 @@ func (c *call) finishClientRecv() ([]byte, func(), error) {
 	// anomaly is deliberately dropped here rather than failing the call.
 	userMD, _ := DecodeMetadata(trailers)
 	if err := checkInboundMeta(c.cfg, userMD); err != nil {
-		c.markBad()
+		c.markBadUnlessLimit(err)
 		return nil, nil, err
 	}
 	// Also merge trailers-only user keys that landed in headers (excluding reserved).

@@ -10,6 +10,22 @@ import (
 
 const lpmHeaderSize = 5
 
+// ErrLPMUnsynced reports that an oversize message left the stream misaligned,
+// so no further message can be read from it. The receive direction is finished;
+// the size rejection it wraps is still the status to report to the caller.
+var ErrLPMUnsynced = fmt.Errorf("framing/grpc: LPM stream out of sync")
+
+// maxDrain bounds how much of an oversize message is worth reading to keep the
+// stream aligned. One extra message's slack, floored so a small maxLen still
+// tolerates a normal overshoot.
+func maxDrain(maxLen int64) int64 {
+	const floor = 1 << 20
+	if maxLen < floor {
+		return floor
+	}
+	return maxLen
+}
+
 // WriteLPM writes one gRPC Length-Prefixed Message: 1-byte compressed flag,
 // 4-byte big-endian length, then payload. A zero-length payload is a valid
 // empty message (not end-of-stream).
@@ -53,10 +69,28 @@ func ReadLPMLimited(r io.Reader, maxLen int64) (compressed bool, payload []byte,
 	}
 	n := binary.BigEndian.Uint32(hdr[1:])
 	if maxLen > 0 && int64(n) > maxLen {
-		// Drain the claimed payload without allocating it so the peer Send can finish.
-		_, _ = io.Copy(io.Discard, io.LimitReader(r, int64(n)))
-		return false, nil, status.Error(status.ResourceExhausted,
+		st := status.Error(status.ResourceExhausted,
 			fmt.Sprintf("framing/grpc: LPM length %d > max %d", n, maxLen))
+		// Draining keeps the stream aligned so a later message on the same
+		// stream still parses, but the length is a 32-bit field the peer
+		// chooses: draining whatever it claims lets it hold the stream for up
+		// to 4 GiB of reads. Past maxDrain the stream is not worth
+		// resynchronising - on http2 each call owns its stream, so the caller
+		// tears it down - and ErrLPMUnsynced says so.
+		if int64(n) > maxDrain(maxLen) {
+			return false, nil, fmt.Errorf("%w: %w", ErrLPMUnsynced, st)
+		}
+		// A drain that stops short leaves the stream misaligned, so it must not
+		// be reported as a plain size rejection. io.Copy reports a truncated
+		// source as success, so compare the count rather than the error.
+		drained, derr := io.Copy(io.Discard, io.LimitReader(r, int64(n)))
+		if derr != nil {
+			return false, nil, fmt.Errorf("%w: %w", ErrLPMUnsynced, derr)
+		}
+		if drained != int64(n) {
+			return false, nil, fmt.Errorf("%w: drained %d of %d", ErrLPMUnsynced, drained, n)
+		}
+		return false, nil, st
 	}
 	payload = make([]byte, n)
 	if n == 0 {
