@@ -29,7 +29,7 @@
 
 ### 非目标
 
-- 配置文件 / 热加载 / 插件生态 / 进程级可变配置槽位
+- 配置文件 / 热加载 / 插件生态（配置只走代码：`argos.DefaultConfig()` 是进程级默认对象，但没有文件格式、没有 reload）
 - 通用非 gRPC 的 HTTP/2 协议栈；http1 流式；udp 上的可靠传输或多路复用
 - 完整 RESP / 数据库协议实现（example 仅为收门资产）
 - 与 v1（`master`）线格式或状态码数值兼容
@@ -147,7 +147,8 @@ wholebodybinding.New()             // http1 × wholebody，默认 JSON
 ### 4.2 客户端 / 服务端装配
 
 ```
-client.New(cfg, serviceName)
+client.New(argos.WithServiceName(name), ...)
+  → 解析 Config（WithConfig 指定的对象或进程默认）
   → 工厂建一次三元组 + 按 Reuse() 建空池
 Open(ctx, Method)
   → 准入 → CallMetadata → OpenFilter
@@ -165,22 +166,29 @@ server: Transport.Serve → Conn → NewServerSession
 ### 4.3 最小用法
 
 ```go
-cfg, err := argos.New(
-    argos.WithService("echo.v1.EchoService",
-        argos.ServiceBinding(grpcbinding.New()),
-        argos.ServiceTarget("ip://127.0.0.1:7001"),
-        argos.ServiceListenAddress(":7001")),
-)
-if err != nil { ... }
-
-srv := server.New(cfg)
-_ = srv.AddBinding(grpcbinding.New(), ":7001")
+// 服务端：New 只吃 Option，监听地址跟着 binding 走
+srv := server.New()
+_ = srv.AddBinding(grpcbinding.New(), argos.WithListenAddress(":7001"))
 // RegisterEchoService(srv, impl) 由生成桩提供
-go srv.Serve(ctx)
+go srv.Run(ctx)
 
-cli, err := client.New(cfg, "echo.v1.EchoService")
-ec := echov1.NewEchoServiceClient(cli)
+// 客户端：生成桩内置了 service name，自己持有 Client
+ec, err := echov1.NewEchoServiceClient(argos.WithTarget("ip://127.0.0.1:7001"))
+if err != nil { ... }
+defer ec.Close()
 resp, err := ec.Echo(ctx, &echov1.EchoRequest{Msg: "hi"})
+```
+
+不经生成桩、直接用组合层（自定义 Framing、或只要 `Open` 的裸调用）：
+
+```go
+cli, err := client.New(
+    argos.WithServiceName("echo.v1.EchoService"),
+    argos.WithBinding(grpcbinding.New()),
+    argos.WithTarget("ip://127.0.0.1:7001"),
+)
+defer cli.Close()
+st, err := cli.Open(ctx, echov1.EchoService_Echo)
 ```
 
 多传输示例见 `example/echo`（grpc / envelope×tcp|ws|udp / wholebody×http1）。收门资产：`example/resp`、`example/synth`。
@@ -197,22 +205,31 @@ resp, err := ec.Echo(ctx, &echov1.EchoRequest{Msg: "hi"})
 
 ## 5. 配置
 
-配置是显式不可变的 `*argos.Config`，无进程级槽位。
+`argos.Config` 是**普通结构体**：字段写你关心的，其余留零值——零值即内置默认。进程默认对象是 `argos.DefaultConfig()`，`client.New` / `server.New` 不指定配置时就从它出发。
 
 ```go
-cfg, err := argos.New(
-    argos.WithFilter(auth),
+// 进程级：启动时改一次，之后建的 Client/Server 都从这里出发
+argos.DefaultConfig().MaxMessageSize = 8 << 20
+argos.DefaultConfig().ConnErrorObserver = logConnError
+
+// 某个 Client/Server 要另一份配置：字面量只写关心的字段
+cfg := &argos.Config{MaxMessageSize: 1 << 20, Filters: []filter.Filter{auth}}
+srv := server.New(argos.WithConfig(cfg), argos.WithListenAddress(":7001"))
+
+// 单个旋钮的临时覆盖仍走 Option
+cli, err := client.New(
+    argos.WithServiceName("echo.v1.EchoService"),
+    argos.WithTarget("ip://127.0.0.1:7001"),
     argos.WithOpenFilter(clientAuth),
     argos.WithMaxMessageSize(4<<20),
-    argos.WithService("echo.v1.EchoService",
-        argos.ServiceBinding(grpcbinding.New()),
-        argos.ServiceTarget("ip://127.0.0.1:7001")),
 )
 ```
 
-- `argos.New` 一次构造并校验；可用 `cfg.With(opts...)` 派生新值。
-- 解析优先级：`client.New` / `AddBinding` Option > 服务级 > Config 顶层 > 内置默认。
-- **端不匹配的 Option 静默忽略**（同一份 Config 可同时喂给 Client 与 Server）。
+- **构造时快照并校验**：`client.New` / `server.New` / `AddBinding` 各自 clone 一份，之后改原对象不影响已建实例；改进程默认对象必须在建任何实例之前（否则是 data race）。
+- **零值 = 默认**；要显式关掉可选限额用 `argos.Disabled`（仅 `MaxIdleSessions` / `SessionIdleTimeout` / `MaxSessionLifetime` 接受，其余字段给 `Disabled` 直接报错）。
+- **端不匹配的 Option 编译期拒绝**：`argos.Option` 两端通用，`argos.ClientOption` 只进 `client.New`（`WithServiceName` / `WithTarget` / `WithBinding` / `WithService` / `WithOpenFilter` / 会话池四项），`argos.ServerOption` 只进 `server.New` / `AddBinding`（`WithListenAddress` / `WithFilter` / 入站连接三项 / HTTP 两项）。同一份 `*Config` 仍可同时喂给两端。
+- 服务选择的优先级：`WithBinding` / `WithTarget` > `Services[name]` 条目 > `Config.Binding`；服务名只来自 `WithServiceName`，不随 `WithConfig` 从别的 Client 继承。
+- `server.New` 不返回 error：被拒的 Option 组合由 `AddBinding` / `Run` 报出。
 - TLS / 压缩在 `binding/grpc.New` 的 Option 里，不在根包。
 
 ### 默认值
@@ -234,8 +251,10 @@ cfg, err := argos.New(
 | `SessionIdleTimeout` | 50s | 客户端空闲回收 |
 | `MaxSessionLifetime` | 30m | 客户端会话寿命 |
 | `MaxInboundConns` | 1024 | 服务端入站连接 |
-| `MaxInboundConnIdle` | 50s | 服务端空闲（必填正数） |
-| `MaxInboundConnAge` | 30m | 服务端寿命（必填正数） |
+| `MaxInboundConnIdle` | 50s | 服务端空闲（无禁用值） |
+| `MaxInboundConnAge` | 30m | 服务端寿命（无禁用值） |
+| `HTTPReadHeaderTimeout` | 10s | 服务端：HTTP 头块 / upgrade（无禁用值） |
+| `HTTPIdleTimeout` | 50s | 服务端：keep-alive 空闲（无禁用值） |
 
 默认下 `perCall ≈ 16 MiB`，`64 × 16 MiB = MaxBufferedBytes`。
 
@@ -273,7 +292,9 @@ go run ./cmd/argos generate stub --from proto --proto-path . example/echo/echo.p
 - 描述符字段不导出，经 `MustMethod` / `MustService` 构造。
 - 标识带服务前缀：`EchoService_Echo`、`EchoServiceDesc`。
 - 服务端：`RegisterEchoService(srv, impl)`——不生成 `switch method`。
-- 客户端：具名 Client 复用底层 `client.Client`；单次 RPC 只关 CallStream。
+- 客户端只有一个工厂：`NewEchoServiceClient(opts...)` 内置 service name 并自持 `client.Client`，`Close` 关它；显式 `WithServiceName` 可覆盖内置名。
+- 单次 RPC 只关 CallStream，不关 Client。
+- RPC 不得取名 `Close`：会与客户端接口的 `Close() error` 撞名，生成器直接报错。
 
 ---
 
