@@ -10,6 +10,7 @@ import (
 )
 
 func TestBindingFuncReturnsIndependentInstances(t *testing.T) {
+	t.Parallel()
 	var n int
 	fn := argos.BindingFunc(func() (argos.Binding, error) {
 		n++
@@ -20,19 +21,22 @@ func TestBindingFuncReturnsIndependentInstances(t *testing.T) {
 		}, nil
 	})
 
-	cfg, err := argos.New(argos.WithBinding(fn))
+	cfg, err := argos.ClientConfig(argos.WithConfig(&argos.Config{}), argos.WithBinding(fn))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Binding == nil {
+	// WithBinding is a call-site override, not the Config.Binding fallback, so
+	// SelectedService is the only way to read back what the Client will use.
+	_, sel := cfg.SelectedService()
+	if sel.Binding == nil {
 		t.Fatal("Binding not stored")
 	}
 
-	b1, err := cfg.Binding()
+	b1, err := sel.Binding()
 	if err != nil {
 		t.Fatal(err)
 	}
-	b2, err := cfg.Binding()
+	b2, err := sel.Binding()
 	if err != nil {
 		t.Fatal(err)
 	}

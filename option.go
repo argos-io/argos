@@ -6,39 +6,100 @@ import (
 	"github.com/argos-io/argos/filter"
 )
 
-// Option configures a Config during New or Config.With. The apply method is
-// unexported so the set is sealed; options take effect only inside those
-// constructors.
-type Option interface {
-	apply(*Config)
+// ClientOption configures one Client. The apply method is unexported so the
+// set is sealed: options take effect only inside ClientConfig.
+type ClientOption interface {
+	applyClient(*Config)
 }
 
-type optionFunc func(*Config)
+// ServerOption configures one Server or one of its bindings.
+type ServerOption interface {
+	applyServer(*Config)
+}
 
-func (f optionFunc) apply(c *Config) { f(c) }
+// Option is an option that means the same thing on both sides, so it can go
+// to either constructor. A side-specific option implements only its own
+// interface, which is what makes passing WithListenAddress to client.New (or
+// WithServiceName to server.New) a compile error rather than a silently
+// ignored line.
+type Option interface {
+	ClientOption
+	ServerOption
+}
 
-// WithBinding stores a BindingFunc. The factory is not invoked by New.
-func WithBinding(fn BindingFunc) Option {
-	return optionFunc(func(c *Config) { c.Binding = fn })
+type option func(*Config)
+
+func (f option) applyClient(c *Config) { f(c) }
+func (f option) applyServer(c *Config) { f(c) }
+
+type clientOption func(*Config)
+
+func (f clientOption) applyClient(c *Config) { f(c) }
+
+type serverOption func(*Config)
+
+func (f serverOption) applyServer(c *Config) { f(c) }
+
+// configBase is how ClientConfig / ServerConfig recognise WithConfig before
+// applying anything else, so the base is the same wherever it is listed.
+type configBase interface {
+	baseConfig() *Config
+}
+
+type configOption struct{ cfg *Config }
+
+func (o configOption) applyClient(*Config) {}
+func (o configOption) applyServer(*Config) {}
+func (o configOption) baseConfig() *Config { return o.cfg }
+
+// WithConfig names the Config this Client or Server starts from instead of the
+// process default. Every other option layers on top of it, wherever WithConfig
+// appears in the list; naming more than one base keeps the last non-nil one.
+// The Config is copied, not retained: writing to it afterwards does not reach
+// what was built from it, and the service a previous Client selected from it
+// is not inherited. A nil Config is ignored.
+func WithConfig(cfg *Config) Option { return configOption{cfg: cfg} }
+
+// WithServiceName names the service a Client opens calls for (IDL full name).
+// It also selects which Services entry supplies the Binding and Target.
+// Generated stubs pass their own service name first, so an explicit
+// WithServiceName from the caller overrides it.
+func WithServiceName(fullName string) ClientOption {
+	return clientOption(func(c *Config) { c.serviceName = fullName })
+}
+
+// WithTarget sets the address of the service this Client opens calls for
+// (e.g. "ip://127.0.0.1:7001"). It wins over the Services entry for the
+// selected service.
+func WithTarget(target string) ClientOption {
+	return clientOption(func(c *Config) { c.targetOverride = target })
+}
+
+// WithBinding sets the BindingFunc this Client assembles. It wins over both
+// the Services entry for the selected service and Config.Binding.
+func WithBinding(fn BindingFunc) ClientOption {
+	return clientOption(func(c *Config) { c.bindingOverride = fn })
 }
 
 // WithFilter appends a server-side Filter (outermost first when chained later).
-func WithFilter(f filter.Filter) Option {
-	return optionFunc(func(c *Config) {
+func WithFilter(f filter.Filter) ServerOption {
+	return serverOption(func(c *Config) {
 		c.Filters = append(c.Filters, f)
 	})
 }
 
 // WithOpenFilter appends a client-side OpenFilter (outermost first when chained later).
-func WithOpenFilter(f filter.OpenFilter) Option {
-	return optionFunc(func(c *Config) {
+func WithOpenFilter(f filter.OpenFilter) ClientOption {
+	return clientOption(func(c *Config) {
 		c.OpenFilters = append(c.OpenFilters, f)
 	})
 }
 
-// WithService stores or merges per-service overrides under fullName (IDL full name).
-func WithService(fullName string, opts ...ServiceOption) Option {
-	return optionFunc(func(c *Config) {
+// WithService stores or merges per-service overrides under fullName (IDL full
+// name). A Client picks one entry with WithServiceName; the entries exist so
+// one Config can address several services.
+func WithService(fullName string, opts ...ServiceOption) ClientOption {
+	return clientOption(func(c *Config) {
 		if c.Services == nil {
 			c.Services = make(map[string]ServiceConfig)
 		}
@@ -52,138 +113,138 @@ func WithService(fullName string, opts ...ServiceOption) Option {
 	})
 }
 
-// WithCallErrorObserver sets the per-call local transport error observer (§7.5).
-// Nil clears the observer (no-op).
+// WithCallErrorObserver sets the per-call local transport error observer
+// (§7.5). A nil fn installs no observer, clearing one the base Config carried.
 func WithCallErrorObserver(fn func(CallInfo, error)) Option {
-	return optionFunc(func(c *Config) { c.callErrorObserver = fn })
+	return option(func(c *Config) { c.CallErrorObserver = fn })
 }
 
 // WithConnErrorObserver sets the connection-level error observer (§7.5).
-// Nil clears the observer (no-op).
+// A nil fn installs no observer, clearing one the base Config carried.
 //
 // Reported errors must not make Transport.Serve return (§3.1-22); that
 // contract is enforced by server, not by this Option.
 func WithConnErrorObserver(fn func(ConnInfo, error)) Option {
-	return optionFunc(func(c *Config) { c.connErrorObserver = fn })
+	return option(func(c *Config) { c.ConnErrorObserver = fn })
 }
 
 // WithMaxFrameSize sets the single on-wire frame/body limit.
 func WithMaxFrameSize(n int64) Option {
-	return optionFunc(func(c *Config) { c.MaxFrameSize = n })
+	return option(func(c *Config) { c.MaxFrameSize = n })
 }
 
 // WithMaxMessageSize sets the uncompressed Codec input/output byte limit.
 func WithMaxMessageSize(n int64) Option {
-	return optionFunc(func(c *Config) { c.MaxMessageSize = n })
+	return option(func(c *Config) { c.MaxMessageSize = n })
 }
 
 // WithMaxMetadataSize sets the decoded metadata byte limit (keys + values).
 func WithMaxMetadataSize(n int64) Option {
-	return optionFunc(func(c *Config) { c.MaxMetadataSize = n })
+	return option(func(c *Config) { c.MaxMetadataSize = n })
 }
 
 // WithMaxInboundMetadataSize bounds the metadata a peer may send us. It is
 // independent of WithMaxMetadataSize, which only constrains our own outbound
-// metadata. 0 is invalid: omit the option to keep the default.
+// metadata. 0 keeps the default.
 func WithMaxInboundMetadataSize(n int64) Option {
-	return optionFunc(func(c *Config) { c.MaxInboundMetadataSize = n })
+	return option(func(c *Config) { c.MaxInboundMetadataSize = n })
 }
 
 // WithHTTPReadHeaderTimeout bounds how long an HTTP-based peer may take to send
 // a request header block or upgrade. It is the only bound that applies before
 // onConn runs.
-func WithHTTPReadHeaderTimeout(d time.Duration) Option {
-	return optionFunc(func(c *Config) { c.HTTPReadHeaderTimeout = d })
+func WithHTTPReadHeaderTimeout(d time.Duration) ServerOption {
+	return serverOption(func(c *Config) { c.HTTPReadHeaderTimeout = d })
 }
 
 // WithHTTPIdleTimeout bounds how long a keep-alive HTTP connection may sit idle
 // between requests or streams.
-func WithHTTPIdleTimeout(d time.Duration) Option {
-	return optionFunc(func(c *Config) { c.HTTPIdleTimeout = d })
+func WithHTTPIdleTimeout(d time.Duration) ServerOption {
+	return serverOption(func(c *Config) { c.HTTPIdleTimeout = d })
 }
 
 // WithMaxHeaderBytes sets the HTTP header-block limit (http1/http2).
 func WithMaxHeaderBytes(n int64) Option {
-	return optionFunc(func(c *Config) { c.MaxHeaderBytes = n })
+	return option(func(c *Config) { c.MaxHeaderBytes = n })
 }
 
 // WithReadAheadMessages sets complete DATA messages allowed ahead per receive direction.
 func WithReadAheadMessages(n int) Option {
-	return optionFunc(func(c *Config) { c.ReadAheadMessages = n })
+	return option(func(c *Config) { c.ReadAheadMessages = n })
 }
 
 // WithMaxConcurrentCalls sets the in-flight call limit per Client/Server.
 func WithMaxConcurrentCalls(n int) Option {
-	return optionFunc(func(c *Config) { c.MaxConcurrentCalls = n })
+	return option(func(c *Config) { c.MaxConcurrentCalls = n })
 }
 
 // WithMaxBufferedBytes sets the Client/Server buffer-pool ceiling.
 func WithMaxBufferedBytes(n int64) Option {
-	return optionFunc(func(c *Config) { c.MaxBufferedBytes = n })
+	return option(func(c *Config) { c.MaxBufferedBytes = n })
 }
 
 // WithOpenTimeout sets the server open/initial-headers parse timeout.
 func WithOpenTimeout(d time.Duration) Option {
-	return optionFunc(func(c *Config) { c.OpenTimeout = d })
+	return option(func(c *Config) { c.OpenTimeout = d })
 }
 
 // WithHandshakeTimeout sets TLS/WS and New*Session handshake timeout.
 func WithHandshakeTimeout(d time.Duration) Option {
-	return optionFunc(func(c *Config) { c.HandshakeTimeout = d })
+	return option(func(c *Config) { c.HandshakeTimeout = d })
 }
 
 // WithMaxDrainBytes sets the server residual-frame drain limit.
 func WithMaxDrainBytes(n int64) Option {
-	return optionFunc(func(c *Config) { c.MaxDrainBytes = n })
+	return option(func(c *Config) { c.MaxDrainBytes = n })
 }
 
 // WithConnReadBufferSize sets the per-connection cross-call read buffer limit.
 func WithConnReadBufferSize(n int64) Option {
-	return optionFunc(func(c *Config) { c.ConnReadBufferSize = n })
+	return option(func(c *Config) { c.ConnReadBufferSize = n })
 }
 
 // WithMaxSessionsPerEndpoint sets the client per-endpoint session limit.
-func WithMaxSessionsPerEndpoint(n int) Option {
-	return optionFunc(func(c *Config) { c.MaxSessionsPerEndpoint = n })
+func WithMaxSessionsPerEndpoint(n int) ClientOption {
+	return clientOption(func(c *Config) { c.MaxSessionsPerEndpoint = n })
 }
 
 // WithMaxIdleSessions sets idle sessions retained per endpoint.
-// Zero means keep no idle sessions.
-func WithMaxIdleSessions(n int) Option {
-	return optionFunc(func(c *Config) { c.MaxIdleSessions = n })
+// argos.Disabled keeps no idle sessions.
+func WithMaxIdleSessions(n int) ClientOption {
+	return clientOption(func(c *Config) { c.MaxIdleSessions = n })
 }
 
 // WithSessionIdleTimeout sets idle session lifetime.
-// Zero disables the limit.
-func WithSessionIdleTimeout(d time.Duration) Option {
-	return optionFunc(func(c *Config) { c.SessionIdleTimeout = d })
+// argos.Disabled turns the limit off.
+func WithSessionIdleTimeout(d time.Duration) ClientOption {
+	return clientOption(func(c *Config) { c.SessionIdleTimeout = d })
 }
 
 // WithMaxSessionLifetime sets session lifetime from creation.
-// Zero disables the limit.
-func WithMaxSessionLifetime(d time.Duration) Option {
-	return optionFunc(func(c *Config) { c.MaxSessionLifetime = d })
+// argos.Disabled turns the limit off.
+func WithMaxSessionLifetime(d time.Duration) ClientOption {
+	return clientOption(func(c *Config) { c.MaxSessionLifetime = d })
 }
 
 // WithMaxInboundConns sets server in-use connections per Binding.
-func WithMaxInboundConns(n int) Option {
-	return optionFunc(func(c *Config) { c.MaxInboundConns = n })
+func WithMaxInboundConns(n int) ServerOption {
+	return serverOption(func(c *Config) { c.MaxInboundConns = n })
 }
 
 // WithMaxInboundConnIdle sets server idle time between calls.
-// Must be positive; there is no disable value.
-func WithMaxInboundConnIdle(d time.Duration) Option {
-	return optionFunc(func(c *Config) { c.MaxInboundConnIdle = d })
+// Must be positive; there is no off state.
+func WithMaxInboundConnIdle(d time.Duration) ServerOption {
+	return serverOption(func(c *Config) { c.MaxInboundConnIdle = d })
 }
 
 // WithMaxInboundConnAge sets server inbound connection age.
-// Must be positive; there is no disable value.
-func WithMaxInboundConnAge(d time.Duration) Option {
-	return optionFunc(func(c *Config) { c.MaxInboundConnAge = d })
+// Must be positive; there is no off state.
+func WithMaxInboundConnAge(d time.Duration) ServerOption {
+	return serverOption(func(c *Config) { c.MaxInboundConnAge = d })
 }
 
 // WithListenAddress sets the server bind address for Transport.Serve
-// (host:port). Client-side Configs ignore it. Empty clears the override.
-func WithListenAddress(addr string) Option {
-	return optionFunc(func(c *Config) { c.ListenAddress = addr })
+// (host:port). Empty clears the override.
+func WithListenAddress(addr string) ServerOption {
+	return serverOption(func(c *Config) { c.ListenAddress = addr })
 }

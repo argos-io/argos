@@ -14,15 +14,25 @@ const (
 	giB = 1024 * miB
 )
 
-// Config is an immutable snapshot after New returns.
-//
-// Prefer reading exported fields. Do not mutate them after New: Option values
-// are applied only during New, and later Option instances cannot reach this
-// value. Treat the returned *Config as read-only.
+// Disabled turns off an optional limit. Zero already means "use the built-in
+// default" so that a Config literal only has to name what it changes, which
+// leaves no way to ask for "keep no idle sessions" by writing 0 — hence this
+// sentinel. Only MaxIdleSessions, SessionIdleTimeout and MaxSessionLifetime
+// have an off state; every other field rejects it.
+const Disabled = -1
+
+// Config holds the tunables of a Client or Server. It is a plain struct: write
+// the fields that matter and leave the rest zero, and each constructor fills
+// the zeros with the built-in defaults from Defaults.
 //
 // Side ownership (§6): client-only and server-only fields coexist on one
-// Config. New validates field values only; it does not reject mixing sides.
-// client.New / server.New later ignore options that do not apply to that side.
+// Config so a single value can configure both sides. Validation checks field
+// values only; it never rejects a mixed Config.
+//
+// client.New / server.New copy the Config they are given, so a running Client
+// or Server never observes a later write. Writing to a Config that another
+// goroutine is passing to a constructor is still a data race: tune it during
+// start-up, before anything is built.
 type Config struct {
 	// Call-dimension limits.
 	MaxFrameSize    int64
@@ -44,23 +54,24 @@ type Config struct {
 	MaxDrainBytes          int64
 	ConnReadBufferSize     int64
 	MaxSessionsPerEndpoint int
-	MaxIdleSessions        int           // client-only; confirmed §6.1
-	SessionIdleTimeout     time.Duration // client-only; 0 disables; confirmed §6.1
-	MaxSessionLifetime     time.Duration // client-only; 0 disables; confirmed §6.1
-	MaxInboundConns        int           // server-only; confirmed §6.1
-	MaxInboundConnIdle     time.Duration // server-only; must be > 0; confirmed §6.1
-	MaxInboundConnAge      time.Duration // server-only; must be > 0; confirmed §6.1
+	MaxIdleSessions        int           // client-only; Disabled keeps none
+	SessionIdleTimeout     time.Duration // client-only; Disabled turns it off
+	MaxSessionLifetime     time.Duration // client-only; Disabled turns it off
+	MaxInboundConns        int           // server-only
+	MaxInboundConnIdle     time.Duration // server-only; no off state
+	MaxInboundConnAge      time.Duration // server-only; no off state
 
 	// HTTPReadHeaderTimeout and HTTPIdleTimeout are the HTTP-level limits for
 	// the HTTP-based transports (ws, http1, http2). They apply before onConn
 	// runs, so they are what actually bounds a peer that connects and sends
 	// nothing — MaxInboundConns and MaxInboundConnIdle only see connections
 	// that completed a request or upgrade.
-	HTTPReadHeaderTimeout time.Duration // must be > 0
-	HTTPIdleTimeout       time.Duration // must be > 0
+	HTTPReadHeaderTimeout time.Duration // server-only; no off state
+	HTTPIdleTimeout       time.Duration // server-only; no off state
 
-	// Binding is the optional factory stored by WithBinding.
-	// Nil is allowed until a Client/Server path requires it.
+	// Binding is the fallback factory for services without their own. A
+	// Services entry wins over it, and WithBinding wins over both.
+	// Nil is allowed until a Client path requires it.
 	Binding BindingFunc
 
 	// ListenAddress is the server-only bind address passed to Transport.Serve
@@ -68,71 +79,50 @@ type Config struct {
 	// concrete transports that require a listen address fail Serve themselves.
 	ListenAddress string
 
-	// Filters are server-side Filter chain entries (WithFilter).
+	// Filters are server-side Filter chain entries (outermost first).
 	Filters []filter.Filter
-	// OpenFilters are client-side OpenFilter chain entries (WithOpenFilter).
+	// OpenFilters are client-side OpenFilter chain entries (outermost first).
 	OpenFilters []filter.OpenFilter
-	// Services holds per-service Binding/Target overrides (WithService).
+	// Services holds per-service Binding/Target entries keyed by IDL full name.
+	// A Client selects one of them with WithServiceName.
 	Services map[string]ServiceConfig
 
-	callErrorObserver func(CallInfo, error)
-	connErrorObserver func(ConnInfo, error)
+	// CallErrorObserver receives per-call local transport errors (§7.5).
+	CallErrorObserver func(CallInfo, error)
+	// ConnErrorObserver receives connection-level errors that belong to no
+	// call (§7.5). Reporting must not make Transport.Serve return (§3.1-22);
+	// that contract is enforced by server, not here.
+	ConnErrorObserver func(ConnInfo, error)
+
+	// serviceName, targetOverride and bindingOverride hold what
+	// WithServiceName / WithTarget / WithBinding selected at the call site.
+	// They are not exported fields because a Config shared by many services
+	// has no single service name, and because the call site has to be able to
+	// win over a Services entry that the shared Config already carries.
+	serviceName     string
+	targetOverride  string
+	bindingOverride BindingFunc
 }
 
-// New builds a Config from defaults, applies opts once, validates, and
-// returns a pointer that Option cannot mutate afterward.
-func New(opts ...Option) (*Config, error) {
-	c := defaults()
-	for _, opt := range opts {
-		if opt == nil {
-			return nil, fmt.Errorf("argos: nil Option")
-		}
-		opt.apply(&c)
-	}
-	if err := c.validate(); err != nil {
-		return nil, err
-	}
-	out := cloneConfig(c)
-	return &out, nil
-}
+// defaultConfig is the process-wide default. It is mutable on purpose: a
+// program tunes it once during start-up and every later client.New /
+// server.New that does not name a Config of its own starts from it.
+var defaultConfig = Defaults()
 
-// With derives a new immutable Config from c without mutating c.
-func (c *Config) With(opts ...Option) (*Config, error) {
-	if c == nil {
-		return nil, fmt.Errorf("argos: nil Config")
-	}
-	base := cloneConfig(*c)
-	for _, opt := range opts {
-		if opt == nil {
-			return nil, fmt.Errorf("argos: nil Option")
-		}
-		opt.apply(&base)
-	}
-	if err := base.validate(); err != nil {
-		return nil, err
-	}
-	out := cloneConfig(base)
-	return &out, nil
-}
+// DefaultConfig returns the process-wide default Config. The pointer is the
+// live default, not a copy: write to its fields to change what an
+// unconfigured client.New / server.New will use.
+//
+//	argos.DefaultConfig().MaxMessageSize = 8 << 20
+//
+// Tune it before constructing anything. Constructors copy it, so a change
+// never reaches a Client or Server that already exists.
+func DefaultConfig() *Config { return &defaultConfig }
 
-func cloneConfig(c Config) Config {
-	out := c
-	if c.Filters != nil {
-		out.Filters = append([]filter.Filter(nil), c.Filters...)
-	}
-	if c.OpenFilters != nil {
-		out.OpenFilters = append([]filter.OpenFilter(nil), c.OpenFilters...)
-	}
-	if c.Services != nil {
-		out.Services = make(map[string]ServiceConfig, len(c.Services))
-		for k, v := range c.Services {
-			out.Services[k] = v
-		}
-	}
-	return out
-}
-
-func defaults() Config {
+// Defaults returns the built-in defaults, unaffected by any write to the
+// process default. It is the starting point for a Config that must not
+// inherit process-wide tuning.
+func Defaults() Config {
 	return Config{
 		MaxFrameSize:           4 * miB,
 		MaxMessageSize:         4 * miB,
@@ -158,6 +148,171 @@ func defaults() Config {
 		HTTPReadHeaderTimeout: 10 * time.Second,
 		HTTPIdleTimeout:       50 * time.Second,
 	}
+}
+
+// Clone returns a copy of c whose slices and Services map do not alias c's, so
+// an Option appending a Filter to the copy cannot reach the original.
+// A nil receiver clones the built-in defaults.
+//
+// The copy carries no service selection: WithServiceName, WithTarget and
+// WithBinding belong to the Client that named them, not to the configuration.
+// Without this, a Config taken from one Client and reused as another's
+// WithConfig base would silently make the second Client open calls for the
+// first one's service, and the missing-service-name guard would never fire.
+func (c *Config) Clone() *Config {
+	if c == nil {
+		out := Defaults()
+		return &out
+	}
+	out := *c
+	out.serviceName = ""
+	out.targetOverride = ""
+	out.bindingOverride = nil
+	if c.Filters != nil {
+		out.Filters = append([]filter.Filter(nil), c.Filters...)
+	}
+	if c.OpenFilters != nil {
+		out.OpenFilters = append([]filter.OpenFilter(nil), c.OpenFilters...)
+	}
+	if c.Services != nil {
+		out.Services = make(map[string]ServiceConfig, len(c.Services))
+		for k, v := range c.Services {
+			out.Services[k] = v
+		}
+	}
+	return &out
+}
+
+// ClientConfig builds the Config for one Client: it starts from the Config
+// named by WithConfig, or from the process default, layers opts over a copy of
+// it, fills zero fields with the built-in defaults, and validates the result.
+//
+// WithConfig is order-independent — it names the base wherever it appears in
+// the list, and every other option applies on top of it. Naming more than one
+// base is allowed; the last non-nil one wins.
+func ClientConfig(opts ...ClientOption) (*Config, error) {
+	base := DefaultConfig()
+	for _, o := range opts {
+		if o == nil {
+			return nil, fmt.Errorf("argos: nil ClientOption")
+		}
+		if b, ok := o.(configBase); ok && b.baseConfig() != nil {
+			base = b.baseConfig()
+		}
+	}
+	cfg := base.Clone()
+	// Every option applies, including the one that named the base: skipping
+	// them by type would silently drop the fields of a future option that both
+	// names a base and sets something.
+	for _, o := range opts {
+		o.applyClient(cfg)
+	}
+	return finish(cfg)
+}
+
+// ServerConfig builds the Config for one Server or one of its bindings. It is
+// ClientConfig for the server side; see there for how WithConfig is resolved.
+func ServerConfig(opts ...ServerOption) (*Config, error) {
+	base := DefaultConfig()
+	for _, o := range opts {
+		if o == nil {
+			return nil, fmt.Errorf("argos: nil ServerOption")
+		}
+		if b, ok := o.(configBase); ok && b.baseConfig() != nil {
+			base = b.baseConfig()
+		}
+	}
+	cfg := base.Clone()
+	for _, o := range opts {
+		o.applyServer(cfg)
+	}
+	return finish(cfg)
+}
+
+func finish(cfg *Config) (*Config, error) {
+	cfg.fillDefaults()
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// SelectedService reports the service this Config opens calls for and the
+// Binding and Target that apply to it. Later layers win:
+//
+//	WithBinding / WithTarget  >  Services[name]  >  Config.Binding
+func (c *Config) SelectedService() (string, ServiceConfig) {
+	if c == nil {
+		return "", ServiceConfig{}
+	}
+	sel := ServiceConfig{Binding: c.Binding}
+	if sc, ok := c.Services[c.serviceName]; ok {
+		if sc.Binding != nil {
+			sel.Binding = sc.Binding
+		}
+		if sc.Target != "" {
+			sel.Target = sc.Target
+		}
+	}
+	if c.bindingOverride != nil {
+		sel.Binding = c.bindingOverride
+	}
+	if c.targetOverride != "" {
+		sel.Target = c.targetOverride
+	}
+	return c.serviceName, sel
+}
+
+// fillDefaults replaces every zero field with its built-in default and turns
+// Disabled into the internal off value. A field that has no off state keeps
+// Disabled so validate can name it.
+func (c *Config) fillDefaults() {
+	d := Defaults()
+
+	c.MaxFrameSize = orDefault(c.MaxFrameSize, d.MaxFrameSize)
+	c.MaxMessageSize = orDefault(c.MaxMessageSize, d.MaxMessageSize)
+	c.MaxMetadataSize = orDefault(c.MaxMetadataSize, d.MaxMetadataSize)
+	c.MaxInboundMetadataSize = orDefault(c.MaxInboundMetadataSize, d.MaxInboundMetadataSize)
+	c.MaxHeaderBytes = orDefault(c.MaxHeaderBytes, d.MaxHeaderBytes)
+	c.ReadAheadMessages = orDefault(c.ReadAheadMessages, d.ReadAheadMessages)
+	c.MaxConcurrentCalls = orDefault(c.MaxConcurrentCalls, d.MaxConcurrentCalls)
+	c.MaxBufferedBytes = orDefault(c.MaxBufferedBytes, d.MaxBufferedBytes)
+	c.OpenTimeout = orDefault(c.OpenTimeout, d.OpenTimeout)
+
+	c.HandshakeTimeout = orDefault(c.HandshakeTimeout, d.HandshakeTimeout)
+	c.MaxDrainBytes = orDefault(c.MaxDrainBytes, d.MaxDrainBytes)
+	c.ConnReadBufferSize = orDefault(c.ConnReadBufferSize, d.ConnReadBufferSize)
+	c.MaxSessionsPerEndpoint = orDefault(c.MaxSessionsPerEndpoint, d.MaxSessionsPerEndpoint)
+	c.MaxInboundConns = orDefault(c.MaxInboundConns, d.MaxInboundConns)
+	c.MaxInboundConnIdle = orDefault(c.MaxInboundConnIdle, d.MaxInboundConnIdle)
+	c.MaxInboundConnAge = orDefault(c.MaxInboundConnAge, d.MaxInboundConnAge)
+	c.HTTPReadHeaderTimeout = orDefault(c.HTTPReadHeaderTimeout, d.HTTPReadHeaderTimeout)
+	c.HTTPIdleTimeout = orDefault(c.HTTPIdleTimeout, d.HTTPIdleTimeout)
+
+	c.MaxIdleSessions = orOff(c.MaxIdleSessions, d.MaxIdleSessions)
+	c.SessionIdleTimeout = orOff(c.SessionIdleTimeout, d.SessionIdleTimeout)
+	c.MaxSessionLifetime = orOff(c.MaxSessionLifetime, d.MaxSessionLifetime)
+}
+
+type tunable interface {
+	int | int64 | time.Duration
+}
+
+func orDefault[T tunable](v, def T) T {
+	if v == 0 {
+		return def
+	}
+	return v
+}
+
+func orOff[T tunable](v, def T) T {
+	switch v {
+	case 0:
+		return def
+	case Disabled:
+		return 0
+	}
+	return v
 }
 
 // PerCall returns the admission reservation size (§2.6):
@@ -192,6 +347,36 @@ func perCall(maxFrame, maxMsg int64, readAhead int) (int64, error) {
 }
 
 func (c *Config) validate() error {
+	// Disabled on a field with no off state would otherwise be reported as
+	// "must be > 0", which does not say what the caller actually did wrong.
+	for _, f := range []struct {
+		name string
+		val  int64
+	}{
+		{"MaxFrameSize", c.MaxFrameSize},
+		{"MaxMessageSize", c.MaxMessageSize},
+		{"MaxMetadataSize", c.MaxMetadataSize},
+		{"MaxInboundMetadataSize", c.MaxInboundMetadataSize},
+		{"MaxHeaderBytes", c.MaxHeaderBytes},
+		{"ReadAheadMessages", int64(c.ReadAheadMessages)},
+		{"MaxConcurrentCalls", int64(c.MaxConcurrentCalls)},
+		{"MaxBufferedBytes", c.MaxBufferedBytes},
+		{"OpenTimeout", int64(c.OpenTimeout)},
+		{"HandshakeTimeout", int64(c.HandshakeTimeout)},
+		{"MaxDrainBytes", c.MaxDrainBytes},
+		{"ConnReadBufferSize", c.ConnReadBufferSize},
+		{"MaxSessionsPerEndpoint", int64(c.MaxSessionsPerEndpoint)},
+		{"MaxInboundConns", int64(c.MaxInboundConns)},
+		{"MaxInboundConnIdle", int64(c.MaxInboundConnIdle)},
+		{"MaxInboundConnAge", int64(c.MaxInboundConnAge)},
+		{"HTTPReadHeaderTimeout", int64(c.HTTPReadHeaderTimeout)},
+		{"HTTPIdleTimeout", int64(c.HTTPIdleTimeout)},
+	} {
+		if f.val == Disabled {
+			return fmt.Errorf("argos: %s has no off state; Disabled is not allowed", f.name)
+		}
+	}
+
 	if c.MaxFrameSize <= 0 {
 		return fmt.Errorf("argos: MaxFrameSize must be > 0")
 	}
@@ -232,13 +417,13 @@ func (c *Config) validate() error {
 		return fmt.Errorf("argos: MaxSessionsPerEndpoint must be > 0")
 	}
 	if c.MaxIdleSessions < 0 {
-		return fmt.Errorf("argos: MaxIdleSessions must be >= 0")
+		return fmt.Errorf("argos: MaxIdleSessions must be >= 0 (use argos.Disabled to keep none)")
 	}
 	if c.SessionIdleTimeout < 0 {
-		return fmt.Errorf("argos: SessionIdleTimeout must be >= 0")
+		return fmt.Errorf("argos: SessionIdleTimeout must be >= 0 (use argos.Disabled to turn it off)")
 	}
 	if c.MaxSessionLifetime < 0 {
-		return fmt.Errorf("argos: MaxSessionLifetime must be >= 0")
+		return fmt.Errorf("argos: MaxSessionLifetime must be >= 0 (use argos.Disabled to turn it off)")
 	}
 	if c.MaxInboundConns < 1 {
 		return fmt.Errorf("argos: MaxInboundConns must be > 0")

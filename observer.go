@@ -52,29 +52,13 @@ type ConnInfo struct {
 	Phase     ConnPhase
 }
 
-// CallErrorObserver returns the configured observer, or nil.
-func (c *Config) CallErrorObserver() func(CallInfo, error) {
-	if c == nil {
-		return nil
-	}
-	return c.callErrorObserver
-}
-
-// ConnErrorObserver returns the configured observer, or nil.
-func (c *Config) ConnErrorObserver() func(ConnInfo, error) {
-	if c == nil {
-		return nil
-	}
-	return c.connErrorObserver
-}
-
 // NotifyCallError invokes the call-error observer if set.
 // Panics in the observer are recovered so per-call errors never escape.
 func NotifyCallError(cfg *Config, info CallInfo, err error) {
 	if cfg == nil {
 		return
 	}
-	fn := cfg.callErrorObserver
+	fn := cfg.CallErrorObserver
 	if fn == nil {
 		return
 	}
@@ -92,7 +76,7 @@ func NotifyConnError(cfg *Config, info ConnInfo, err error) {
 	if cfg == nil {
 		return
 	}
-	fn := cfg.connErrorObserver
+	fn := cfg.ConnErrorObserver
 	if fn == nil {
 		return
 	}
