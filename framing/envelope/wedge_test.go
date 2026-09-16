@@ -32,18 +32,34 @@ import (
 // Seventh attempt: the three-phase rewrite the notes below call for (explicit
 // accept / demux / idle phases, each owning its own errors, with every wait
 // latched on the epoch). Measured: WEDGED at round 181 of 2000. The split alone
+//   - all three fixes at once  -> round 371 of 2000
+//
+// The last line matters most: the three fixes the trace evidence supports,
+// applied TOGETHER in one coherent patch (epoch latch + broadcast,
+// identity/generation predicates at every wait site, wake-expiry
+// attribution with a LOCAL retry) rather than one at a time - still wedge.
+// Doing them together was the right method and it still does not close it,
+// so the remaining cause is not in the notification or predicate layer.
 // does not close it either, so the remaining cause is not "which phase
 // classifies this error" - that hypothesis has now been tested and falsified.
 //
 // What the seven attempts have established, in order:
 //
-//	epoch+broadcast alone      -> worse (3/3 timeouts)
-//	+ identity predicate       -> wedge moves round 0 -> round 1
-//	+ OPEN handback            -> wedge gone, gap 4 exposed
-//	+ accept generation        -> best rate seen (2/8), still fails
-//	+ wake reclassification    -> regresses (5/10)
-//	+ accept phase extraction  -> 3/10
-//	+ full three-phase split   -> round 181 of 2000
+//		epoch+broadcast alone      -> worse (3/3 timeouts)
+//		+ identity predicate       -> wedge moves round 0 -> round 1
+//		+ OPEN handback            -> wedge gone, gap 4 exposed
+//		+ accept generation        -> best rate seen (2/8), still fails
+//		+ wake reclassification    -> regresses (5/10)
+//		+ accept phase extraction  -> 3/10
+//		+ full three-phase split   -> round 181 of 2000
+//	  + all three fixes at once  -> round 371 of 2000
+//
+// The last line matters most: the three fixes the trace evidence supports,
+// applied TOGETHER in one coherent patch (epoch latch + broadcast,
+// identity/generation predicates at every wait site, wake-expiry
+// attribution with a LOCAL retry) rather than one at a time - still wedge.
+// Doing them together was the right method and it still does not close it,
+// so the remaining cause is not in the notification or predicate layer.
 //
 // Next hypothesis to test, not another classification: the accept handoff
 // itself. deliver()/ensureImpliedHeaders and the residual drain both run on the
