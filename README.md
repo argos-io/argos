@@ -61,7 +61,7 @@
 
 要点：
 
-- **没有协议登记表**——三轴是 `TransportFunc` / `FramingFunc` / `CodecFunc`，装配成 `argos.Protocol`；每个 Client 与每个 server endpoint 各 `Assemble()` 一次，得到互不共享的三元组。
+- **三轴可命名注册**——`DefaultConfig().RegisterTransport/Framing/Codec(name, factory)` 供文本配置解析；`ServiceTransportName` 等与直接写工厂二选一。`binding/*` 在 `init` 里注册常用名（`tcp` / `http2` / `envelope` / `grpc` / `protobuf` 等）。每个 Client / 监听面仍各 `Assemble()` 一次，得到互不共享的三元组。
 - **Compressor 不是核心概念**——仅 gRPC 路径使用（`framing/grpc`、`binding/grpc`）。
 - **复用不是第四轴**——`Framing.Reuse()` 声明承载力；借还由客户端会话池执行。
 
@@ -128,11 +128,12 @@ const (
 
 ```go
 type Protocol struct {
-    Transport TransportFunc // func() (transport.Transport, error)
+    Transport TransportFunc
     Framing   FramingFunc
     Codec     CodecFunc
+    TransportName, FramingName, CodecName string // 查 Config 上的注册表
 }
-// Protocol.Assemble() → 三个实例；工厂不得 Dial/Serve
+// ResolveProtocol 把名字解析成工厂，再 Assemble()；工厂不得 Dial/Serve
 ```
 
 客户端与服务端共用 `Config.Services[name]`：三轴（Transport / Framing / Codec）、客户端 `Target`、服务端 `ServiceListenAddress` 或 `ServiceListener`（同一服务多传输）。

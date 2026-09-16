@@ -83,6 +83,11 @@ type Config struct {
 	// server.Run starts listeners declared for each registered service.
 	Services map[string]ServiceConfig
 
+	// Named axis factories for text configuration (RegisterTransport / Lookup).
+	transportRegistry map[string]TransportFunc
+	framingRegistry   map[string]FramingFunc
+	codecRegistry     map[string]CodecFunc
+
 	// CallErrorObserver receives per-call local transport errors (§7.5).
 	CallErrorObserver func(CallInfo, error)
 	// ConnErrorObserver receives connection-level errors that belong to no
@@ -180,6 +185,9 @@ func (c *Config) Clone() *Config {
 			out.Services[k] = cloneServiceConfig(v)
 		}
 	}
+	out.transportRegistry = cloneRegistry(c.transportRegistry)
+	out.framingRegistry = cloneRegistry(c.framingRegistry)
+	out.codecRegistry = cloneRegistry(c.codecRegistry)
 	return &out
 }
 

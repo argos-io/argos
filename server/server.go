@@ -407,7 +407,7 @@ func (s *Server) buildListenRegs() ([]listenReg, error) {
 		if !ok {
 			return nil, fmt.Errorf("server: service %q registered but missing from Config.Services (use argos.WithService)", svcName)
 		}
-		plans, err := sc.ServerListenPlans(s.cfg.ListenAddress)
+		plans, err := sc.ServerListenPlans(s.cfg, s.cfg.ListenAddress)
 		if err != nil {
 			return nil, fmt.Errorf("server: service %q: %w", svcName, err)
 		}

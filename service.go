@@ -14,6 +14,11 @@ type Protocol struct {
 	Transport TransportFunc
 	Framing   FramingFunc
 	Codec     CodecFunc
+	// TransportName, FramingName and CodecName select registered factories on
+	// Config when the matching factory field is nil (text configuration).
+	TransportName string
+	FramingName   string
+	CodecName     string
 }
 
 // Assemble builds fresh instances. Factories must not Dial or Serve.
@@ -89,6 +94,21 @@ func ServiceCodec(fn CodecFunc) ServiceOption {
 	return serviceOptionFunc(func(sc *ServiceConfig) { sc.Codec = fn })
 }
 
+// ServiceTransportName selects a registered transport factory by name.
+func ServiceTransportName(name string) ServiceOption {
+	return serviceOptionFunc(func(sc *ServiceConfig) { sc.TransportName = name })
+}
+
+// ServiceFramingName selects a registered framing factory by name.
+func ServiceFramingName(name string) ServiceOption {
+	return serviceOptionFunc(func(sc *ServiceConfig) { sc.FramingName = name })
+}
+
+// ServiceCodecName selects a registered codec factory by name.
+func ServiceCodecName(name string) ServiceOption {
+	return serviceOptionFunc(func(sc *ServiceConfig) { sc.CodecName = name })
+}
+
 // ServiceProtocol sets all three axes at once (typical preset).
 func ServiceProtocol(p Protocol) ServiceOption {
 	return serviceOptionFunc(func(sc *ServiceConfig) { sc.Protocol = p })
@@ -120,12 +140,17 @@ type ServiceListenPlan struct {
 }
 
 // ServerListenPlans returns listen surfaces for this service (server-side).
-func (sc ServiceConfig) ServerListenPlans(fallbackListen string) ([]ServiceListenPlan, error) {
+// cfg resolves named axes before checking completeness.
+func (sc ServiceConfig) ServerListenPlans(cfg *Config, fallbackListen string) ([]ServiceListenPlan, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("argos: nil Config")
+	}
 	if len(sc.listeners) > 0 {
 		out := make([]ServiceListenPlan, 0, len(sc.listeners))
 		for _, l := range sc.listeners {
-			if l.protocol.Transport == nil || l.protocol.Framing == nil || l.protocol.Codec == nil {
-				return nil, fmt.Errorf("incomplete protocol on listener %q", l.address)
+			p, err := cfg.ResolveProtocol(l.protocol)
+			if err != nil {
+				return nil, fmt.Errorf("listener %q: %w", l.address, err)
 			}
 			addr := l.address
 			if addr == "" {
@@ -134,12 +159,13 @@ func (sc ServiceConfig) ServerListenPlans(fallbackListen string) ([]ServiceListe
 			if addr == "" {
 				return nil, fmt.Errorf("listener missing address (set ServiceListenAddress or Config.ListenAddress)")
 			}
-			out = append(out, ServiceListenPlan{Address: addr, Protocol: l.protocol})
+			out = append(out, ServiceListenPlan{Address: addr, Protocol: p})
 		}
 		return out, nil
 	}
-	if sc.Transport == nil || sc.Framing == nil || sc.Codec == nil {
-		return nil, fmt.Errorf("incomplete protocol (Transport, Framing, Codec required)")
+	p, err := cfg.ResolveProtocol(sc.Protocol)
+	if err != nil {
+		return nil, err
 	}
 	addr := sc.ListenAddress
 	if addr == "" {
@@ -148,7 +174,7 @@ func (sc ServiceConfig) ServerListenPlans(fallbackListen string) ([]ServiceListe
 	if addr == "" {
 		return nil, fmt.Errorf("missing listen address (ServiceListenAddress or Config.ListenAddress)")
 	}
-	return []ServiceListenPlan{{Address: addr, Protocol: sc.Protocol}}, nil
+	return []ServiceListenPlan{{Address: addr, Protocol: p}}, nil
 }
 
 func cloneServiceConfig(sc ServiceConfig) ServiceConfig {
@@ -159,7 +185,10 @@ func cloneServiceConfig(sc ServiceConfig) ServiceConfig {
 	return out
 }
 
-// ProtocolListenKey identifies a deduplicated listen surface (address + factories).
+// ProtocolListenKey identifies a deduplicated listen surface (address + axes).
 func ProtocolListenKey(addr string, p Protocol) string {
-	return fmt.Sprintf("%s|%p|%p|%p", addr, p.Transport, p.Framing, p.Codec)
+	if p.Transport != nil || p.Framing != nil || p.Codec != nil {
+		return fmt.Sprintf("%s|%p|%p|%p", addr, p.Transport, p.Framing, p.Codec)
+	}
+	return fmt.Sprintf("%s|%s|%s|%s", addr, p.TransportName, p.FramingName, p.CodecName)
 }

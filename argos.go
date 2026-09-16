@@ -6,8 +6,9 @@
 // Config.Services. Application code registers implementations with
 // server.Register; generated stubs call client.New with WithServiceName.
 //
-// There is no protocol registry: presets in binding/* fill ServiceConfig in one
-// shot so cross-axis values stay consistent. Configuration
+// Named axis factories live on Config (RegisterTransport / LookupTransport, …);
+// binding/* init registers well-known names. Presets still fill ServiceConfig in
+// one shot. Configuration
 // is code only — no file format, no reload.
 //
 // Connection-dimension defaults are confirmed by task 7.5 load evidence in
