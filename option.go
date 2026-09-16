@@ -111,14 +111,6 @@ func WithProtocol(p Protocol) ClientOption {
 	})
 }
 
-// WithEndpoint appends a declarative server listen surface to the Config.
-// server.Run materialises every entry before code-added AddEndpoint calls.
-func WithEndpoint(ep EndpointConfig) ServerOption {
-	return serverOption(func(c *Config) {
-		c.Endpoints = append(c.Endpoints, ep)
-	})
-}
-
 // WithFilter appends a server-side Filter (outermost first when chained later).
 func WithFilter(f filter.Filter) ServerOption {
 	return serverOption(func(c *Config) {
@@ -133,11 +125,11 @@ func WithOpenFilter(f filter.OpenFilter) ClientOption {
 	})
 }
 
-// WithService stores or merges per-service overrides under fullName (IDL full
-// name). A Client picks one entry with WithServiceName; the entries exist so
-// one Config can address several services.
-func WithService(fullName string, opts ...ServiceOption) ClientOption {
-	return clientOption(func(c *Config) {
+// WithService stores or merges per-service settings under fullName (IDL full
+// name). Clients pick one entry with WithServiceName; server.Run uses the same
+// map for listen surfaces of registered services.
+func WithService(fullName string, opts ...ServiceOption) Option {
+	return option(func(c *Config) {
 		if c.Services == nil {
 			c.Services = make(map[string]ServiceConfig)
 		}

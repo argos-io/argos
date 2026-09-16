@@ -185,15 +185,16 @@ func testProtocol(tr transport.Transport, fr framing.Framing) argos.Protocol {
 
 func startServer(t *testing.T, tr *testTransport, fr framing.Framing, h filter.Handler, opts ...argos.ServerOption) *server.Server {
 	t.Helper()
-	srv := server.New(opts...)
-	err := srv.AddEndpoint(argos.EndpointConfig{Protocol: testProtocol(tr, fr)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = srv.Register(echoService(), map[string]filter.Handler{
+	base := append([]argos.ServerOption{
+		argos.WithService(svcName,
+			argos.ServiceProtocol(testProtocol(tr, fr)),
+			argos.ServiceListenAddress("127.0.0.1:0"),
+		),
+	}, opts...)
+	srv := server.New(base...)
+	if err := srv.Register(echoService(), map[string]filter.Handler{
 		methodEcho: h,
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 	go func() {
@@ -292,7 +293,7 @@ func TestUnaryRegisterAndRun(t *testing.T) {
 // A Filter passed to AddBinding was stored on the per-binding Config and then
 // never used: dispatch chained the server-level slice, so a per-binding filter
 // silently did nothing.
-func TestAddEndpointFilterRunsForThatEndpoint(t *testing.T) {
+func TestServiceListenFilterChain(t *testing.T) {
 	tr := newTestTransport()
 	srvFr := fake.NewFraming(framing.Sequential)
 	cliFr := fake.NewFraming(framing.Sequential)
@@ -313,11 +314,14 @@ func TestAddEndpointFilterRunsForThatEndpoint(t *testing.T) {
 		return st.Send([]byte("pong:" + string(req)))
 	}
 
-	srv := server.New(argos.WithFilter(count(&serverLevel)))
-	err := srv.AddEndpoint(argos.EndpointConfig{Protocol: testProtocol(tr, srvFr)}, argos.WithFilter(count(&perBinding)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	srv := server.New(
+		argos.WithFilter(count(&serverLevel)),
+		argos.WithService(svcName,
+			argos.ServiceProtocol(testProtocol(tr, srvFr)),
+			argos.ServiceListenAddress("127.0.0.1:0"),
+		),
+		argos.WithFilter(count(&perBinding)),
+	)
 	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: h}); err != nil {
 		t.Fatal(err)
 	}
@@ -458,10 +462,13 @@ func TestShutdownIdleConnExitsQuickly(t *testing.T) {
 		drainRecv(st)
 		return st.Send(req)
 	}
-	srv := server.New(argos.WithMaxInboundConnIdle(30 * time.Second))
-	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: testProtocol(tr, fr)}); err != nil {
-		t.Fatal(err)
-	}
+	srv := server.New(
+		argos.WithMaxInboundConnIdle(30*time.Second),
+		argos.WithService(svcName,
+			argos.ServiceProtocol(testProtocol(tr, fr)),
+			argos.ServiceListenAddress("127.0.0.1:0"),
+		),
+	)
 	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: h}); err != nil {
 		t.Fatal(err)
 	}

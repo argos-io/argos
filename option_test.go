@@ -296,6 +296,7 @@ func TestOptionSideTyping(t *testing.T) {
 	}{
 		{"WithListenAddress", argos.WithListenAddress(":0"), false, true},
 		{"WithServiceName", argos.WithServiceName("echo.v1.EchoService"), true, false},
+		{"WithService", argos.WithService("echo.v1.EchoService", argos.ServiceTarget("ip://127.0.0.1:1")), true, true},
 		{"WithMaxMessageSize", argos.WithMaxMessageSize(1 * miB), true, true},
 	} {
 		if _, ok := tc.opt.(argos.ClientOption); ok != tc.client {

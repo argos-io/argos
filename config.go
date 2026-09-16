@@ -69,11 +69,6 @@ type Config struct {
 	HTTPReadHeaderTimeout time.Duration // server-only; no off state
 	HTTPIdleTimeout       time.Duration // server-only; no off state
 
-	// Endpoints are declarative server listen surfaces (protocol + address).
-	// server.Run starts each entry before any code-added endpoints from
-	// AddEndpoint. Handlers still come only from Register.
-	Endpoints []EndpointConfig
-
 	// ListenAddress is the server-only bind address passed to Transport.Serve
 	// as transport.WithListenAddress (e.g. "127.0.0.1:0"). Empty is ignored;
 	// concrete transports that require a listen address fail Serve themselves.
@@ -83,8 +78,9 @@ type Config struct {
 	Filters []filter.Filter
 	// OpenFilters are client-side OpenFilter chain entries (outermost first).
 	OpenFilters []filter.OpenFilter
-	// Services holds per-service protocol and target keyed by IDL full name.
-	// A Client selects one with WithServiceName.
+	// Services holds per-service protocol, client target, and server listen
+	// settings keyed by IDL full name. Clients select one with WithServiceName;
+	// server.Run starts listeners declared for each registered service.
 	Services map[string]ServiceConfig
 
 	// CallErrorObserver receives per-call local transport errors (§7.5).
@@ -172,9 +168,6 @@ func (c *Config) Clone() *Config {
 	out.hasTransportOverride = false
 	out.hasFramingOverride = false
 	out.hasCodecOverride = false
-	if c.Endpoints != nil {
-		out.Endpoints = append([]EndpointConfig(nil), c.Endpoints...)
-	}
 	if c.Filters != nil {
 		out.Filters = append([]filter.Filter(nil), c.Filters...)
 	}
@@ -184,7 +177,7 @@ func (c *Config) Clone() *Config {
 	if c.Services != nil {
 		out.Services = make(map[string]ServiceConfig, len(c.Services))
 		for k, v := range c.Services {
-			out.Services[k] = v
+			out.Services[k] = cloneServiceConfig(v)
 		}
 	}
 	return &out

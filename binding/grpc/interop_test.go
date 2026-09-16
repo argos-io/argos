@@ -271,11 +271,12 @@ func startArgosEchoServer(t *testing.T, bindOpts []grpcbinding.Option, extra ...
 	var srvTr *argoshttp2.Transport
 	bound := make(chan struct{})
 	preset := grpcbinding.New(bindOpts...)
-	srv := server.New(append([]argos.ServerOption{argos.WithConfig(cfg)}, extra...)...)
 	ep := grpcServerProtocol(preset, &srvTr, bound)
-	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: ep}); err != nil {
-		t.Fatal(err)
-	}
+	srv := server.New(append(append([]argos.ServerOption{argos.WithConfig(cfg)}, extra...),
+		argos.WithService(interopService,
+			argos.ServiceProtocol(ep),
+			argos.ServiceListenAddress(cfg.ListenAddress),
+		))...)
 	if err := srv.Register(interopDesc(), argosEchoHandlers()); err != nil {
 		t.Fatal(err)
 	}

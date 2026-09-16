@@ -121,11 +121,12 @@ func startEchoServer(t *testing.T, preset argos.Protocol, tune ...func(*argos.Co
 
 	var addrTr hasAddr
 	bound := make(chan struct{})
-	srv := server.New(argos.WithConfig(cfg), argos.WithListenAddress(testListenAddr))
 	ep := serverProtocol(t, preset, &addrTr, bound)
-	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: ep}); err != nil {
-		t.Fatal(err)
-	}
+	srv := server.New(
+		argos.WithConfig(cfg),
+		argos.WithListenAddress(testListenAddr),
+		argos.WithService("echo.v1.EchoService", argos.ServiceProtocol(ep)),
+	)
 	if err := RegisterEchoService(srv, NewEchoImpl()); err != nil {
 		t.Fatal(err)
 	}

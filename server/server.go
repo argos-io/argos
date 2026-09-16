@@ -20,11 +20,10 @@ import (
 // admit → route → Accept → Filter → Finish/Close (§4.1 / §5.2).
 type Server struct {
 	cfg    *argos.Config
-	cfgErr error // option set New rejected; returned by AddEndpoint and Run
+	cfgErr error // option set New rejected; returned by Run
 	admit  *admitGate
 
 	mu             sync.Mutex
-	endpoints      []endpointReg
 	routes         map[string]map[string]routeEntry // service → method → entry
 	running        bool
 	ran            bool
@@ -43,7 +42,7 @@ type Server struct {
 	serveErr atomic.Pointer[error]
 }
 
-type endpointReg struct {
+type listenReg struct {
 	protocol argos.Protocol
 	cfg      *argos.Config
 	name     string
@@ -69,8 +68,8 @@ type liveBinding struct {
 // one named by argos.WithConfig, or the process default.
 //
 // New does not return an error so that a Server value is always usable as a
-// receiver. A rejected option set is remembered and returned by AddEndpoint and
-// Run, which is the first point where it can matter.
+// receiver. A rejected option set is remembered and returned by Run, which is
+// the first point where it can matter.
 func New(opts ...argos.ServerOption) *Server {
 	cfg, err := argos.ServerConfig(opts...)
 	if err != nil {
@@ -91,40 +90,6 @@ func New(opts ...argos.ServerOption) *Server {
 		acceptCancels: make(map[*uint64]context.CancelFunc),
 		connCancels:   make(map[*uint64]context.CancelCauseFunc),
 	}
-}
-
-// AddEndpoint registers a listen surface (protocol + optional address in ep).
-// Options overlay the server Config for this endpoint. Must be called before Run.
-func (s *Server) AddEndpoint(ep argos.EndpointConfig, opts ...argos.ServerOption) error {
-	if s.cfgErr != nil {
-		return s.cfgErr
-	}
-	if ep.Transport == nil || ep.Framing == nil || ep.Codec == nil {
-		return fmt.Errorf("server: endpoint missing Transport, Framing, or Codec")
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.ran || s.running {
-		return fmt.Errorf("server: AddEndpoint after Run")
-	}
-	if s.closed {
-		return fmt.Errorf("server: closed")
-	}
-	cfg := s.cfg
-	if len(opts) > 0 {
-		var err error
-		cfg, err = argos.ServerConfig(append([]argos.ServerOption{argos.WithConfig(s.cfg)}, opts...)...)
-		if err != nil {
-			return err
-		}
-	}
-	if ep.ListenAddress != "" {
-		cfg = cfg.Clone()
-		cfg.ListenAddress = ep.ListenAddress
-	}
-	name := fmt.Sprintf("endpoint-%d", len(s.endpoints))
-	s.endpoints = append(s.endpoints, endpointReg{protocol: ep.Protocol, cfg: cfg, name: name})
-	return nil
 }
 
 // Register adds a service descriptor and per-method handlers (keyed by short
@@ -169,8 +134,8 @@ func (s *Server) Register(d descriptor.Service, handlers map[string]filter.Handl
 	return nil
 }
 
-// Run starts every endpoint declared on Config.Endpoints and every endpoint
-// added with AddEndpoint, then blocks until they exit or ctx is canceled.
+// Run starts listen surfaces from Config.Services for each registered service,
+// then blocks until they exit or ctx is canceled.
 func (s *Server) Run(ctx context.Context) error {
 	if s.cfgErr != nil {
 		return s.cfgErr
@@ -187,26 +152,14 @@ func (s *Server) Run(ctx context.Context) error {
 		s.mu.Unlock()
 		return fmt.Errorf("server: Run already called")
 	}
-	regs := append([]endpointReg(nil), s.endpoints...)
-	for i, ep := range s.cfg.Endpoints {
-		if ep.Transport == nil || ep.Framing == nil || ep.Codec == nil {
-			s.mu.Unlock()
-			return fmt.Errorf("server: Config.Endpoints[%d]: incomplete protocol", i)
-		}
-		cfg := s.cfg
-		if ep.ListenAddress != "" {
-			cfg = cfg.Clone()
-			cfg.ListenAddress = ep.ListenAddress
-		}
-		regs = append(regs, endpointReg{
-			protocol: ep.Protocol,
-			cfg:      cfg,
-			name:     fmt.Sprintf("config-endpoint-%d", i),
-		})
+	regs, err := s.buildListenRegs()
+	if err != nil {
+		s.mu.Unlock()
+		return err
 	}
 	if len(regs) == 0 {
 		s.mu.Unlock()
-		return fmt.Errorf("server: no endpoints (declare Config.Endpoints or call AddEndpoint)")
+		return fmt.Errorf("server: no registered services")
 	}
 	routes := cloneRoutes(s.routes)
 	s.running = true
@@ -221,7 +174,7 @@ func (s *Server) Run(ctx context.Context) error {
 	for _, reg := range regs {
 		tr, fr, cd, err := reg.protocol.Assemble()
 		if err != nil {
-			startErr = fmt.Errorf("server: endpoint %q: %w", reg.name, err)
+			startErr = fmt.Errorf("server: listen %q: %w", reg.name, err)
 			break
 		}
 		if checker, ok := fr.(interface {
@@ -236,7 +189,7 @@ func (s *Server) Run(ctx context.Context) error {
 				OpenTimeout:            reg.cfg.OpenTimeout,
 				MaxDrainBytes:          reg.cfg.MaxDrainBytes,
 			}); err != nil {
-				startErr = fmt.Errorf("server: endpoint %q: %w", reg.name, err)
+				startErr = fmt.Errorf("server: listen %q: %w", reg.name, err)
 				closeComponents(tr, fr, cd)
 				break
 			}
@@ -444,6 +397,39 @@ func cloneRoutes(in map[string]map[string]routeEntry) map[string]map[string]rout
 		out[svc] = m
 	}
 	return out
+}
+
+func (s *Server) buildListenRegs() ([]listenReg, error) {
+	seen := make(map[string]struct{})
+	var regs []listenReg
+	for svcName := range s.routes {
+		sc, ok := s.cfg.Services[svcName]
+		if !ok {
+			return nil, fmt.Errorf("server: service %q registered but missing from Config.Services (use argos.WithService)", svcName)
+		}
+		plans, err := sc.ServerListenPlans(s.cfg.ListenAddress)
+		if err != nil {
+			return nil, fmt.Errorf("server: service %q: %w", svcName, err)
+		}
+		for i, plan := range plans {
+			key := argos.ProtocolListenKey(plan.Address, plan.Protocol)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			cfg := s.cfg
+			if plan.Address != "" && plan.Address != s.cfg.ListenAddress {
+				cfg = cfg.Clone()
+				cfg.ListenAddress = plan.Address
+			}
+			regs = append(regs, listenReg{
+				protocol: plan.Protocol,
+				cfg:      cfg,
+				name:     fmt.Sprintf("%s-%d", svcName, i),
+			})
+		}
+	}
+	return regs, nil
 }
 
 func closeComponents(tr transport.Transport, fr framing.Framing, cd codec.Codec) {

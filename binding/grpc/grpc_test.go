@@ -132,11 +132,14 @@ func startEcho(t *testing.T, srvOpts, cliOpts []grpcbinding.Option) *harness {
 	var srvTr *argoshttp2.Transport
 	bound := make(chan struct{})
 	preset := grpcbinding.New(srvOpts...)
-	srv := server.New(argos.WithConfig(cfg))
 	ep := grpcServerProtocol(preset, &srvTr, bound)
-	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: ep}); err != nil {
-		t.Fatal(err)
-	}
+	srv := server.New(
+		argos.WithConfig(cfg),
+		argos.WithService(echoService,
+			argos.ServiceProtocol(ep),
+			argos.ServiceListenAddress(cfg.ListenAddress),
+		),
+	)
 	if err := srv.Register(echoDesc(), map[string]filter.Handler{"Echo": echoHandler}); err != nil {
 		t.Fatal(err)
 	}

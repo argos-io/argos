@@ -131,10 +131,10 @@ func startRESP(t *testing.T, register func(*server.Server, *resp.Store) error, f
 	}
 
 	cfg := baseConfig()
-	srv := server.New(argos.WithConfig(cfg))
-	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: serverPreset}); err != nil {
-		t.Fatal(err)
-	}
+	srv := server.New(argos.WithConfig(cfg), argos.WithService(svcName,
+		argos.ServiceProtocol(serverPreset),
+		argos.ServiceListenAddress(testListenAddr),
+	))
 	if err := register(srv, store); err != nil {
 		t.Fatal(err)
 	}

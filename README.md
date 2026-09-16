@@ -135,7 +135,7 @@ type Protocol struct {
 // Protocol.Assemble() → 三个实例；工厂不得 Dial/Serve
 ```
 
-客户端在 `Config.Services[name]`（或 `WithProtocol` 等覆盖）里选协议；服务端在 `Config.Endpoints[]` 或 `AddEndpoint` 上声明监听面。
+客户端与服务端共用 `Config.Services[name]`：三轴（Transport / Framing / Codec）、客户端 `Target`、服务端 `ServiceListenAddress` 或 `ServiceListener`（同一服务多传输）。
 
 便利预设（返回 `argos.Protocol`）：
 
@@ -168,9 +168,13 @@ server: Transport.Serve → Conn → NewServerSession
 ### 4.3 最小用法
 
 ```go
-// 服务端：New 只吃 Option；endpoint 携带协议，监听地址可写在 ep 或 WithListenAddress
-srv := server.New()
-_ = srv.AddEndpoint(argos.EndpointConfig{Protocol: grpcbinding.New()}, argos.WithListenAddress(":7001"))
+// 服务端：协议与监听写在 WithService；代码只 Register impl
+srv := server.New(
+    argos.WithService("echo.v1.EchoService",
+        grpcbinding.Service(),
+        argos.ServiceListenAddress(":7001"),
+    ),
+)
 // RegisterEchoService(srv, impl) 由生成桩提供
 go srv.Run(ctx)
 
@@ -228,11 +232,11 @@ cli, err := client.New(
 )
 ```
 
-- **构造时快照并校验**：`client.New` / `server.New` / `AddEndpoint` 各自 clone 一份，之后改原对象不影响已建实例；改进程默认对象必须在建任何实例之前（否则是 data race）。
+- **构造时快照并校验**：`client.New` / `server.New` 各自 clone 一份，之后改原对象不影响已建实例；改进程默认对象必须在建任何实例之前（否则是 data race）。
 - **零值 = 默认**；要显式关掉可选限额用 `argos.Disabled`（仅 `MaxIdleSessions` / `SessionIdleTimeout` / `MaxSessionLifetime` 接受，其余字段给 `Disabled` 直接报错）。
-- **端不匹配的 Option 编译期拒绝**：`argos.Option` 两端通用，`argos.ClientOption` 只进 `client.New`（`WithServiceName` / `WithTarget` / `WithProtocol` / `WithTransport|Framing|Codec` / `WithService` / `WithOpenFilter` / 会话池四项），`argos.ServerOption` 只进 `server.New` / `AddEndpoint`（`WithListenAddress` / `WithEndpoint` / `WithFilter` / 入站连接三项 / HTTP 两项）。同一份 `*Config` 仍可同时喂给两端。
-- 服务选择的优先级：调用侧 `WithProtocol`（或单轴覆盖）/ `WithTarget` > `Services[name]`；服务名只来自 `WithServiceName`，不随 `WithConfig` 从别的 Client 继承。
-- `server.New` 不返回 error：被拒的 Option 组合由 `AddEndpoint` / `Run` 报出。
+- **端不匹配的 Option 编译期拒绝**：`argos.Option` 两端通用（含 `WithService`），`argos.ClientOption` 只进 `client.New`（`WithServiceName` / `WithTarget` / `WithProtocol` / `WithOpenFilter` / 会话池四项），`argos.ServerOption` 只进 `server.New`（`WithListenAddress` / `WithFilter` / 入站连接三项 / HTTP 两项）。同一份 `*Config` 仍可同时喂给两端。
+- 客户端服务选择的优先级：调用侧 `WithProtocol`（或单轴覆盖）/ `WithTarget` > `Services[name]`；服务名只来自 `WithServiceName`，不随 `WithConfig` 从别的 Client 继承。
+- `server.New` 不返回 error：被拒的 Option 组合由 `Run` 报出；`Run` 为每个已 Register 的服务在 `Services` 里启动对应监听。
 - TLS / 压缩在 `binding/grpc.New` 的 Option 里，不在根包。
 
 ### 默认值

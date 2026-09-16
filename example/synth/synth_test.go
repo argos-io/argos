@@ -50,11 +50,13 @@ func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ..
 	preset = NewTCP()
 	var addrTr hasAddr
 	bound := make(chan struct{})
-	srv := server.New(append([]argos.ServerOption{argos.WithConfig(testConfig())}, extra...)...)
+	tc := testConfig()
 	ep := synthServerProtocol(preset, &addrTr, bound)
-	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: ep}); err != nil {
-		t.Fatal(err)
-	}
+	srv := server.New(append(append([]argos.ServerOption{argos.WithConfig(tc)}, extra...),
+		argos.WithService(ServiceName,
+			argos.ServiceProtocol(ep),
+			argos.ServiceListenAddress(tc.ListenAddress),
+		))...)
 
 	methods := []descriptor.Method{
 		descriptor.MustMethod(MethodPing, descriptor.Unary),
@@ -539,10 +541,11 @@ func TestExclusiveKeepsConnectionOutOfPool(t *testing.T) {
 
 	var addrTr hasAddr
 	bound := make(chan struct{})
-	srv := server.New(argos.WithConfig(testConfig()))
-	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: synthServerProtocol(base, &addrTr, bound)}); err != nil {
-		t.Fatal(err)
-	}
+	tc := testConfig()
+	srv := server.New(argos.WithConfig(tc), argos.WithService(ServiceName,
+		argos.ServiceProtocol(synthServerProtocol(base, &addrTr, bound)),
+		argos.ServiceListenAddress(tc.ListenAddress),
+	))
 	methods := []descriptor.Method{
 		descriptor.MustMethod(MethodPing, descriptor.Unary),
 		descriptor.MustMethod(MethodEcho, descriptor.Unary),

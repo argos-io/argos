@@ -40,11 +40,10 @@ func TestProtocolAssembleOncePerServerStart(t *testing.T) {
 		Codec:   testProtocol(tr, fr).Codec,
 	}
 
-	srv := server.New()
-	err := srv.AddEndpoint(argos.EndpointConfig{Protocol: protocol})
-	if err != nil {
-		t.Fatal(err)
-	}
+	srv := server.New(argos.WithService(svcName,
+		argos.ServiceProtocol(protocol),
+		argos.ServiceListenAddress("127.0.0.1:0"),
+	))
 	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: h}); err != nil {
 		t.Fatal(err)
 	}
@@ -151,12 +150,10 @@ func TestCloseIdempotent(t *testing.T) {
 	}
 }
 
-func TestFactoryIsolationAcrossEndpoints(t *testing.T) {
+func TestFactoryIsolationAcrossListeners(t *testing.T) {
 	var calls atomic.Int64
 	tr1, tr2 := newTestTransport(), newTestTransport()
 	fr1, fr2 := fake.NewFraming(framing.Sequential), fake.NewFraming(framing.Sequential)
-
-	srv := server.New()
 
 	mk := func(tr transport.Transport, fr framing.Framing) argos.Protocol {
 		return argos.Protocol{
@@ -168,12 +165,10 @@ func TestFactoryIsolationAcrossEndpoints(t *testing.T) {
 			Codec:   testProtocol(tr, fr).Codec,
 		}
 	}
-	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: mk(tr1, fr1)}); err != nil {
-		t.Fatal(err)
-	}
-	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: mk(tr2, fr2)}); err != nil {
-		t.Fatal(err)
-	}
+	srv := server.New(argos.WithService(svcName,
+		argos.ServiceListener("127.0.0.1:1", mk(tr1, fr1)),
+		argos.ServiceListener("127.0.0.1:2", mk(tr2, fr2)),
+	))
 	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
 		return nil
 	}
@@ -186,24 +181,29 @@ func TestFactoryIsolationAcrossEndpoints(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Close() })
 
 	if got := calls.Load(); got != 2 {
-		t.Fatalf("protocol assemble calls = %d, want 2 (once per endpoint)", got)
+		t.Fatalf("protocol assemble calls = %d, want 2 (once per listener)", got)
 	}
 }
 
-func TestRejectedOptionsSurfaceFromAddEndpointAndRun(t *testing.T) {
+func TestRejectedOptionsSurfaceFromRun(t *testing.T) {
 	tr := newTestTransport()
 	fr := fake.NewFraming(framing.Sequential)
-	srv := server.New(argos.WithMaxConcurrentCalls(-5))
+	srv := server.New(
+		argos.WithMaxConcurrentCalls(-5),
+		argos.WithService(svcName, argos.ServiceProtocol(testProtocol(tr, fr)), argos.ServiceListenAddress("127.0.0.1:0")),
+	)
 	t.Cleanup(func() { _ = srv.Close() })
 
-	addErr := srv.AddEndpoint(argos.EndpointConfig{Protocol: testProtocol(tr, fr)})
-	if addErr == nil {
-		t.Fatal("AddEndpoint succeeded on a Server built from a rejected option set")
+	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: func(context.Context, descriptor.Method, stream.Stream) error {
+		return nil
+	}}); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(addErr.Error(), "MaxConcurrentCalls") {
-		t.Fatalf("AddEndpoint: %v, want the error to name MaxConcurrentCalls", addErr)
+	runErr := srv.Run(context.Background())
+	if runErr == nil {
+		t.Fatal("Run succeeded on a Server built from a rejected option set")
 	}
-	if err := srv.Run(context.Background()); !errors.Is(err, addErr) {
-		t.Fatalf("Run: %v, want the same rejection AddEndpoint reported (%v)", err, addErr)
+	if !strings.Contains(runErr.Error(), "MaxConcurrentCalls") {
+		t.Fatalf("Run: %v, want the error to name MaxConcurrentCalls", runErr)
 	}
 }

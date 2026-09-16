@@ -164,10 +164,10 @@ func startInteg(t *testing.T) *integEnv {
 		MaxInboundConnAge:      30 * time.Minute,
 	}
 
-	srv := server.New(argos.WithConfig(cfg))
-	if err := srv.AddEndpoint(argos.EndpointConfig{Protocol: integProtocol(srvTr, frOpts)}); err != nil {
-		t.Fatal(err)
-	}
+	srv := server.New(argos.WithConfig(cfg), argos.WithService(integService,
+		argos.ServiceProtocol(integProtocol(srvTr, frOpts)),
+		argos.ServiceListenAddress("127.0.0.1:0"),
+	))
 	svc := descriptor.MustService(integService, descriptor.MustMethod(integMethod, descriptor.Unary))
 	if err := srv.Register(svc, map[string]filter.Handler{
 		"Echo": echoHandler,
@@ -357,8 +357,10 @@ func TestClientEarlyCloseNotReturnedToPool(t *testing.T) {
 		MaxInboundConnIdle:     30 * time.Second,
 		MaxInboundConnAge:      30 * time.Minute,
 	}
-	srv := server.New(argos.WithConfig(cfg))
-	_ = srv.AddEndpoint(argos.EndpointConfig{Protocol: integProtocol(srvTr, nil)})
+	srv := server.New(argos.WithConfig(cfg), argos.WithService(integService,
+		argos.ServiceProtocol(integProtocol(srvTr, nil)),
+		argos.ServiceListenAddress("127.0.0.1:0"),
+	))
 	svc := descriptor.MustService(integService, descriptor.MustMethod(integMethod, descriptor.Unary))
 	_ = srv.Register(svc, map[string]filter.Handler{
 		"Echo": func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
