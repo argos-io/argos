@@ -70,6 +70,16 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 	case it, ok := <-c.recvCh:
 		return c.recvItem(it, ok)
 	case <-c.done:
+		// The check above is not enough: recvLoop can push its last items and
+		// close done in the gap between that check and this select, and then
+		// both cases are ready and Go picks at random. Drain the inbox before
+		// reporting the end — an item pushed before done was closed is in the
+		// channel buffer by the time the close is observable.
+		select {
+		case it, ok := <-c.recvCh:
+			return c.recvItem(it, ok)
+		default:
+		}
 		if err := c.ctx.Err(); err != nil {
 			return nil, nil, err
 		}
@@ -83,16 +93,15 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 	}
 }
 
+// recvItem does not touch gotTerminal. Setting it on any io.EOF made a client
+// that consumed the peer's half-close look like it had read the STATUS, so a
+// session with an unread terminal went back to the pool (§4.4). recvLoop sets
+// the flag when it actually reads STATUS, which is the fact the pool needs.
 func (c *call) recvItem(it recvItem, ok bool) ([]byte, func(), error) {
 	if !ok {
 		return nil, nil, io.EOF
 	}
 	if it.err != nil {
-		if it.err == io.EOF {
-			c.mu.Lock()
-			c.gotTerminal = true
-			c.mu.Unlock()
-		}
 		return nil, nil, it.err
 	}
 	return it.payload, func() {}, nil
@@ -181,19 +190,36 @@ func (c *call) Close() error {
 	}
 	c.closed = true
 	gotTerminal := c.gotTerminal
+	// atEnd reports that recvLoop has read the peer's end of the stream and is
+	// therefore on its way out: STATUS for an initiator, END for a responder.
+	// Both flags are set by recvLoop before its last hand-off, and every path
+	// after them returns, so waiting for done is bounded.
+	atEnd := gotTerminal
+	if !c.client {
+		atEnd = c.peerHalfClosed
+	}
 	c.mu.Unlock()
 
 	c.cancel()
 	poison := c.client && !gotTerminal
-	select {
-	case <-c.done:
-		// recvLoop already exited (clean terminal or prior error).
-	default:
-		// Unblock a stuck Read; Abort poisons Sequential reuse — correct when
-		// we close without a protocol terminal.
-		poison = true
-		_ = c.session.carrier.Abort()
+	if atEnd {
+		// Wait it out. Aborting in this window killed a healthy connection the
+		// pool was about to reuse, and the next OpenCall on it failed with
+		// EPIPE — recvLoop had delivered the peer's end but had not reached
+		// close(done) yet.
 		<-c.done
+	} else {
+		select {
+		case <-c.done:
+			// recvLoop already exited (clean terminal or prior error).
+		default:
+			// The peer still owes us bytes, so recvLoop is parked in a socket
+			// read that only Abort can interrupt. Abort poisons Sequential
+			// reuse — correct when we close without a protocol terminal.
+			poison = true
+			_ = c.session.carrier.Abort()
+			<-c.done
+		}
 	}
 
 	c.session.detach(c, poison)
