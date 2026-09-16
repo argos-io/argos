@@ -307,3 +307,63 @@ func TestCloseNoGoroutineLeak(t *testing.T) {
 	}
 	t.Fatalf("goroutines before=%d after=%d (slack 8)", before, after)
 }
+
+// A Client that is dropped instead of closed used to hold its session pool's
+// reclaim goroutine and every socket it had open for the life of the process.
+// Close is still the contract; this is the safety net for forgetting it.
+func TestDroppedClientReleasesItsResources(t *testing.T) {
+	t.Parallel()
+	var reported atomic.Bool
+	var info atomic.Value
+	tr := &loopTransport{
+		dial: func(ctx context.Context, endpoint string) (transport.Conn, error) {
+			return nil, errors.New("not dialed")
+		},
+	}
+
+	func() {
+		cli, err := client.New(
+			argos.WithServiceName(testService),
+			argos.WithConnErrorObserver(func(ci argos.ConnInfo, _ error) {
+				info.Store(ci)
+				reported.Store(true)
+			}),
+			argos.WithBinding(func() (argos.Binding, error) {
+				return argos.Binding{
+					Transport: tr,
+					Framing:   fake.NewFraming(framing.Sequential),
+					Codec:     bytesCodec{},
+				}, nil
+			}),
+			argos.WithTarget(testTarget),
+		)
+		if err != nil {
+			t.Fatalf("client.New: %v", err)
+		}
+		// Intentionally leak: drop without Close so AddCleanup can fire. This
+		// only works because the pool's DialFunc does not point back at the
+		// Client — otherwise the Client stays reachable from its own hook.
+		_ = cli
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		runtime.GC()
+		runtime.GC()
+		if reported.Load() {
+			ci := info.Load().(argos.ConnInfo)
+			if ci.Side != argos.SideClient || ci.Phase != argos.ConnPhaseClose {
+				t.Errorf("ConnInfo = %+v, want SideClient and ConnPhaseClose", ci)
+			}
+			if ci.Endpoint != testTarget {
+				t.Errorf("Endpoint = %q, want %q", ci.Endpoint, testTarget)
+			}
+			if n := tr.closeN.Load(); n != 1 {
+				t.Errorf("Transport closed %d times, want 1", n)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("dropped Client was never released after forcing GC (AddCleanup)")
+}

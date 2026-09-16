@@ -198,6 +198,7 @@ st, err := cli.Open(ctx, echov1.EchoService_Echo)
 ### 4.4 调用收尾（用法约定）
 
 - 客户端读完业务消息后须读到**终态**（STATUS / trailers）再 `Close`，未读终态的会话不得回池。
+- `Client.Close` 是契约，不是可选项：它持有会话、Transport 和会话池的回收 goroutine。被丢弃而未 `Close` 的 Client 由 GC 兜底释放并经 `WithConnErrorObserver` 上报一次，但那是安全网，不是释放时机——本项目没有进程级连接池，连接的归属和寿命是显式的。
 - `HalfClose` 结束发送，不关闭连接；`Call.Close` 结束本次调用。
 - 跨交换的连接级状态（事务等）建模为**一次长期双向流**，内核不提供会话亲和 API。
 

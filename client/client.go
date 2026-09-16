@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/budget"
@@ -44,6 +45,39 @@ type Client struct {
 	admitMu   sync.Mutex
 	inFlight  int
 	bufRemain int64
+
+	leak    *clientLeakState
+	cleanup runtime.Cleanup
+}
+
+// clientLeakState is what the Client's cleanup hook sees. Like the CallStream
+// one it must not reference the Client, or the Client would never become
+// unreachable and the hook would never run — which is also why the pool's
+// DialFunc closes over the Transport instead of over the Client.
+type clientLeakState struct {
+	closed atomic.Bool
+	cfg    *argos.Config
+	target string
+	pool   *sessionpool.Pool
+	tr     transport.Transport
+	cancel context.CancelFunc
+}
+
+// release is what both Close and the cleanup hook run.
+func (st *clientLeakState) release() error {
+	st.cancel()
+	var first error
+	if st.pool != nil {
+		if err := st.pool.Close(); err != nil {
+			first = err
+		}
+	}
+	if st.tr != nil {
+		if err := st.tr.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 // New builds a Client from options only: the Config it starts from is the one
@@ -100,7 +134,20 @@ func New(opts ...argos.ClientOption) (*Client, error) {
 	if n, ok := b.Codec.(codec.Named); ok {
 		codecName = n.CodecName()
 	}
-	c.pool = sessionpool.New(b.Framing, c.dial, sessionpool.Config{
+	// dial closes over the Transport and the lifetime ctx, not over the
+	// Client: the Client holds the pool, so a DialFunc pointing back at the
+	// Client would make the pair reachable from the cleanup hook below and the
+	// hook would never run.
+	tr := b.Transport
+	dial := func(ctx context.Context, endpoint string) (transport.Conn, error) {
+		select {
+		case <-life.Done():
+			return nil, ErrClosed
+		default:
+		}
+		return tr.Dial(ctx, transport.DialSpec{Endpoint: endpoint})
+	}
+	c.pool = sessionpool.New(b.Framing, dial, sessionpool.Config{
 		MaxSessionsPerEndpoint: cfg.MaxSessionsPerEndpoint,
 		MaxIdleSessions:        cfg.MaxIdleSessions,
 		SessionIdleTimeout:     cfg.SessionIdleTimeout,
@@ -120,6 +167,30 @@ func New(opts ...argos.ClientOption) (*Client, error) {
 			},
 		},
 	})
+
+	// Close is still the contract — it is the only way to release the sessions
+	// and the pool's reclaim goroutine at a point the program chooses. This
+	// hook is the safety net for a Client that is dropped instead: without it
+	// a forgotten Close leaked a goroutine and every socket it held for the
+	// life of the process.
+	c.leak = &clientLeakState{
+		cfg:    cfg,
+		target: target,
+		pool:   c.pool,
+		tr:     tr,
+		cancel: cancelLife,
+	}
+	c.cleanup = runtime.AddCleanup(c, func(st *clientLeakState) {
+		if st.closed.Load() {
+			return
+		}
+		argos.NotifyConnError(st.cfg, argos.ConnInfo{
+			Side:     argos.SideClient,
+			Endpoint: st.target,
+			Phase:    argos.ConnPhaseClose,
+		}, errors.New("client: Client leaked without Close"))
+		_ = st.release()
+	}, c.leak)
 	return c, nil
 }
 
@@ -141,17 +212,6 @@ func checkBindingConfig(fr framing.Framing, cfg *argos.Config) error {
 		OpenTimeout:            cfg.OpenTimeout,
 		MaxDrainBytes:          cfg.MaxDrainBytes,
 	})
-}
-
-// dial is the sessionpool DialFunc. HandshakeTimeout is applied by the pool
-// on a ctx that is not a child of any call ctx (§2.1).
-func (c *Client) dial(ctx context.Context, endpoint string) (transport.Conn, error) {
-	select {
-	case <-c.lifetime.Done():
-		return nil, ErrClosed
-	default:
-	}
-	return c.binding.Transport.Dial(ctx, transport.DialSpec{Endpoint: endpoint})
 }
 
 // Open admits one call, runs the OpenFilter chain, and returns a CallStream.
@@ -335,17 +395,11 @@ func (c *Client) Close() error {
 	c.closed = true
 	c.mu.Unlock()
 
-	c.cancelLifetime()
-	var first error
-	if c.pool != nil {
-		if err := c.pool.Close(); err != nil {
-			first = err
-		}
+	if c.leak == nil { // New always sets it; a zero Client has nothing to release.
+		c.cancelLifetime()
+		return nil
 	}
-	if c.binding.Transport != nil {
-		if err := c.binding.Transport.Close(); err != nil && first == nil {
-			first = err
-		}
-	}
-	return first
+	c.leak.closed.Store(true)
+	c.cleanup.Stop()
+	return c.leak.release()
 }
