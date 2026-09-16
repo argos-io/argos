@@ -4,6 +4,11 @@
 // request and returns a writable Carrier before response headers arrive.
 // Server Serve delivers each inbound request as a one-shot CarrierConn.
 //
+// HTTP/2 comes from net/http itself: the client http.Transport and the server
+// http.Server select it through their Protocols field (TLS+ALPN for TLS
+// listeners, prior-knowledge h2c for cleartext ones). This package does not
+// import golang.org/x/net/http2.
+//
 // This package moves bytes and opaque headers only. It does not import
 // framing, descriptor, codec, or any gRPC packages.
 package http2
@@ -18,9 +23,6 @@ import (
 	"strings"
 	"sync"
 
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-
 	"github.com/argos-io/argos/transport"
 )
 
@@ -32,13 +34,13 @@ var (
 	_ transport.Conn        = (*serverConn)(nil)
 	_ transport.CarrierConn = (*serverConn)(nil)
 
-	_ transport.ByteStreamCarrier      = (*clientCarrier)(nil)
-	_ transport.SendCloser             = (*clientCarrier)(nil)
-	_ transport.ResponseHeaderReader   = (*clientCarrier)(nil)
-	_ transport.ResponseTrailerReader  = (*clientCarrier)(nil)
-	_ transport.ByteStreamCarrier      = (*serverCarrier)(nil)
-	_ transport.RequestHeaderReader    = (*serverCarrier)(nil)
-	_ transport.ResponseWriter         = (*serverCarrier)(nil)
+	_ transport.ByteStreamCarrier     = (*clientCarrier)(nil)
+	_ transport.SendCloser            = (*clientCarrier)(nil)
+	_ transport.ResponseHeaderReader  = (*clientCarrier)(nil)
+	_ transport.ResponseTrailerReader = (*clientCarrier)(nil)
+	_ transport.ByteStreamCarrier     = (*serverCarrier)(nil)
+	_ transport.RequestHeaderReader   = (*serverCarrier)(nil)
+	_ transport.ResponseWriter        = (*serverCarrier)(nil)
 )
 
 // Option configures a Transport. WithServerTLS / WithClientTLS select TLS+ALPN
@@ -78,7 +80,6 @@ type Transport struct {
 	listener net.Listener
 	server   *http.Server
 	client   *http.Client
-	h2t      *http2.Transport
 
 	streamConns map[*streamConn]struct{}
 	serverConns map[*serverConn]struct{}
@@ -109,29 +110,40 @@ func New(opts ...Option) transport.Transport {
 }
 
 func (t *Transport) newHTTPClient() *http.Client {
-	h2t := &http2.Transport{
-		AllowHTTP: true,
-		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			_ = cfg
-			if t.opts.clientTLS != nil {
-				tlsCfg := ensureH2ALPN(t.opts.clientTLS.Clone())
-				// Prefer ServerName from config; otherwise derive from dial addr
-				// so SNI works when callers only set RootCAs.
-				if tlsCfg.ServerName == "" {
-					if host, _, err := net.SplitHostPort(addr); err == nil {
-						tlsCfg.ServerName = host
-					} else {
-						tlsCfg.ServerName = addr
-					}
-				}
-				d := tls.Dialer{Config: tlsCfg, NetDialer: &net.Dialer{}}
-				return d.DialContext(ctx, network, addr)
-			}
-			return (&net.Dialer{}).DialContext(ctx, network, addr)
-		},
+	tr := &http.Transport{Protocols: clientProtocols()}
+	if t.opts.clientTLS != nil {
+		// net/http clones this per connection and derives ServerName from the
+		// dialed authority when the config leaves it empty, so SNI works when
+		// callers only set RootCAs.
+		tr.TLSClientConfig = ensureH2ALPN(t.opts.clientTLS.Clone())
 	}
-	t.h2t = h2t
-	return &http.Client{Transport: h2t}
+	return &http.Client{Transport: tr}
+}
+
+// clientProtocols is the client protocol set: HTTP/2 over TLS+ALPN for
+// https:// targets, and HTTP/2 with prior knowledge (h2c) for http:// targets.
+// HTTP/1 is deliberately absent — this transport speaks HTTP/2 only, as
+// http2.Transport{AllowHTTP: true} did.
+func clientProtocols() *http.Protocols {
+	p := &http.Protocols{}
+	p.SetHTTP2(true)
+	p.SetUnencryptedHTTP2(true)
+	return p
+}
+
+// serverProtocols is the server protocol set. A cleartext listener accepts
+// HTTP/2 with prior knowledge (h2c) alongside HTTP/1.1, which is what the
+// deprecated h2c handler did for traffic that is not an h2c exchange; a TLS
+// listener negotiates HTTP/2 through ALPN instead.
+func serverProtocols(serverTLS bool) *http.Protocols {
+	p := &http.Protocols{}
+	p.SetHTTP1(true)
+	if serverTLS {
+		p.SetHTTP2(true)
+	} else {
+		p.SetUnencryptedHTTP2(true)
+	}
+	return p
 }
 
 // ensureH2ALPN clones cfg semantics: NextProtos must advertise "h2" for ALPN.
@@ -203,23 +215,23 @@ func (t *Transport) Serve(ctx context.Context, onConn func(context.Context, tran
 	t.serveDone = make(chan struct{})
 	serveDone := t.serveDone
 
-	h2s := &http2.Server{}
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.handleRequest(ctx, w, r, onConn)
-	})
-	srv := &http.Server{}
+	// Registered before any early return below: Shutdown waits on serveDone, so
+	// a path that skipped this close would stall that wait (forever under a
+	// non-cancelable context).
+	defer close(serveDone)
+
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			t.handleRequest(ctx, w, r, onConn)
+		}),
+		ReadHeaderTimeout: settings.HTTPReadHeaderTimeout,
+		IdleTimeout:       settings.HTTPIdleTimeout,
+		Protocols:         serverProtocols(serverTLS != nil),
+	}
 	if serverTLS != nil {
+		// ALPN "h2" is already in NextProtos, which is also how net/http is
+		// told to serve HTTP/2 over the TLS listener below.
 		srv.TLSConfig = serverTLS
-		if err := http2.ConfigureServer(srv, h2s); err != nil {
-			t.serving = false
-			t.listener = nil
-			t.mu.Unlock()
-			_ = ln.Close()
-			return fmt.Errorf("http2: ConfigureServer: %w", err)
-		}
-		srv.Handler = inner
-	} else {
-		srv.Handler = h2c.NewHandler(inner, h2s)
 	}
 	t.server = srv
 	t.mu.Unlock()
@@ -233,7 +245,6 @@ func (t *Transport) Serve(ctx context.Context, onConn func(context.Context, tran
 		if t.server == srv {
 			t.server = nil
 		}
-		close(serveDone)
 		t.mu.Unlock()
 		_ = srv.Close()
 		_ = ln.Close()
@@ -282,6 +293,8 @@ func (t *Transport) handleRequest(ctx context.Context, w http.ResponseWriter, r 
 
 	defer t.onConnWG.Done()
 	defer t.untrackServer(c)
+	// Deferred so a panicking onConn counts as finished too.
+	defer c.markHandlerDone()
 	onConn(ctx, c)
 }
 
@@ -305,6 +318,10 @@ func (t *Transport) Dial(ctx context.Context, spec transport.DialSpec, _ ...tran
 
 	base := dialBaseURL(spec.Endpoint, t.opts.clientTLS != nil)
 	c := newStreamConn(client, base)
+	// An endpoint handle is tracked only while it is open: Session recycles
+	// handles on idle/lifetime timeouts, and the transport must not retain
+	// closed ones until Close.
+	c.detach = func() { t.untrackStreamConn(c) }
 
 	t.mu.Lock()
 	if t.closed {
@@ -368,7 +385,12 @@ func (t *Transport) Shutdown(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		t.closeAllServerConns()
-		<-done
+		// A callback that ignores Conn.Close must not hold Shutdown open past
+		// its deadline.
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
 		return ctx.Err()
 	}
 }
@@ -386,7 +408,6 @@ func (t *Transport) Close() error {
 	srv := t.server
 	ln := t.listener
 	client := t.client
-	h2t := t.h2t
 	t.mu.Unlock()
 
 	if srv != nil {
@@ -396,10 +417,8 @@ func (t *Transport) Close() error {
 	}
 	t.closeAllServerConns()
 	t.closeAllStreamConns()
-	if h2t != nil {
-		h2t.CloseIdleConnections()
-	}
 	if client != nil {
+		// Releases the pool's idle HTTP/2 connections too.
 		client.CloseIdleConnections()
 	}
 	return nil
@@ -408,6 +427,12 @@ func (t *Transport) Close() error {
 func (t *Transport) untrackServer(c *serverConn) {
 	t.mu.Lock()
 	delete(t.serverConns, c)
+	t.mu.Unlock()
+}
+
+func (t *Transport) untrackStreamConn(c *streamConn) {
+	t.mu.Lock()
+	delete(t.streamConns, c)
 	t.mu.Unlock()
 }
 
