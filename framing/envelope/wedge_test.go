@@ -37,12 +37,14 @@ import (
 //     worse (3/3 package timeouts). Both mechanisms are needed: the epoch for
 //     the latch, the channel for blocking, and every waiter must capture the
 //     channel in the same critical section that evaluates its predicate.
+//
 //  2. waitModeChange(modeAccepting) after a handoff is the wrong predicate. The
 //     mode RETURNS to modeAccepting for the next accept, so a call that
 //     completed plus a fresh accept look identical to "nothing happened" to a
 //     reader not scheduled in between - it sleeps through both while the next
 //     AcceptCall waits for a frame already in the read buffer. The predicate
 //     must be the handoff's channel identity (s.acceptCh != ch).
+//
 //  3. The demux read completes with a frame belonging to the NEXT call. The
 //     reader was already blocked in the read when the previous call ended, so
 //     it woke with data (the peer's new OPEN) instead of the deadline wake,
@@ -53,6 +55,7 @@ import (
 //     the next call, not a violation: hand it back with pushFront, and do NOT
 //     wait after the handback while an accept is in flight (that wait strands
 //     the frame - the reader is the only one who can hand it over).
+//
 //  4. A stale read deadline. AcceptCall's ctx-cancel path and Close both call
 //     wakeRead() (SetReadDeadline(now)); a later accept's waitFirstByte
 //     observes that past deadline, and readFrameAccepting classifies the
@@ -67,9 +70,31 @@ import (
 //     reporting a wake-induced expiry as ctx.Err(), feeds a cancelled accept's
 //     error into the handoff path and parks the reader there again.
 //     The structural problem is that the accept ctx outlives its accept and is
-//     reused by a read the reader starts afterwards. A per-attempt lifecycle
-//     for it - or an idle state the reader returns to when no accept owns the
-//     connection - is where this lands, not another classification tweak.
+//     reused by a read the reader starts afterwards.
+//
+//     Two attempts at the per-attempt lifecycle, both measured with the test
+//     running for real (the earlier "10/10 pass" was a skip artifact - always
+//     check -v before believing a pass):
+//
+//     a) An accept generation, captured with the state and re-checked after
+//     every read, so a result or error whose attempt was retired is dropped
+//     and the frame pushed back. This HALVES the failure rate (2/8 vs 5/10
+//     failing) and is the right direction.
+//     b) Treating a read that expires far sooner than the deadline we set as a
+//     wake to re-evaluate (wakeRead moves the deadline into the past; a
+//     real OpenTimeout expiry does not). On top of (a) this REGRESSED to
+//     5/10 with the wedge back at random rounds.
+//
+//     What is still unaccounted for: a wakeRead from the previous call's Close
+//     expiring a read that belongs to the CURRENT, still-valid accept - the
+//     generation does not change, so (a) alone cannot tell the two apart, and
+//     (b)'s re-loop re-enters the accept branch and parks.
+//
+//     The reader serves both the accept and the demux phase, so every error it
+//     sees has to be classified against two different owners. That is the shape
+//     to change: either split the two phases' error handling outright, or give
+//     the reader an explicit idle state it returns to when no accept owns the
+//     connection, instead of re-entering the accept branch with a live ctx.
 //
 // Defects 1-3 are what make the failure deterministic today (round 0, 3/3);
 // with them fixed the wedge is gone and only defect 4 remains, intermittently.
