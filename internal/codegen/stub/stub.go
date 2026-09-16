@@ -64,9 +64,6 @@ func Run(ctx context.Context, opts Options, inputs []string) error {
 			}
 		}
 	}
-	if opts.Check != "" {
-		return checkFiles(opts.Check, files)
-	}
 	var outputs []generatedOutput
 	for _, file := range files {
 		fileOutputs, err := generateFileOutputs(opts, inputs, file)
@@ -74,6 +71,11 @@ func Run(ctx context.Context, opts Options, inputs []string) error {
 			return err
 		}
 		outputs = append(outputs, fileOutputs...)
+	}
+	// Check mode verifies this exact slice, so --check can only ever compare
+	// the files generation would write for the same inputs and --out.
+	if opts.Check != "" {
+		return checkFiles(opts.Check, outputs)
 	}
 	if err := validateOutputPaths(outputs); err != nil {
 		return err
@@ -245,50 +247,45 @@ func hasWindowsVolume(name string) bool {
 	return len(name) >= 2 && name[1] == ':'
 }
 
-func checkFiles(path string, files []ir.File) error {
-	if len(files) != 1 {
-		return fmt.Errorf("stub: --check expects exactly one IR file, got %d", len(files))
+// checkFiles diffs outputs (the files generation would write) against what is
+// on disk. The --check path identifies which artifact the caller means, but
+// never moves the comparison: taking it verbatim let `--check <some other
+// directory>` verify an unrelated copy while the shipped artifact was stale.
+func checkFiles(checkPath string, outputs []generatedOutput) error {
+	if len(outputs) == 0 {
+		return fmt.Errorf("stub: --check has nothing to compare: no inputs were given")
 	}
-	file := files[0]
-	stubPath, msgPath := companionPaths(path, file)
-	if err := checkOne(stubPath, func() ([]byte, error) { return stubgen.Generate(file) }); err != nil {
+	if err := matchCheckPath(checkPath, outputs); err != nil {
 		return err
 	}
-	if file.GenerateMessages() {
-		if err := checkOne(msgPath, func() ([]byte, error) { return message.Generate(file) }); err != nil {
+	for _, output := range outputs {
+		if err := checkOne(output.path, output.source); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func companionPaths(path string, file ir.File) (stubPath, msgPath string) {
-	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	base = strings.TrimSuffix(base, ".argos")
-	base = strings.TrimSuffix(base, ".pb")
-	base = strings.TrimSuffix(base, ".msg")
-	dir := filepath.Dir(path)
-	if strings.HasSuffix(path, ".argos.go") || file.StubName() == filepath.Base(path) {
-		stubPath = path
-		msgPath = filepath.Join(dir, file.MessagesName())
-		if file.MessagesName() == "" {
-			msgPath = filepath.Join(dir, base+".pb.go")
+// matchCheckPath rejects a --check path that this invocation does not generate.
+// A caller could otherwise point it at a stale copy, a handwritten file, or a
+// message file generation does not produce, and read the resulting pass as
+// "the generated artifact is up to date".
+func matchCheckPath(checkPath string, outputs []generatedOutput) error {
+	checked, err := filepath.Abs(checkPath)
+	if err != nil {
+		return fmt.Errorf("stub: resolve --check path %q: %w", checkPath, err)
+	}
+	generated := make([]string, 0, len(outputs))
+	for _, output := range outputs {
+		if filepath.Clean(checked) == filepath.Clean(output.path) {
+			return nil
 		}
-		return stubPath, msgPath
+		generated = append(generated, output.path)
 	}
-	msgPath = path
-	stubPath = filepath.Join(dir, file.StubName())
-	if file.StubName() == "" {
-		stubPath = filepath.Join(dir, base+".argos.go")
-	}
-	return stubPath, msgPath
+	return fmt.Errorf("stub: --check %s is not a file this invocation generates; it generates %s", checkPath, strings.Join(generated, ", "))
 }
 
-func checkOne(path string, generate func() ([]byte, error)) error {
-	got, err := generate()
-	if err != nil {
-		return err
-	}
+func checkOne(path string, got []byte) error {
 	want, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("stub: read %s: %w", path, err)

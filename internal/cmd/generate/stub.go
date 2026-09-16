@@ -36,7 +36,7 @@ func StubCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:  "check",
-				Usage: "diff generated output against existing file (handwritten fallback)",
+				Usage: "verify mode: path of one file generation would write; every generated file is diffed on disk",
 			},
 		},
 		Action: stubAction,

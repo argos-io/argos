@@ -461,19 +461,14 @@ func writeGoTypes(b *strings.Builder, ident string, info *descriptorInfo) {
 
 func writeDepIdxs(b *strings.Builder, ident string, fd protoreflect.FileDescriptor, info *descriptorInfo) {
 	var fields, inputs, outputs []int32
+	// Map entries are messages and take part in the walk like any other: their
+	// key/value fields carry their own rows, and a map field reaches its entry
+	// through field.Message() like any other message field. protoc-gen-go emits
+	// both rows; dropping the entry's row leaves its value type unresolved and
+	// shifts every later row onto the wrong type.
 	for _, msg := range info.messages {
-		if msg.IsMapEntry() {
-			continue
-		}
 		for i := 0; i < msg.Fields().Len(); i++ {
 			field := msg.Fields().Get(i)
-			if field.IsMap() {
-				index, err := info.messageTypeIndex(field.Message())
-				if err == nil {
-					fields = append(fields, index)
-				}
-				continue
-			}
 			switch field.Kind() {
 			case protoreflect.MessageKind, protoreflect.GroupKind:
 				index, err := info.messageTypeIndex(field.Message())
@@ -651,6 +646,24 @@ func zeroValue(field protoreflect.FieldDescriptor, info *descriptorInfo) string 
 }
 
 func protobufTag(field protoreflect.FieldDescriptor, info *descriptorInfo) string {
+	// The json element of the json tag carries the proto field name, not the
+	// JSON name: that is protoc-gen-go's fieldJSONTagValue, so code that calls
+	// encoding/json on generated structs sees the same keys as protoc-gen-go
+	// users. The JSON name lives in the protobuf tag's json= element below.
+	tag := fmt.Sprintf(`protobuf:"%s" json:"%s,omitempty"`, strings.Join(protobufTagParts(field, info), ","), field.Name())
+	if field.IsMap() {
+		entry := field.Message()
+		key := entry.Fields().ByName("key")
+		value := entry.Fields().ByName("value")
+		tag += fmt.Sprintf(` protobuf_key:"%s" protobuf_val:"%s"`, mapEntryTag(key, info), mapEntryTag(value, info))
+	}
+	return tag
+}
+
+// protobufTagParts renders the protobuf struct tag elements in the order
+// protoc-gen-go emits them (internal/encoding/tag.Marshal): wire, number,
+// cardinality, packed, name, json, proto3, enum, oneof.
+func protobufTagParts(field protoreflect.FieldDescriptor, info *descriptorInfo) []string {
 	wire := protoWireType(field)
 	name := string(field.Name())
 	label := "opt"
@@ -658,56 +671,35 @@ func protobufTag(field protoreflect.FieldDescriptor, info *descriptorInfo) strin
 		label = "rep"
 	}
 	parts := []string{wire, fmt.Sprint(field.Number()), label}
-	if field.IsList() && !field.IsMap() && isPackable(field.Kind()) {
+	// IsPacked is true for a proto3 repeated scalar unless [packed = false]
+	// says otherwise, which is exactly when protoc-gen-go records the element.
+	if field.IsPacked() {
 		parts = append(parts, "packed")
 	}
 	parts = append(parts, "name="+name)
 	if jsonName := field.JSONName(); jsonName != name {
 		parts = append(parts, "json="+jsonName)
 	}
-	if field.HasOptionalKeyword() {
-		parts = append(parts, "oneof")
-	}
 	parts = append(parts, "proto3")
 	if field.Kind() == protoreflect.EnumKind {
-		if enumName, err := info.localEnumType(field.Enum()); err == nil {
-			_ = enumName
+		if _, err := info.localEnumType(field.Enum()); err == nil {
 			parts = append(parts, "enum="+string(field.Enum().FullName()))
 		}
 	}
-	if field.Kind() == protoreflect.MessageKind || field.Kind() == protoreflect.GroupKind {
-		if field.Message() != nil && !field.IsMap() {
-			parts = append(parts, "msg="+string(field.Message().FullName()))
-		}
+	// proto3 optional is the only oneof shape that reaches generation;
+	// validateDescriptor rejects declared oneofs. protoc-gen-go records it after
+	// proto3, not before.
+	if field.HasOptionalKeyword() {
+		parts = append(parts, "oneof")
 	}
-	jsonTagName := name
-	if jsonName := field.JSONName(); jsonName != "" {
-		jsonTagName = jsonName
-	}
-	tag := fmt.Sprintf(`protobuf:"%s" json:"%s,omitempty"`, strings.Join(parts, ","), jsonTagName)
-	if field.IsMap() {
-		entry := field.Message()
-		key := entry.Fields().ByName("key")
-		value := entry.Fields().ByName("value")
-		tag += fmt.Sprintf(` protobuf_key:"%s" protobuf_val:"%s"`, mapEntryTag(key), mapEntryTag(value))
-	}
-	return tag
+	return parts
 }
 
-func mapEntryTag(field protoreflect.FieldDescriptor) string {
+func mapEntryTag(field protoreflect.FieldDescriptor, info *descriptorInfo) string {
 	if field == nil {
 		return ""
 	}
-	return fmt.Sprintf("%s,%d,opt,name=%s,proto3", protoWireType(field), field.Number(), field.Name())
-}
-
-func isPackable(kind protoreflect.Kind) bool {
-	switch kind {
-	case protoreflect.StringKind, protoreflect.BytesKind, protoreflect.MessageKind, protoreflect.GroupKind:
-		return false
-	default:
-		return true
-	}
+	return strings.Join(protobufTagParts(field, info), ",")
 }
 
 func protoWireType(field protoreflect.FieldDescriptor) string {

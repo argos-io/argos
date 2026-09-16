@@ -19,6 +19,10 @@ message Outer {
   optional string nickname = 6;
   optional int32 count = 7;
 
+  // Explicitly unpacked: protoc-gen-go omits the packed element when the
+  // field is not packed, even though proto3 repeats scalars by default.
+  repeated int32 unpacked = 8 [packed = false];
+
   message Inner {
     uint32 id = 1;
   }

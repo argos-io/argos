@@ -102,3 +102,200 @@ func TestGenerateFileOutputsBeforeWriting(t *testing.T) {
 		t.Fatalf("message output exists after generation failure: %v", statErr)
 	}
 }
+
+// checkFixture writes a proto input that generates both a stub and a message
+// file, and returns the options and inputs that generate it.
+func checkFixture(t *testing.T) (Options, []string) {
+	t.Helper()
+	dir := t.TempDir()
+	const source = `syntax = "proto3";
+
+package check.v1;
+
+option go_package = "example.com/check;checkv1";
+
+message Request {
+  string id = 1;
+}
+
+message Response {
+  string id = 1;
+}
+
+service CheckService {
+  rpc Do(Request) returns (Response);
+}
+`
+	protoPath := filepath.Join(dir, "check.proto")
+	if err := os.WriteFile(protoPath, []byte(source), 0o644); err != nil {
+		t.Fatalf("write proto: %v", err)
+	}
+	return Options{From: "proto", ImportPaths: []string{dir}}, []string{protoPath}
+}
+
+// outputPathFor returns where generation writes name for these inputs when no
+// --out is given: next to the input file.
+func outputPathFor(t *testing.T, inputs []string, name string) string {
+	t.Helper()
+	return filepath.Join(filepath.Dir(inputs[0]), name)
+}
+
+func copyFile(t *testing.T, from, to string) {
+	t.Helper()
+	data, err := os.ReadFile(from)
+	if err != nil {
+		t.Fatalf("read %s: %v", from, err)
+	}
+	if err := os.WriteFile(to, data, 0o644); err != nil {
+		t.Fatalf("write %s: %v", to, err)
+	}
+}
+
+// TestCheckVerifiesEveryGeneratedFile pins that --check compares the stub and
+// the message file that generation would write, whichever of the two the caller
+// names.
+func TestCheckVerifiesEveryGeneratedFile(t *testing.T) {
+	generated := []string{"check.argos.go", "check.pb.go"}
+	for _, checked := range generated {
+		for _, stale := range generated {
+			t.Run("check "+checked+" with stale "+stale, func(t *testing.T) {
+				opts, inputs := checkFixture(t)
+				if err := Run(t.Context(), opts, inputs); err != nil {
+					t.Fatalf("generate: %v", err)
+				}
+
+				checkOpts := opts
+				checkOpts.Check = outputPathFor(t, inputs, checked)
+				if err := Run(t.Context(), checkOpts, inputs); err != nil {
+					t.Fatalf("check of freshly generated output: %v", err)
+				}
+
+				stalePath := outputPathFor(t, inputs, stale)
+				if err := os.WriteFile(stalePath, []byte("// stale\n"), 0o644); err != nil {
+					t.Fatalf("stale %s: %v", stale, err)
+				}
+				err := Run(t.Context(), checkOpts, inputs)
+				if err == nil || !strings.Contains(err.Error(), stalePath) {
+					t.Fatalf("check error = %v, want a diff naming %s", err, stalePath)
+				}
+			})
+		}
+	}
+}
+
+// TestCheckRejectsPathGenerationWouldNotWrite is the loophole test: taking the
+// --check path verbatim let a pristine copy of the output stand in for the
+// shipped artifact, so the check passed while the real file was stale.
+func TestCheckRejectsPathGenerationWouldNotWrite(t *testing.T) {
+	opts, inputs := checkFixture(t)
+	if err := Run(t.Context(), opts, inputs); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	decoy := t.TempDir()
+	for _, name := range []string{"check.argos.go", "check.pb.go"} {
+		copyFile(t, outputPathFor(t, inputs, name), filepath.Join(decoy, name))
+	}
+	stalePath := outputPathFor(t, inputs, "check.argos.go")
+	if err := os.WriteFile(stalePath, []byte("// stale\n"), 0o644); err != nil {
+		t.Fatalf("stale stub: %v", err)
+	}
+
+	checkOpts := opts
+	checkOpts.Check = filepath.Join(decoy, "check.argos.go")
+	err := Run(t.Context(), checkOpts, inputs)
+	if err == nil {
+		t.Fatal("check passed against a copy generation would not write while the shipped artifact is stale")
+	}
+	if !strings.Contains(err.Error(), stalePath) {
+		t.Fatalf("check error = %v, want it to name the generated path %s", err, stalePath)
+	}
+}
+
+// TestCheckComparesUnderOutDir pins that the comparison target follows --out,
+// so a path outside --out cannot redirect it and a stale artifact inside --out
+// cannot hide.
+func TestCheckComparesUnderOutDir(t *testing.T) {
+	opts, inputs := checkFixture(t)
+	outDir := t.TempDir()
+	genOpts := opts
+	genOpts.OutDir = outDir
+	if err := Run(t.Context(), genOpts, inputs); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	// The default location stays fresh; the artifact under --out goes stale.
+	for _, name := range []string{"check.argos.go", "check.pb.go"} {
+		copyFile(t, filepath.Join(outDir, name), outputPathFor(t, inputs, name))
+	}
+	stalePath := filepath.Join(outDir, "check.pb.go")
+	if err := os.WriteFile(stalePath, []byte("// stale\n"), 0o644); err != nil {
+		t.Fatalf("stale companion: %v", err)
+	}
+
+	checkOpts := genOpts
+	checkOpts.Check = outputPathFor(t, inputs, "check.argos.go")
+	err := Run(t.Context(), checkOpts, inputs)
+	if err == nil {
+		t.Fatal("--check verified a path outside --out while the artifact under --out is stale")
+	}
+	if !strings.Contains(err.Error(), filepath.Join(outDir, "check.argos.go")) {
+		t.Fatalf("check error = %v, want it to name the generated path under --out", err)
+	}
+
+	// Naming the generated path does compare the stale artifact under --out.
+	checkOpts.Check = filepath.Join(outDir, "check.argos.go")
+	err = Run(t.Context(), checkOpts, inputs)
+	if err == nil || !strings.Contains(err.Error(), stalePath) {
+		t.Fatalf("check error = %v, want a diff naming %s", err, stalePath)
+	}
+
+	if err := os.WriteFile(stalePath, []byte("// fresh\n"), 0o644); err != nil {
+		t.Fatalf("restore companion: %v", err)
+	}
+	if err := Run(t.Context(), genOpts, inputs); err != nil {
+		t.Fatalf("regenerate: %v", err)
+	}
+	if err := Run(t.Context(), checkOpts, inputs); err != nil {
+		t.Fatalf("check after regenerate: %v", err)
+	}
+}
+
+// TestCheckSkipsMessageOutputWhenGenerationDoes covers legacy IR, where the
+// messages are produced by another generator: generation writes no message
+// file, so the .pb.go on disk is not ours to compare.
+func TestCheckSkipsMessageOutputWhenGenerationDoes(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "legacy.ir.json")
+	const irJSON = `{
+  "ir_version": 1,
+  "go_package": "example.com/legacy",
+  "outputs": {"stub": "legacy.argos.go"},
+  "services": [{"go_name": "LegacyService", "methods": []}]
+}`
+	if err := os.WriteFile(input, []byte(irJSON), 0o644); err != nil {
+		t.Fatalf("write IR: %v", err)
+	}
+	inputs := []string{input}
+	opts := Options{From: "ir"}
+	if err := Run(t.Context(), opts, inputs); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	stubPath := filepath.Join(dir, "legacy.argos.go")
+	msgPath := filepath.Join(dir, "legacy.pb.go")
+	if err := os.WriteFile(msgPath, []byte("// generated elsewhere\n"), 0o644); err != nil {
+		t.Fatalf("write unrelated message file: %v", err)
+	}
+
+	checkOpts := opts
+	checkOpts.Check = stubPath
+	if err := Run(t.Context(), checkOpts, inputs); err != nil {
+		t.Fatalf("check compared the message file generation does not write: %v", err)
+	}
+
+	checkOpts.Check = msgPath
+	if err := Run(t.Context(), checkOpts, inputs); err == nil {
+		t.Fatal("check accepted a path generation does not write")
+	}
+}

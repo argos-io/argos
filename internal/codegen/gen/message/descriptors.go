@@ -33,8 +33,15 @@ func newDescriptorInfo(file protoreflect.FileDescriptor) *descriptorInfo {
 	for i := 0; i < file.Enums().Len(); i++ {
 		info.addEnum(file.Enums().Get(i), "")
 	}
+	// Top-level messages occupy the first MessageInfo slots; nested messages are
+	// appended during the walk below. This is protoc-gen-go's "flattened
+	// ordering" (see internal/filedesc: "Must allocate all declarations before
+	// parsing each descriptor type").
 	for i := 0; i < file.Messages().Len(); i++ {
-		info.addMessage(file.Messages().Get(i), "")
+		info.recordMessage(file.Messages().Get(i), "")
+	}
+	for i := 0; i < file.Messages().Len(); i++ {
+		info.walkNested(file.Messages().Get(i))
 	}
 	return info
 }
@@ -53,7 +60,9 @@ func (i *descriptorInfo) addEnum(enum protoreflect.EnumDescriptor, parent string
 	i.enumGoName[enum] = name
 }
 
-func (i *descriptorInfo) addMessage(message protoreflect.MessageDescriptor, parent string) {
+// recordMessage appends message to the flattened list and registers its Go
+// name. It does not descend into nested declarations; walkNested does that.
+func (i *descriptorInfo) recordMessage(message protoreflect.MessageDescriptor, parent string) {
 	if _, ok := i.messageIndex[message]; ok {
 		return
 	}
@@ -65,17 +74,29 @@ func (i *descriptorInfo) addMessage(message protoreflect.MessageDescriptor, pare
 		name = parent + "_" + name
 	}
 	i.messageGoName[message] = name
+}
 
-	// Map-entry descriptors occupy a MessageInfo slot but do not have a Go
-	// struct declaration. They have no user-declared nested types.
+// walkNested mirrors filedesc's flattened ordering: a message records every one
+// of its direct nested enums and messages before any of them is visited, so
+// siblings precede descendants.
+//
+// Map-entry descriptors occupy a MessageInfo slot but have no Go struct
+// declaration and no user-declared nested types.
+func (i *descriptorInfo) walkNested(message protoreflect.MessageDescriptor) {
 	if message.IsMapEntry() {
 		return
 	}
-	for n := 0; n < message.Enums().Len(); n++ {
-		i.addEnum(message.Enums().Get(n), name)
+	name := i.messageGoName[message]
+	enums := message.Enums()
+	for n := 0; n < enums.Len(); n++ {
+		i.addEnum(enums.Get(n), name)
 	}
-	for n := 0; n < message.Messages().Len(); n++ {
-		i.addMessage(message.Messages().Get(n), name)
+	nested := message.Messages()
+	for n := 0; n < nested.Len(); n++ {
+		i.recordMessage(nested.Get(n), name)
+	}
+	for n := 0; n < nested.Len(); n++ {
+		i.walkNested(nested.Get(n))
 	}
 }
 

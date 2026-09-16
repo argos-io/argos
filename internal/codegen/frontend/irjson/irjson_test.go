@@ -44,7 +44,6 @@ func TestParseSingleFile(t *testing.T) {
 	}
 }
 
-
 func TestParseArrayFile(t *testing.T) {
 	path := filepath.Join("testdata", "files.ir.json")
 	files, err := irjson.Frontend{}.Parse(t.Context(), []string{path})
