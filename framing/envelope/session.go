@@ -226,11 +226,20 @@ func (s *session) closeSession() error {
 		}
 	}
 	if active != nil {
-		active.abortRecv(errors.New("envelope: session closed"))
+		// Not abortRecv: that enqueues, and the demux may itself be parked on
+		// an enqueue, which only detachCh can free.
+		active.detachForSessionClose(errors.New("envelope: session closed"))
 	}
 	// Unblock recvLoop Reads before joining; otherwise a stuck Read deadlocks Close.
 	err := s.conn.Close()
 	<-s.recvDone
+	if active != nil {
+		// The demux is gone, so nothing can refill the inbox: release what it
+		// had already buffered.
+		active.enqueueMu.Lock()
+		active.drainInbox()
+		active.enqueueMu.Unlock()
+	}
 	s.clearReadDeadline()
 	return err
 }
@@ -360,11 +369,13 @@ func (s *session) recvLoop() {
 				continue
 			}
 			if f.CallID != cur.callID {
-				if f.Type == TypeOpen {
+				if f.Type == TypeOpen && !s.client {
 					// The peer opened the next call without waiting for this
 					// call's STATUS. Sequential reuse makes that wait, not fail
 					// (§4.5), so hand the OPEN to the next AcceptCall instead of
 					// reporting a call-ID violation and aborting the carrier.
+					// Client sessions must not park here: no AcceptCall will
+					// publish the state change that releases the wait.
 					s.pushFront(f)
 					s.waitVer(ver)
 					continue
@@ -835,15 +846,24 @@ func (s *session) dropFrame(n int) {
 // failed read, so the discard resumes rather than restarting mid-body.
 func (s *session) runDiscard(bs transport.ByteStreamCarrier) error {
 	var scratch []byte
+	var drained int64
+	max := s.maxDrainBytes
 	for s.discardRest > 0 {
+		if max > 0 && drained >= max {
+			return fmt.Errorf("envelope: discard exceeded MaxDrainBytes (%d)", max)
+		}
 		s.takeReadBuf()
 		if len(s.frameBuf) > 0 {
 			n := int64(len(s.frameBuf))
 			if n > s.discardRest {
 				n = s.discardRest
 			}
+			if max > 0 && drained+n > max {
+				n = max - drained
+			}
 			s.dropFrame(int(n))
 			s.discardRest -= n
+			drained += n
 			continue
 		}
 		if scratch == nil {
@@ -853,8 +873,18 @@ func (s *session) runDiscard(bs transport.ByteStreamCarrier) error {
 		if int64(len(chunk)) > s.discardRest {
 			chunk = chunk[:s.discardRest]
 		}
+		if max > 0 {
+			remain := max - drained
+			if remain <= 0 {
+				return fmt.Errorf("envelope: discard exceeded MaxDrainBytes (%d)", max)
+			}
+			if int64(len(chunk)) > remain {
+				chunk = chunk[:remain]
+			}
+		}
 		n, err := bs.Read(chunk)
 		s.discardRest -= int64(n)
+		drained += int64(n)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				return fmt.Errorf("%w: discard", ErrTruncated)

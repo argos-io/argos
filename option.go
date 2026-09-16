@@ -3,10 +3,7 @@ package argos
 import (
 	"time"
 
-	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/framing"
-	"github.com/argos-io/argos/transport"
 )
 
 // ClientOption configures one Client. The apply method is unexported so the
@@ -103,30 +100,6 @@ func WithCodec(fn CodecFunc) ClientOption {
 	})
 }
 
-// WithTransportName overrides the transport registry name for this Client.
-func WithTransportName(name string) ClientOption {
-	return clientOption(func(c *Config) {
-		c.overrideTransportName = name
-		c.hasTransportNameOverride = true
-	})
-}
-
-// WithFramingName overrides the framing registry name for this Client.
-func WithFramingName(name string) ClientOption {
-	return clientOption(func(c *Config) {
-		c.overrideFramingName = name
-		c.hasFramingNameOverride = true
-	})
-}
-
-// WithCodecName overrides the codec registry name for this Client.
-func WithCodecName(name string) ClientOption {
-	return clientOption(func(c *Config) {
-		c.overrideCodecName = name
-		c.hasCodecNameOverride = true
-	})
-}
-
 type joinClientOption []ClientOption
 
 func (j joinClientOption) applyClient(c *Config) {
@@ -154,21 +127,6 @@ func WithOpenFilter(f filter.OpenFilter) ClientOption {
 	return clientOption(func(c *Config) {
 		c.OpenFilters = append(c.OpenFilters, f)
 	})
-}
-
-// WithTransportRegistry attaches a transport name registry for ServiceTransportName.
-func WithTransportRegistry(r *transport.Registry) Option {
-	return option(func(c *Config) { c.transportReg = r })
-}
-
-// WithFramingRegistry attaches a framing name registry for ServiceFramingName.
-func WithFramingRegistry(r *framing.Registry) Option {
-	return option(func(c *Config) { c.framingReg = r })
-}
-
-// WithCodecRegistry attaches a codec name registry for ServiceCodecName.
-func WithCodecRegistry(r *codec.Registry) Option {
-	return option(func(c *Config) { c.codecReg = r })
 }
 
 // WithService stores or merges per-service settings under fullName (IDL full

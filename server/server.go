@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"sync"
 	"sync/atomic"
 
@@ -23,12 +22,15 @@ type Server struct {
 	cfgErr error // option set New rejected; returned by Run
 	admit  *admitGate
 
-	mu             sync.Mutex
-	routes         map[string]map[string]routeEntry // service → method → entry
-	running        bool
+	mu      sync.Mutex
+	routes  map[string]map[string]routeEntry // service → method → entry
+	running bool
+	// ran latches when Serve is launched, not when Run is entered: a start that
+	// aborts before any listen surface is live leaves the Server as it was, so
+	// Run reports the real reason on the next call instead of claiming it
+	// already ran.
 	ran            bool
 	closed         bool
-	liveBindings   []*liveBinding
 	liveTransports []transport.Transport
 
 	// Per-connection cancels registered while onConn is active.
@@ -163,7 +165,6 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	routes := cloneRoutes(s.routes)
 	s.running = true
-	s.ran = true
 	runCtx, runCancel := context.WithCancelCause(ctx)
 	s.runCtx = runCtx
 	s.runCancel = runCancel
@@ -190,7 +191,7 @@ func (s *Server) Run(ctx context.Context) error {
 				MaxDrainBytes:          reg.cfg.MaxDrainBytes,
 			}); err != nil {
 				startErr = fmt.Errorf("server: listen %q: %w", reg.name, err)
-				closeComponents(tr, fr, cd)
+				_ = tr.Close()
 				break
 			}
 		}
@@ -222,18 +223,31 @@ func (s *Server) Run(ctx context.Context) error {
 		lives = append(lives, lb)
 	}
 	if startErr != nil {
-		for _, lb := range lives {
-			_ = lb.tr.Close()
-		}
+		closeLives(lives)
 		s.mu.Lock()
 		s.running = false
 		runCancel(startErr)
+		s.runCtx = nil
+		s.runCancel = nil
 		s.mu.Unlock()
 		return startErr
 	}
 
 	s.mu.Lock()
-	s.liveBindings = lives
+	if s.closed {
+		// Close landed while the surfaces were being assembled: it snapshotted
+		// an empty liveTransports and will not run again, so these bindings
+		// have nobody else to release them. Run still reports a clean stop,
+		// like a Close that arrives once Serve is live.
+		s.running = false
+		runCancel(ErrServerShutdown)
+		s.runCtx = nil
+		s.runCancel = nil
+		s.mu.Unlock()
+		closeLives(lives)
+		return nil
+	}
+	s.ran = true
 	s.liveTransports = make([]transport.Transport, len(lives))
 	for i, lb := range lives {
 		s.liveTransports[i] = lb.tr
@@ -407,7 +421,7 @@ func (s *Server) buildListenRegs() ([]listenReg, error) {
 		if !ok {
 			return nil, fmt.Errorf("server: service %q registered but missing from Config.Services (use argos.WithService)", svcName)
 		}
-		plans, err := sc.ServerListenPlans(s.cfg, s.cfg.ListenAddress)
+		plans, err := sc.ServerListenPlans(s.cfg.ListenAddress)
 		if err != nil {
 			return nil, fmt.Errorf("server: service %q: %w", svcName, err)
 		}
@@ -432,14 +446,11 @@ func (s *Server) buildListenRegs() ([]listenReg, error) {
 	return regs, nil
 }
 
-func closeComponents(tr transport.Transport, fr framing.Framing, cd codec.Codec) {
-	if c, ok := cd.(io.Closer); ok {
-		_ = c.Close()
-	}
-	if c, ok := fr.(io.Closer); ok {
-		_ = c.Close()
-	}
-	if tr != nil {
-		_ = tr.Close()
+// closeLives releases the bindings a start assembled before it gave up. Only
+// their Transport holds anything: Framing and Codec own no releasable resource
+// (README §4.1).
+func closeLives(lives []*liveBinding) {
+	for _, lb := range lives {
+		_ = lb.tr.Close()
 	}
 }

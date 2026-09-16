@@ -76,6 +76,11 @@ const (
 // Framing is the public extension point. Implement it and satisfy the needed
 // Conn/Carrier narrow interfaces to plug in a new protocol; the composition
 // layer adds no branches for concrete Framing types (§3.1-12).
+//
+// A Framing is a strategy and a session factory, never a resource owner: it
+// has no Close and nothing ever closes it, so it must not hold anything that
+// needs releasing. Resources belong to the Conn it is handed and to the
+// Session and Call it builds, which have their own Close (§4.1).
 type Framing interface {
 	// Reuse returns the reuse model. It must be constant: the same Framing
 	// instance always returns the same value. The composition layer reads it

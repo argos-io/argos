@@ -421,7 +421,10 @@ func (c *Conn) SendDatagram(p []byte) error {
 		return transport.WrapSendError(net.ErrClosed, false)
 	}
 	if len(p) > MaxDatagramSize {
-		return fmt.Errorf("udp: datagram is %d bytes; maximum is %d", len(p), MaxDatagramSize)
+		return transport.WrapSendError(
+			fmt.Errorf("udp: datagram is %d bytes; maximum is %d", len(p), MaxDatagramSize),
+			false,
+		)
 	}
 
 	var (

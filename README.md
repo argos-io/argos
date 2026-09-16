@@ -61,7 +61,7 @@
 
 要点：
 
-- **三轴可命名注册**——`transport.Registry` / `framing.Registry` / `codec.Registry` 挂在 `Config` 上（`WithTransportRegistry` 等）；`ServiceTransportName` 等与直接写工厂二选一。各 `transport/*`、`framing/*`、`codec/*` 提供 `Register(r)`，在 **main 或测试** 里显式注册，避免根包与实现之间的循环依赖。每个 Client / 监听面仍各 `Assemble()` 一次，得到互不共享的三元组。
+- **三轴即工厂**——`ServiceConfig` / `WithService` 上直接写 `ServiceTransport` / `ServiceFraming` / `ServiceCodec`（或 `JoinService` 组合）。每个 Client / 监听面各 `Assemble()` 一次，得到互不共享的三元组；无全局注册表、无按名字解析。
 - **Compressor 不是核心概念**——仅 gRPC 路径使用（`framing/grpc`）。
 - **复用不是第四轴**——`Framing.Reuse()` 声明承载力；借还由客户端会话池执行。
 
@@ -123,11 +123,13 @@ const (
 - **Framing**：握手、一条连接几个调用、边界与状态写在哪  
 - **Codec**：消息 ↔ 字节  
 
-`ServiceConfig` 上直接放三轴工厂或注册名（`ServiceTransport` / `ServiceTransportName` 等）；`Config.ResolveService` 把名字解析成工厂，再 `Assemble()`。工厂不得 Dial/Serve。
+`ServiceConfig` 上直接放三轴工厂（`ServiceTransport` / `ServiceFraming` / `ServiceCodec`），再 `Assemble()`。工厂不得 Dial/Serve。
 
-客户端与服务端共用 `Config.Services[name]`：三轴、客户端 `Target`、服务端 `ServiceListenAddress` 或 `ServiceListener`（同一服务多传输，listener 上再写三轴选项）。
+**只有 Transport 有生命周期**：资源属于连接——`Conn` / `Session` / `Call`，它们各自有明确的 `Close` 与归属。因此三轴里只有 `Transport` 在接口里声明 `Close`，argos 装配它也负责关它（装配中途失败则当场关）。`Framing` / `Codec` 是策略与纯函数对象，**不得持有需释放的资源**：要资源就放到它建出的 `Session` / `Call` 上。
 
-按名配置时在程序入口调用各实现的 `Register`（例如 `http2.Register(tr)`），把 registry 传给 `WithTransportRegistry` 等；或直接在 `WithService` 里写 `ServiceTransport` 等工厂。
+客户端与服务端共用 `Config.Services[name]`：三轴、客户端 `Target`、服务端 `ServiceListenAddress` 或 `ServiceListener`（同一服务多传输时，每个 listener 上再写三轴选项）。
+
+服务端除三轴外还要把 **业务实现** 挂到 `server.Server`：生成桩提供 `RegisterXxxService(srv, impl)`（内部调 `server.Register` 做 Service→Method 路由）；与 transport/framing/codec 无关。见 `example/echo/echo.argos.go` 的 `RegisterEchoService`。
 
 ### 4.2 客户端 / 服务端装配
 
@@ -141,6 +143,8 @@ Open(ctx, Method)
       → OpenCall → stream.Wrap
 调用结束 → Call.Close → 池按 Reusable() / 引用计数归还或关闭
 
+客户端 `MaxBufferedBytes` 按 `perCall = MaxBufferedBytes / MaxConcurrentCalls` 为每次 Open 预留配额，并放入调用 ctx 的 `budget.Budget`。**当前只有 `framing/envelope` 在读写路径上 TryAcquire**；wholebody / grpc 等仍只做并发槽位准入，尚未从 ctx 扣减字节。
+
 server: Transport.Serve → Conn → NewServerSession
   → loop AcceptCall → 准入 → 两级路由 → Accept → Filter → handler
   → Finish → Close；EOF 退出后 Session.Close
@@ -151,30 +155,29 @@ server: Transport.Serve → Conn → NewServerSession
 ### 4.3 最小用法
 
 ```go
-tr := transport.NewRegistry()
-_ = transporthttp2.Register(tr)
-fr := framing.NewRegistry()
-_ = framinggrpc.Register(fr)
-co := codec.NewRegistry()
-_ = codecprotobuf.Register(co)
+tr, fr, cd := /* 例如 echov1.GRPCAxes()：http2 + grpc framing + protobuf */
 
-// 服务端：三轴与监听写在 WithService；代码只 Register impl
 srv := server.New(
-    argos.WithTransportRegistry(tr),
-    argos.WithFramingRegistry(fr),
-    argos.WithCodecRegistry(co),
     argos.WithService("echo.v1.EchoService",
-        argos.ServiceTransportName(transport.NameHTTP2),
-        argos.ServiceFramingName(framing.NameGRPC),
-        argos.ServiceCodecName(codec.NameProtobuf),
+        argos.ServiceTransport(tr),
+        argos.ServiceFraming(fr),
+        argos.ServiceCodec(cd),
         argos.ServiceListenAddress(":7001"),
     ),
 )
-// RegisterEchoService(srv, impl) 由生成桩提供
+// 生成桩：把 EchoServiceServer 实现挂到路由表（不是注册 transport）
+if err := echov1.RegisterEchoService(srv, impl); err != nil { ... }
 go srv.Run(ctx)
 
-// 客户端：生成桩内置了 service name，自己持有 Client
-ec, err := echov1.NewEchoServiceClient(argos.WithTarget("ip://127.0.0.1:7001"))
+// 客户端：生成桩内置 service name；三轴通常已在 WithService 或 JoinClient 里写好
+ec, err := echov1.NewEchoServiceClient(
+    argos.JoinClient(
+        argos.WithTransport(tr),
+        argos.WithFraming(fr),
+        argos.WithCodec(cd),
+    ),
+    argos.WithTarget("ip://127.0.0.1:7001"),
+)
 if err != nil { ... }
 defer ec.Close()
 resp, err := ec.Echo(ctx, &echov1.EchoRequest{Msg: "hi"})
@@ -184,22 +187,19 @@ resp, err := ec.Echo(ctx, &echov1.EchoRequest{Msg: "hi"})
 
 ```go
 cli, err := client.New(
-    argos.WithTransportRegistry(tr),
-    argos.WithFramingRegistry(fr),
-    argos.WithCodecRegistry(co),
     argos.WithServiceName("echo.v1.EchoService"),
-    argos.WithTransportName(transport.NameHTTP2),
-    argos.WithFramingName(framing.NameGRPC),
-    argos.WithCodecName(codec.NameProtobuf),
+    argos.WithTransport(tr),
+    argos.WithFraming(fr),
+    argos.WithCodec(cd),
     argos.WithTarget("ip://127.0.0.1:7001"),
 )
 defer cli.Close()
 st, err := cli.Open(ctx, echov1.EchoService_Echo)
 ```
 
-多传输示例见 `example/echo`（grpc / envelope×tcp|ws|udp / wholebody×http1）。收门资产：`example/resp`、`example/synth`。
+多传输示例见 `example/echo`（`axes.go` 里各组合 + `ServiceListener`）。收门资产：`example/resp`、`example/synth`。
 
-自定义组合：在 `WithService` 里分别 `ServiceTransport` / `ServiceFraming` / `ServiceCodec`（或三个 `*Name`），不必改 `client`/`server`。
+自定义组合：在 `WithService` 里分别 `ServiceTransport` / `ServiceFraming` / `ServiceCodec`，不必改 `client`/`server`。
 
 ### 4.4 调用收尾（用法约定）
 

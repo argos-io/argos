@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 
@@ -9,6 +10,11 @@ import (
 )
 
 const lpmHeaderSize = 5
+
+// errInvalidLPMFlag is returned when the compressed flag byte is not 0 or 1.
+// The client may treat this as a non-gRPC HTTP body and resolve status via
+// trailers / HTTP fallback; transport errors must not take that path.
+var errInvalidLPMFlag = errors.New("framing/grpc: invalid LPM compressed flag")
 
 // ErrLPMUnsynced reports that an oversize message left the stream misaligned,
 // so no further message can be read from it. The receive direction is finished;
@@ -65,7 +71,7 @@ func ReadLPMLimited(r io.Reader, maxLen int64) (compressed bool, payload []byte,
 	}
 	compressed = hdr[0] != 0
 	if hdr[0] > 1 {
-		return false, nil, fmt.Errorf("framing/grpc: invalid LPM compressed flag %d", hdr[0])
+		return false, nil, fmt.Errorf("%w %d", errInvalidLPMFlag, hdr[0])
 	}
 	n := binary.BigEndian.Uint32(hdr[1:])
 	if maxLen > 0 && int64(n) > maxLen {

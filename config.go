@@ -5,10 +5,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/framing"
-	"github.com/argos-io/argos/transport"
 )
 
 const (
@@ -86,11 +83,6 @@ type Config struct {
 	// server.Run starts listeners declared for each registered service.
 	Services map[string]ServiceConfig
 
-	// Axis registries for name resolution (set via WithTransportRegistry, …).
-	transportReg *transport.Registry
-	framingReg   *framing.Registry
-	codecReg     *codec.Registry
-
 	// CallErrorObserver receives per-call local transport errors (§7.5).
 	CallErrorObserver func(CallInfo, error)
 	// ConnErrorObserver receives connection-level errors that belong to no
@@ -101,20 +93,14 @@ type Config struct {
 	// serviceName, targetOverride and axis overrides hold call-site choices for
 	// one Client. They are not exported: a shared Config has no single service
 	// name, and Clone must not inherit another Client's selection.
-	serviceName              string
-	targetOverride           string
-	overrideTransport        TransportFunc
-	overrideFraming          FramingFunc
-	overrideCodec            CodecFunc
-	overrideTransportName    string
-	overrideFramingName      string
-	overrideCodecName        string
-	hasTransportOverride     bool
-	hasFramingOverride       bool
-	hasCodecOverride         bool
-	hasTransportNameOverride bool
-	hasFramingNameOverride   bool
-	hasCodecNameOverride     bool
+	serviceName          string
+	targetOverride       string
+	overrideTransport    TransportFunc
+	overrideFraming      FramingFunc
+	overrideCodec        CodecFunc
+	hasTransportOverride bool
+	hasFramingOverride   bool
+	hasCodecOverride     bool
 }
 
 // defaultConfig is the process-wide default. It is mutable on purpose: a
@@ -183,15 +169,9 @@ func (c *Config) Clone() *Config {
 	out.overrideTransport = nil
 	out.overrideFraming = nil
 	out.overrideCodec = nil
-	out.overrideTransportName = ""
-	out.overrideFramingName = ""
-	out.overrideCodecName = ""
 	out.hasTransportOverride = false
 	out.hasFramingOverride = false
 	out.hasCodecOverride = false
-	out.hasTransportNameOverride = false
-	out.hasFramingNameOverride = false
-	out.hasCodecNameOverride = false
 	if c.Filters != nil {
 		out.Filters = append([]filter.Filter(nil), c.Filters...)
 	}
@@ -204,9 +184,6 @@ func (c *Config) Clone() *Config {
 			out.Services[k] = cloneServiceConfig(v)
 		}
 	}
-	out.transportReg = c.transportReg.Clone()
-	out.framingReg = c.framingReg.Clone()
-	out.codecReg = c.codecReg.Clone()
 	return &out
 }
 
@@ -283,15 +260,6 @@ func (c *Config) SelectedService() (string, ServiceConfig) {
 	}
 	if c.hasCodecOverride {
 		sel.Codec = c.overrideCodec
-	}
-	if c.hasTransportNameOverride {
-		sel.TransportName = c.overrideTransportName
-	}
-	if c.hasFramingNameOverride {
-		sel.FramingName = c.overrideFramingName
-	}
-	if c.hasCodecNameOverride {
-		sel.CodecName = c.overrideCodecName
 	}
 	if c.targetOverride != "" {
 		sel.Target = c.targetOverride

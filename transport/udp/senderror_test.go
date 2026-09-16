@@ -38,6 +38,26 @@ func TestSendDatagramFailureReportsReceiveClosed(t *testing.T) {
 }
 
 // The same holds for the closed-association fast path.
+func TestOversizeSendDatagramReportsReceiveClosed(t *testing.T) {
+	uc, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9})
+	if err != nil {
+		t.Fatalf("DialUDP: %v", err)
+	}
+	c := newClientConn(uc)
+
+	sendErr := c.SendDatagram(make([]byte, MaxDatagramSize+1))
+	if sendErr == nil {
+		t.Fatal("SendDatagram succeeded on oversize payload")
+	}
+	var se transport.SendError
+	if !errors.As(sendErr, &se) {
+		t.Fatalf("SendDatagram error %v (%T) is not a transport.SendError", sendErr, sendErr)
+	}
+	if se.ReceiveOpen() {
+		t.Fatal("ReceiveOpen() = true; oversize datagram never left")
+	}
+}
+
 func TestSendDatagramOnClosedConnReportsReceiveClosed(t *testing.T) {
 	uc, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9})
 	if err != nil {

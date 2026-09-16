@@ -2,6 +2,7 @@ package wholebody
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -90,7 +91,9 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 	car, err := s.conn.OpenStream(ctx, preface)
 	if err != nil {
 		s.endFlight()
-		s.markBad()
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			s.markBad()
+		}
 		return nil, err
 	}
 	bs, ok := car.(transport.ByteStreamCarrier)
@@ -178,30 +181,34 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 		return nil, fmt.Errorf("framing/wholebody: server Carrier missing UnaryResponseWriter")
 	}
 
+	inMD := DecodeMetadata(rh.RequestHeaders())
+
+	newServerCall := func(method string) *serverCall {
+		return &serverCall{call: &call{
+			server:    s,
+			carrier:   s.carrier,
+			body:      bs,
+			method:    method,
+			md:        spec.Metadata,
+			cfg:       s.cfg,
+			maxMsg:    s.cfg.MaxMessageSize,
+			codec:     s.codec,
+			initiator: false,
+		}}
+	}
+
 	svc, meth, err := ParseMethodPath(rh.RequestTarget())
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", framing.ErrCallRejected,
+		return newServerCall(""), fmt.Errorf("%w: %w", framing.ErrCallRejected,
 			status.Error(status.InvalidArgument, err.Error()))
 	}
 	fullName := svc + "." + meth
-	inMD := DecodeMetadata(rh.RequestHeaders())
 	if err := checkInboundMeta(s.cfg, inMD); err != nil {
-		return nil, fmt.Errorf("%w: %w", framing.ErrCallRejected, err)
+		return newServerCall(fullName), fmt.Errorf("%w: %w", framing.ErrCallRejected, err)
 	}
 	if spec.Metadata != nil {
 		_ = metadata.SetIncomingHeaders(spec.Metadata, inMD)
 	}
 
-	c := &call{
-		server:    s,
-		carrier:   s.carrier,
-		body:      bs,
-		method:    fullName,
-		md:        spec.Metadata,
-		cfg:       s.cfg,
-		maxMsg:    s.cfg.MaxMessageSize,
-		codec:     s.codec,
-		initiator: false,
-	}
-	return &serverCall{call: c}, nil
+	return newServerCall(fullName), nil
 }

@@ -65,12 +65,7 @@ func statusFromHeaders(hs transport.Headers) (code status.Code, msg string, deta
 		// Illegal status text → Unknown; keep decoded message if present.
 		return status.Unknown, DecodeGrpcMessage(messageVal), details, true
 	}
-	code = status.Code(n)
-	if code > status.Unauthenticated {
-		// Out-of-range codes map to Unknown; original value is diagnostic only.
-		return status.Unknown, DecodeGrpcMessage(messageVal), details, true
-	}
-	return code, DecodeGrpcMessage(messageVal), details, true
+	return status.Code(n), DecodeGrpcMessage(messageVal), details, true
 }
 
 // resolveCallStatus picks grpc-status from trailers, then response headers

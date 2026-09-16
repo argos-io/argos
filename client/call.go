@@ -32,11 +32,24 @@ type CallStream struct {
 	headersCh   chan struct{}
 	headersOnce sync.Once
 
+	closedCh chan struct{}
+
 	closeOnce sync.Once
+	closed    atomic.Bool
 	closeErr  error
+
+	// afterCallGate serializes framing.Call.Close. It is heap-allocated and
+	// referenced from the AfterFunc closure instead of the CallStream, so a
+	// dropped stream can still be collected while the timer runs.
+	afterCallGate *afterCallGate
 
 	leak    *leakState
 	cleanup runtime.Cleanup
+}
+
+type afterCallGate struct {
+	mu   sync.Mutex
+	call framing.Call
 }
 
 // leakState is what the cleanup hook sees. It must not reference the
@@ -79,7 +92,14 @@ func (s *CallStream) Recv(v any) error {
 		return err
 	}
 	err := s.stream.Recv(v)
-	s.markHeadersReady()
+	if err == nil || errors.Is(err, io.EOF) {
+		s.markHeadersReady()
+	} else {
+		var se *status.StatusError
+		if errors.As(err, &se) {
+			s.markHeadersReady()
+		}
+	}
 	return s.interrupted(err)
 }
 
@@ -113,16 +133,30 @@ func (s *CallStream) interrupted(err error) error {
 // Header waits until response initial metadata is available (or implied by
 // first DATA/STATUS via Recv), or the call ctx is done.
 func (s *CallStream) Header() (metadata.Metadata, error) {
+	if s.closed.Load() {
+		return nil, ErrCallClosed
+	}
 	select {
 	case <-s.headersCh:
+		if s.closed.Load() {
+			return nil, ErrCallClosed
+		}
 		return s.md.IncomingHeaders(), nil
+	case <-s.closedCh:
+		return nil, ErrCallClosed
 	case <-s.callCtx.Done():
+		if s.closed.Load() {
+			return nil, ErrCallClosed
+		}
 		return nil, s.callCtx.Err()
 	}
 }
 
-// Trailer returns the current incoming trailers snapshot.
+// Trailer returns the current incoming trailers snapshot. After Close it is nil.
 func (s *CallStream) Trailer() metadata.Metadata {
+	if s.closed.Load() {
+		return nil
+	}
 	return s.md.IncomingTrailers()
 }
 
@@ -130,15 +164,13 @@ func (s *CallStream) Trailer() metadata.Metadata {
 // returns the admission reservation. Idempotent.
 func (s *CallStream) Close() error {
 	s.closeOnce.Do(func() {
-		s.markHeadersReady()
+		s.closed.Store(true)
+		close(s.closedCh)
 		if s.leak != nil {
 			s.leak.closed.Store(true)
 		}
 		s.cleanup.Stop()
 
-		if s.stopWatch != nil {
-			s.stopWatch()
-		}
 		if s.stopBridge != nil {
 			s.stopBridge()
 		}
@@ -146,6 +178,14 @@ func (s *CallStream) Close() error {
 			s.callCancel()
 		}
 
+		gate := s.afterCallGate
+		if gate != nil {
+			gate.mu.Lock()
+			defer gate.mu.Unlock()
+		}
+		if s.stopWatch != nil {
+			s.stopWatch()
+		}
 		err := s.call.Close()
 		if s.client != nil && s.client.pool != nil && s.sess != nil {
 			s.client.pool.Release(s.sess)

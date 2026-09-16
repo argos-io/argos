@@ -275,11 +275,15 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.Cl
 						panic(v)
 					}
 				}()
-				sess, err = p.dialNew(endpoint)
+				sess, err = p.dialNew(ctx, endpoint)
 			}()
 			p.mu.Lock()
 			if err != nil {
+				poolClosed := p.closed
 				retireFlight()
+				if poolClosed {
+					err = fmt.Errorf("sessionpool: pool closed")
+				}
 				fl.err = err
 				close(fl.done)
 				p.mu.Unlock()
@@ -312,12 +316,28 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.Cl
 		b.pendingDial++
 		p.mu.Unlock()
 
-		sess, err := p.dialNew(endpoint)
+		var sess framing.ClientSession
+		var err error
+		func() {
+			defer func() {
+				if v := recover(); v != nil {
+					p.mu.Lock()
+					p.bucketLocked(endpoint).pendingDial--
+					p.mu.Unlock()
+					panic(v)
+				}
+			}()
+			sess, err = p.dialNew(ctx, endpoint)
+		}()
 		p.mu.Lock()
 		b = p.bucketLocked(endpoint)
 		b.pendingDial--
 		if err != nil {
+			poolClosed := p.closed
 			p.mu.Unlock()
+			if poolClosed {
+				err = fmt.Errorf("sessionpool: pool closed")
+			}
 			return nil, err
 		}
 		if p.closed {
@@ -382,9 +402,19 @@ func (p *Pool) Close() error {
 	return nil
 }
 
-func (p *Pool) dialNew(endpoint string) (framing.ClientSession, error) {
-	hsCtx, cancel := context.WithTimeout(context.Background(), p.cfg.HandshakeTimeout)
+func (p *Pool) dialNew(ctx context.Context, endpoint string) (framing.ClientSession, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	hsCtx, cancel := context.WithTimeout(ctx, p.cfg.HandshakeTimeout)
 	defer cancel()
+	go func() {
+		select {
+		case <-p.stopCh:
+			cancel()
+		case <-hsCtx.Done():
+		}
+	}()
 
 	conn, err := p.dial(hsCtx, endpoint)
 	if err != nil {

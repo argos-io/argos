@@ -115,6 +115,12 @@ func (t *testTransport) Shutdown(ctx context.Context) error {
 	}
 }
 
+func (t *testTransport) isClosed() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.closed
+}
+
 func (t *testTransport) Close() error {
 	t.mu.Lock()
 	if t.closed {

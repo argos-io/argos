@@ -603,6 +603,72 @@ func TestStatusErrorThenEOF(t *testing.T) {
 	wg.Wait()
 }
 
+func TestCleanTerminalRecvRepeatsEOF(t *testing.T) {
+	t.Parallel()
+	cliConn, srvConn := fake.BytePipe()
+	defer cliConn.Close()
+	defer srvConn.Close()
+
+	fr := envelope.New()
+	cliSess, err := fr.NewClientSession(context.Background(), cliConn, framing.SessionSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cliSess.Close()
+	srvSess, err := fr.NewServerSession(context.Background(), srvConn, framing.SessionSpec{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srvSess.Close()
+
+	method := descriptor.MustMethod("test.v1.Echo", descriptor.Unary)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		md := metadata.New(metadata.RoleResponder, nil)
+		sc, err := srvSess.AcceptCall(context.Background(), framing.CallSpec{Metadata: md})
+		if err != nil {
+			t.Errorf("AcceptCall: %v", err)
+			return
+		}
+		defer sc.Close()
+		payload, release, err := sc.Recv()
+		if err != nil {
+			t.Errorf("Recv: %v", err)
+			return
+		}
+		release()
+		if err := sc.Send(payload); err != nil {
+			t.Errorf("Send: %v", err)
+			return
+		}
+		_ = sc.Finish(nil)
+	}()
+
+	call, err := cliSess.OpenCall(context.Background(), method, framing.CallSpec{
+		Metadata: metadata.New(metadata.RoleInitiator, nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer call.Close()
+	if err := call.Send([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	_ = call.HalfClose()
+	_, release, err := call.Recv()
+	if err != nil {
+		t.Fatalf("first Recv: %v", err)
+	}
+	release()
+	_, _, err = call.Recv()
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("second Recv = %v, want EOF", err)
+	}
+	wg.Wait()
+}
+
 // TestIdleWatchdogPeerFINNotReusable verifies §2.6 Sequential idle watchdog:
 // after a clean unary, peer FIN makes Reusable() false without another OpenCall.
 func TestIdleWatchdogPeerFINNotReusable(t *testing.T) {

@@ -11,6 +11,9 @@ import (
 // ErrClosed is returned by Open after Client.Close.
 var ErrClosed = errors.New("client: closed")
 
+// ErrCallClosed is returned by CallStream operations after CallStream.Close.
+var ErrCallClosed = errors.New("client: call closed")
+
 // mappedStatus wraps a status error and an underlying cause so both
 // status.CodeOf / errors.As(*StatusError) and errors.As(cause) work.
 type mappedStatus struct {

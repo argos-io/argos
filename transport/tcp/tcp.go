@@ -280,6 +280,13 @@ func (c *Conn) Addr() net.Addr { return c.nc.LocalAddr() }
 // Read implements io.Reader.
 func (c *Conn) Read(p []byte) (int, error) { return c.nc.Read(p) }
 
+// SetReadDeadline forwards to the underlying net.Conn so framings that arm
+// OpenTimeout (envelope) can bound half-open reads on tcp carriers.
+func (c *Conn) SetReadDeadline(t time.Time) error { return c.nc.SetReadDeadline(t) }
+
+// SetDeadline forwards to the underlying net.Conn.
+func (c *Conn) SetDeadline(t time.Time) error { return c.nc.SetDeadline(t) }
+
 // Write implements io.Writer. A write error is a send-direction failure only:
 // it does not imply the peer stopped sending, because the response may already
 // be in flight or in the receive buffer. ReceiveOpen is therefore true unless

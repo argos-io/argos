@@ -85,6 +85,9 @@ func (c *streamConn) OpenStream(ctx context.Context, p transport.RequestPreface)
 		resp, err := c.client.Do(req)
 		if err != nil {
 			_ = pr.CloseWithError(err)
+			if resp != nil && resp.Body != nil {
+				_ = resp.Body.Close()
+			}
 		}
 		if !car.finish(resp, err) && resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
@@ -182,11 +185,9 @@ func (c *clientCarrier) finish(resp *http.Response, err error) bool {
 		c.resp, c.respErr = resp, err
 		c.mu.Unlock()
 		close(c.ready)
-		if err != nil && resp == nil {
-			// No response will arrive: the exchange is over. Without this the
-			// carrier stayed in the in-flight map until the whole StreamConn
-			// closed, for any caller that returns on the error instead of
-			// reaching ResponseTrailers or Abort.
+		if err != nil {
+			// The exchange is over for the caller. Without this the carrier
+			// stayed in the in-flight map until the whole StreamConn closed.
 			c.untrackSelf()
 		}
 	})

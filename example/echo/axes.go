@@ -17,7 +17,7 @@ import (
 	"github.com/argos-io/argos/transport/ws"
 )
 
-func grpcAxes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
+func GRPCAxes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
 	return argos.TransportFunc(func() (transport.Transport, error) {
 			return argoshttp2.New(), nil
 		}),
@@ -25,13 +25,13 @@ func grpcAxes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
 		argos.CodecFunc(func() (codec.Codec, error) { return protobuf.New(), nil })
 }
 
-func envelopeTCPAxes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
+func EnvelopeTCPAxes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
 	return argos.TransportFunc(func() (transport.Transport, error) { return tcp.New(), nil }),
 		argos.FramingFunc(func() (framing.Framing, error) { return envframing.New(), nil }),
 		argos.CodecFunc(func() (codec.Codec, error) { return protobuf.New(), nil })
 }
 
-func envelopeWSAxes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
+func EnvelopeWSAxes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
 	read := ws.DefaultMaxReadBytes
 	return argos.TransportFunc(func() (transport.Transport, error) {
 			return ws.New(ws.WithMaxReadBytes(0)), nil
@@ -42,7 +42,7 @@ func envelopeWSAxes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) 
 		argos.CodecFunc(func() (codec.Codec, error) { return protobuf.New(), nil })
 }
 
-func envelopeUDPAxes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
+func EnvelopeUDPAxes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
 	return argos.TransportFunc(func() (transport.Transport, error) { return udp.New(), nil }),
 		argos.FramingFunc(func() (framing.Framing, error) {
 			return envframing.New(envframing.WithOneCallPerConn()), nil
@@ -50,8 +50,16 @@ func envelopeUDPAxes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc)
 		argos.CodecFunc(func() (codec.Codec, error) { return protobuf.New(), nil })
 }
 
-func wholebodyHTTP1Axes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
+func WholebodyHTTP1Axes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
 	return argos.TransportFunc(func() (transport.Transport, error) { return argoshttp1.New(), nil }),
 		argos.FramingFunc(func() (framing.Framing, error) { return wholebody.New(), nil }),
 		argos.CodecFunc(func() (codec.Codec, error) { return jsoncodec.New(), nil })
+}
+
+func ServiceAxes(tr argos.TransportFunc, fr argos.FramingFunc, cd argos.CodecFunc) []argos.ServiceOption {
+	return []argos.ServiceOption{
+		argos.ServiceTransport(tr),
+		argos.ServiceFraming(fr),
+		argos.ServiceCodec(cd),
+	}
 }

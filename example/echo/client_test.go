@@ -18,18 +18,18 @@ func TestClientEchoTransports(t *testing.T) {
 		axes func() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc)
 		tune func(*argos.Config)
 	}{
-		{name: "grpc_http2", axes: grpcAxes},
-		{name: "envelope_tcp", axes: envelopeTCPAxes},
-		{name: "envelope_ws", axes: envelopeWSAxes},
+		{name: "grpc_http2", axes: GRPCAxes},
+		{name: "envelope_tcp", axes: EnvelopeTCPAxes},
+		{name: "envelope_ws", axes: EnvelopeWSAxes},
 		{
 			name: "envelope_udp",
-			axes: envelopeUDPAxes,
+			axes: EnvelopeUDPAxes,
 			tune: func(cfg *argos.Config) {
 				cfg.MaxFrameSize = udp.MaxDatagramSize
 				cfg.MaxMessageSize = 32 << 10
 			},
 		},
-		{name: "wholebody_http1", axes: wholebodyHTTP1Axes},
+		{name: "wholebody_http1", axes: WholebodyHTTP1Axes},
 	}
 
 	for _, tc := range cases {
@@ -54,9 +54,9 @@ func TestWatchStreaming(t *testing.T) {
 		name string
 		axes func() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc)
 	}{
-		{name: "grpc_http2", axes: grpcAxes},
-		{name: "envelope_tcp", axes: envelopeTCPAxes},
-		{name: "envelope_ws", axes: envelopeWSAxes},
+		{name: "grpc_http2", axes: GRPCAxes},
+		{name: "envelope_tcp", axes: EnvelopeTCPAxes},
+		{name: "envelope_ws", axes: EnvelopeWSAxes},
 	}
 
 	for _, tc := range cases {
@@ -93,8 +93,8 @@ func TestClientMetadataPassesAuthFilter(t *testing.T) {
 		name string
 		axes func() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc)
 	}{
-		{name: "grpc_http2", axes: grpcAxes},
-		{name: "envelope_tcp", axes: envelopeTCPAxes},
+		{name: "grpc_http2", axes: GRPCAxes},
+		{name: "envelope_tcp", axes: EnvelopeTCPAxes},
 	}
 
 	for _, tc := range cases {
@@ -118,7 +118,7 @@ func TestClientMetadataPassesAuthFilter(t *testing.T) {
 }
 
 func TestServerAuthRejectsMissingToken(t *testing.T) {
-	tr, fr, cd := grpcAxes()
+	tr, fr, cd := GRPCAxes()
 	ec := startEcho(t, tr, fr, cd, func(cfg *argos.Config) {
 		cfg.Filters = append(cfg.Filters, ServerAuth)
 	})

@@ -167,6 +167,60 @@ func TestUnaryEchoHTTP1(t *testing.T) {
 	}
 }
 
+// AcceptCall must return a finishable ServerCall alongside ErrCallRejected so
+// the composition layer can write the HTTP error (server.handleRejected).
+func TestAcceptCallRejectReturnsFinishableCall(t *testing.T) {
+	fr := wholebody.New()
+	spec := framing.SessionSpec{CodecName: "json", Config: testCfg()}
+
+	addr := startHTTP1(t, func(ctx context.Context, c transport.Conn) {
+		sess, err := fr.NewServerSession(ctx, c, spec)
+		if err != nil {
+			t.Errorf("NewServerSession: %v", err)
+			return
+		}
+		defer func() { _ = sess.Close() }()
+
+		md := metadata.New(metadata.RoleResponder, nil)
+		call, err := sess.AcceptCall(ctx, framing.CallSpec{Metadata: md})
+		if !errors.Is(err, framing.ErrCallRejected) {
+			t.Errorf("AcceptCall err = %v, want ErrCallRejected", err)
+			return
+		}
+		if call == nil {
+			t.Fatal("AcceptCall returned nil call on reject")
+		}
+		defer func() { _ = call.Close() }()
+
+		finishErr := status.Error(status.InvalidArgument, err.Error())
+		var se *status.StatusError
+		if errors.As(err, &se) {
+			finishErr = se
+		}
+		if err := call.Finish(finishErr); err != nil {
+			t.Errorf("Finish: %v", err)
+		}
+	})
+
+	sc := dialStream(t, addr)
+	car, err := sc.OpenStream(context.Background(), transport.RequestPreface{RequestTarget: "/not-valid"})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	defer func() { _ = car.Abort() }()
+	if err := car.(transport.SendCloser).CloseSend(); err != nil {
+		t.Fatalf("CloseSend: %v", err)
+	}
+	rh := car.(transport.ResponseHeaderReader)
+	httpSt, err := rh.ResponseStatus()
+	if err != nil {
+		t.Fatalf("ResponseStatus: %v", err)
+	}
+	if httpSt != httpstatus.ToHTTP(status.InvalidArgument) {
+		t.Fatalf("HTTP status = %d, want InvalidArgument mapping", httpSt)
+	}
+}
+
 // Test 2: non-unary Accept returns Unimplemented; handler not called.
 func TestAcceptRejectsNonUnary(t *testing.T) {
 	unary := descriptor.MustMethod("echo.v1.EchoService.Echo", descriptor.Unary)

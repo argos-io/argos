@@ -65,6 +65,8 @@ type call struct {
 	statusReturned bool
 	recvDone       bool // demux finished (STATUS or fatal)
 	detachCh       chan struct{}
+	detached       atomic.Bool // detachCh closed; Call.Close and Session.Close both do it
+	detachErr      error       // what a parked Recv reports when the session detached us
 
 	// sendErr is the failure that ended the send direction. A partial write
 	// cannot be rolled back, so no further frame may be written after it: Send
@@ -75,6 +77,11 @@ type call struct {
 
 	sending atomic.Bool
 	recving atomic.Bool
+
+	enqueueMu sync.Mutex // with Close/session drain; see enqueueData
+
+	headersOnce sync.Once
+	headersErr  error
 
 	// Datagram unary staging (DatagramCarrier only).
 	pendingData    []byte
@@ -176,6 +183,16 @@ func (c *call) enqueueData(payload []byte) {
 	}
 
 	ev := recvEvent{payload: payload, release: rel, data: true}
+	c.enqueueMu.Lock()
+	defer c.enqueueMu.Unlock()
+	if c.detached.Load() {
+		if rel != nil {
+			rel()
+			c.noteRelease(int64(cap(payload)))
+		}
+		c.releaseDataSlot()
+		return
+	}
 	select {
 	case c.inbox <- ev:
 	case <-c.detachCh:
@@ -328,23 +345,38 @@ func (c *call) SendHeaders() error {
 		return ErrSendFinished
 	}
 	c.mu.Unlock()
+	return c.writeResponseHeadersOnce()
+}
 
-	var hdrs []Header
-	if c.md != nil {
-		hdrs = mdToHeaders(c.md.OutgoingHeaders())
-	}
-	if err := c.sess.writeFrame(Frame{
-		Type:    TypeHeaders,
-		CallID:  c.callID,
-		Headers: hdrs,
-	}); err != nil {
-		return c.sendFailed(err)
+func (c *call) writeResponseHeadersOnce() error {
+	c.headersOnce.Do(func() {
+		var hdrs []Header
+		if c.md != nil {
+			hdrs = mdToHeaders(c.md.OutgoingHeaders())
+		}
+		if err := c.sess.writeFrame(Frame{
+			Type:    TypeHeaders,
+			CallID:  c.callID,
+			Headers: hdrs,
+		}); err != nil {
+			c.headersErr = err
+			return
+		}
+		c.mu.Lock()
+		c.headersSent = true
+		c.mu.Unlock()
+		if c.md != nil {
+			_ = metadata.FreezeOutgoingHeaders(c.md)
+		}
+	})
+	if c.headersErr != nil {
+		return c.sendFailed(c.headersErr)
 	}
 	c.mu.Lock()
-	c.headersSent = true
+	sent := c.headersSent
 	c.mu.Unlock()
-	if c.md != nil {
-		_ = metadata.FreezeOutgoingHeaders(c.md)
+	if !sent {
+		return metadata.ErrHeadersAlreadySent
 	}
 	return nil
 }
@@ -697,6 +729,10 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 			c.mu.Unlock()
 			return nil, nil, io.EOF
 		}
+		if c.terminalRead {
+			c.mu.Unlock()
+			return nil, nil, io.EOF
+		}
 		c.mu.Unlock()
 
 		var ev recvEvent
@@ -711,7 +747,7 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 			}
 		case <-c.detachCh:
 			// Close closes detachCh; Finish only detaches demux and leaves it open.
-			return nil, nil, ErrCallClosed
+			return nil, nil, c.detachReason()
 		}
 
 		if ev.headers {
@@ -734,6 +770,7 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 					c.mu.Unlock()
 					return nil, nil, stErr
 				}
+				c.statusReturned = true
 				c.terminalRead = true
 				c.mu.Unlock()
 				return nil, nil, io.EOF
@@ -746,6 +783,7 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 					continue
 				}
 				c.mu.Lock()
+				c.statusReturned = true
 				c.terminalRead = true
 				c.mu.Unlock()
 				return nil, nil, io.EOF
@@ -779,22 +817,51 @@ func (c *call) Close() error {
 		// Responder Close after Finish is fine; residual peer frames drained on next Accept.
 		terminalOK = true
 	}
+	// Wake blocked DATA enqueue / Recv before draining.
+	c.detachLocked()
 	c.mu.Unlock()
 
-	// Wake blocked DATA enqueue / Recv before draining.
-	select {
-	case <-c.detachCh:
-	default:
-		close(c.detachCh)
-	}
-
+	c.enqueueMu.Lock()
 	c.drainInbox()
+	c.enqueueMu.Unlock()
 
 	poison := c.initiator && !terminalOK
 	c.sess.detachCall(c, poison)
 	c.sess.wakeRead()
-	c.sess.clearReadDeadline()
 	return nil
+}
+
+// detachLocked closes detachCh exactly once. It is the single escape hatch for
+// every park that can outlive the call: both enqueue paths, abortRecv, and a
+// blocked Recv.
+func (c *call) detachLocked() {
+	if !c.detached.Swap(true) {
+		close(c.detachCh)
+	}
+}
+
+// detachForSessionClose is Session.Close's half of the teardown. The demux
+// parks on channel sends, which closing the Conn cannot influence, so the
+// session has to free them here or its recvLoop join never completes. err is
+// what a Recv parked on this call reports, keeping the reason abortRecv used
+// to enqueue.
+func (c *call) detachForSessionClose(err error) {
+	c.mu.Lock()
+	c.recvDone = true
+	if c.detachErr == nil {
+		c.detachErr = err
+	}
+	c.detachLocked()
+	c.mu.Unlock()
+}
+
+func (c *call) detachReason() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.detachErr != nil {
+		return c.detachErr
+	}
+	return ErrCallClosed
 }
 
 func (c *call) drainInbox() {

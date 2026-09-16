@@ -22,6 +22,10 @@ func newServerConn(w http.ResponseWriter, r *http.Request) *serverConn {
 // Carrier returns the per-request exchange carrier.
 func (c *serverConn) Carrier() transport.Carrier { return c.carrier }
 
+// markHandlerDone records that the net/http handler returned and the response
+// writer is retired.
+func (c *serverConn) markHandlerDone() { c.carrier.handlerDone.Store(true) }
+
 // Close aborts the exchange. Idempotent.
 func (c *serverConn) Close() error {
 	if c.closed.Swap(true) {
@@ -44,6 +48,10 @@ type serverCarrier struct {
 	buf      bytes.Buffer
 	finished bool
 	aborted  bool
+
+	// handlerDone is set once the net/http handler returned. The response
+	// writer must not be touched after that (WriteHeader panics or logs).
+	handlerDone atomic.Bool
 
 	reqHeaders transport.Headers
 	target     string
@@ -126,7 +134,7 @@ func (c *serverCarrier) Abort() error {
 	if c.r != nil && c.r.Body != nil {
 		_ = c.r.Body.Close()
 	}
-	if !c.finished {
+	if !c.finished && !c.handlerDone.Load() {
 		c.w.WriteHeader(http.StatusRequestTimeout)
 		c.finished = true
 	}

@@ -286,6 +286,105 @@ func TestCancelUnderBackpressure(t *testing.T) {
 		tb.Peak(), tb.Cur(), before, runtime.NumGoroutine())
 }
 
+// Session.Close must unblock the demux even when the call was never closed.
+// The three enqueue parks watch only detachCh, and Call.Close was its only
+// closer, so a session holding buffered DATA behind a stopped consumer joined
+// its recvLoop forever — taking Pool.Close, and the pool lock, down with it.
+func TestSessionCloseWithUnclosedCallUnderBackpressure(t *testing.T) {
+	const (
+		maxMsg    = 32 << 10
+		maxFrame  = maxMsg + 16
+		readAhead = 1
+	)
+	limit := perCallBytes(maxFrame, maxMsg, readAhead)
+
+	cliConn, srvConn := fake.BytePipe()
+	defer cliConn.Close()
+	defer srvConn.Close()
+
+	cfg := backpressureCfg(maxMsg, maxFrame, readAhead)
+	fr := envelope.New()
+	cliSess, err := fr.NewClientSession(context.Background(), cliConn, framing.SessionSpec{Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvSess, err := fr.NewServerSession(context.Background(), srvConn, framing.SessionSpec{Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	method := descriptor.MustMethod("bp.v1.Cancel.Stream", descriptor.ServerStreaming)
+	tb := newTrackingBudget(limit)
+	cliCtx := budget.ContextWith(context.Background(), tb)
+
+	serverStarted := make(chan struct{})
+	go func() {
+		sc, err := srvSess.AcceptCall(context.Background(), framing.CallSpec{
+			Metadata: metadata.New(metadata.RoleResponder, nil),
+		})
+		if err != nil {
+			return
+		}
+		defer sc.Close()
+		_, _, _ = sc.Recv()
+		close(serverStarted)
+		payload := make([]byte, maxMsg)
+		for {
+			if err := sc.Send(payload); err != nil {
+				_ = sc.Finish(err)
+				return
+			}
+		}
+	}()
+
+	call, err := cliSess.OpenCall(cliCtx, method, framing.CallSpec{
+		Metadata: metadata.New(metadata.RoleInitiator, nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := call.HalfClose(); err != nil {
+		t.Fatal(err)
+	}
+	<-serverStarted
+
+	// Pull one message, then stop consuming so the gate and the inbox fill and
+	// the demux parks inside an enqueue.
+	_, rel, err := call.Recv()
+	if err != nil {
+		t.Fatalf("first Recv: %v", err)
+	}
+	rel()
+	time.Sleep(50 * time.Millisecond)
+
+	// Deliberately no call.Close() first: Close is documented to unblock
+	// waiters, so the session must be able to tear itself down alone.
+	done := make(chan struct{})
+	go func() {
+		_ = cliSess.Close()
+		_ = srvSess.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("session Close hung with an unclosed call under backpressure")
+	}
+
+	if _, _, err := call.Recv(); err == nil {
+		t.Error("Recv on the abandoned call returned no error after session Close")
+	}
+	_ = call.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && tb.Cur() != 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if tb.Cur() != 0 {
+		t.Fatalf("budget not released after session Close: cur=%d peak=%d", tb.Cur(), tb.Peak())
+	}
+}
+
 func TestMaxMessageSizeBoundary(t *testing.T) {
 	const (
 		maxMsg   = 4 << 10

@@ -46,7 +46,7 @@ func TestRejectedCallKeepsConnectionUsable(t *testing.T) {
 	// startEcho keeps the listen address to itself, and a raw peer has to dial
 	// the same server the real client talks to, so pull the address out of the
 	// binding the composition layer builds.
-	tFn, fFn, cFn := envelopeTCPAxes()
+	tFn, fFn, cFn := EnvelopeTCPAxes()
 	ec := startEcho(t, rec.wrapTransport(tFn), fFn, cFn)
 
 	raw, err := net.Dial("tcp", rec.addr(t))

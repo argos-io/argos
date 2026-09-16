@@ -191,6 +191,7 @@ func (t *Transport) handleRequest(ctx context.Context, w http.ResponseWriter, r 
 
 	defer t.onConnWG.Done()
 	defer t.untrackServer(c)
+	defer c.markHandlerDone()
 	onConn(ctx, c)
 }
 

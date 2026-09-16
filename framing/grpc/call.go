@@ -212,15 +212,41 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 		return nil, fmt.Errorf("framing/grpc: server Carrier is not ByteStreamCarrier")
 	}
 
+	newServerCall := func(fullName, subtype, peerEnc string, sendComp compressor.Compressor, deadline time.Time, hasDeadline bool) *serverCall {
+		c := &call{
+			server:       s,
+			carrier:      s.carrier,
+			body:         bs,
+			method:       fullName,
+			md:           spec.Metadata,
+			subtype:      subtype,
+			cfg:          s.cfg,
+			maxMsg:       s.cfg.MaxMessageSize,
+			initiator:    false,
+			compressors:  s.compressors,
+			sendComp:     sendComp,
+			peerEncoding: peerEnc,
+		}
+		if hasDeadline {
+			c.deadline = deadline
+			c.hasDeadline = true
+		}
+		return &serverCall{call: c}
+	}
+
 	info, err := ParseRequestHeaders(rh.RequestTarget(), rh.RequestHeaders())
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", framing.ErrCallRejected,
-			status.Error(status.InvalidArgument, err.Error()))
+		sendComp := resolveSendCompressor(s.compressors, s.sendName, nil, true)
+		return newServerCall("", s.subtype, "", sendComp, time.Time{}, false),
+			fmt.Errorf("%w: %w", framing.ErrCallRejected,
+				status.Error(status.InvalidArgument, err.Error()))
 	}
 
 	fullName := info.Service + "." + info.Method
 	if err := checkInboundMeta(s.cfg, info.Metadata); err != nil {
-		return nil, fmt.Errorf("%w: %w", framing.ErrCallRejected, err)
+		sendComp := resolveSendCompressor(s.compressors, s.sendName, nil, true)
+		return newServerCall(fullName, s.subtype, "", sendComp, time.Time{}, false),
+			fmt.Errorf("%w: %w", framing.ErrCallRejected, err)
 	}
 	if spec.Metadata != nil {
 		_ = metadata.SetIncomingHeaders(spec.Metadata, info.Metadata)
@@ -238,25 +264,12 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 		peerEnc = ""
 	}
 
-	c := &call{
-		server:       s,
-		carrier:      s.carrier,
-		body:         bs,
-		method:       fullName,
-		md:           spec.Metadata,
-		subtype:      subtype,
-		cfg:          s.cfg,
-		maxMsg:       s.cfg.MaxMessageSize,
-		initiator:    false,
-		compressors:  s.compressors,
-		sendComp:     sendComp,
-		peerEncoding: peerEnc,
+	var deadline time.Time
+	hasDeadline := info.HasTimeout
+	if hasDeadline {
+		deadline = time.Now().Add(info.Timeout)
 	}
-	if info.HasTimeout {
-		c.deadline = time.Now().Add(info.Timeout)
-		c.hasDeadline = true
-	}
-	return &serverCall{call: c}, nil
+	return newServerCall(fullName, subtype, peerEnc, sendComp, deadline, hasDeadline), nil
 }
 
 // call is one gRPC Call (client or server).
@@ -303,6 +316,9 @@ type call struct {
 
 	sending atomic.Bool
 	recving atomic.Bool
+
+	headersOnce sync.Once
+	headersErr  error
 }
 
 func (c *call) Method() string { return c.method }
@@ -374,23 +390,39 @@ func (c *call) SendHeaders() error {
 		return errSendFinished
 	}
 	c.mu.Unlock()
+	return c.writeResponseHeadersOnce()
+}
 
-	rw, ok := c.carrier.(transport.ResponseWriter)
-	if !ok {
-		return status.Error(status.Unimplemented, "framing/grpc: carrier has no ResponseWriter")
-	}
-	var md metadata.Metadata
-	if c.md != nil {
-		md = c.md.OutgoingHeaders()
-	}
-	if err := rw.WriteHeaders(httpOK, EncodeResponseHeaders(c.subtype, md, c.sendEncodingHeader())); err != nil {
-		return c.sendFailed(err)
+func (c *call) writeResponseHeadersOnce() error {
+	c.headersOnce.Do(func() {
+		rw, ok := c.carrier.(transport.ResponseWriter)
+		if !ok {
+			c.headersErr = status.Error(status.Unimplemented, "framing/grpc: carrier has no ResponseWriter")
+			return
+		}
+		var md metadata.Metadata
+		if c.md != nil {
+			md = c.md.OutgoingHeaders()
+		}
+		if err := rw.WriteHeaders(httpOK, EncodeResponseHeaders(c.subtype, md, c.sendEncodingHeader())); err != nil {
+			c.headersErr = err
+			return
+		}
+		c.mu.Lock()
+		c.headersSent = true
+		c.mu.Unlock()
+		if c.md != nil {
+			_ = metadata.FreezeOutgoingHeaders(c.md)
+		}
+	})
+	if c.headersErr != nil {
+		return c.sendFailed(c.headersErr)
 	}
 	c.mu.Lock()
-	c.headersSent = true
+	sent := c.headersSent
 	c.mu.Unlock()
-	if c.md != nil {
-		_ = metadata.FreezeOutgoingHeaders(c.md)
+	if !sent {
+		return metadata.ErrHeadersAlreadySent
 	}
 	return nil
 }
@@ -519,6 +551,11 @@ func (c *call) Finish(err error) error {
 		c.mu.Unlock()
 		return errSendFinished
 	}
+	if c.sendErr != nil {
+		se := c.sendErr
+		c.mu.Unlock()
+		return se
+	}
 	headersSent := c.headersSent
 	c.mu.Unlock()
 
@@ -599,28 +636,24 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 		// Call-scoped size limits must not Abort the Carrier: the peer may still
 		// be writing the oversize body, and Concurrent streams share a Conn.
 		if status.CodeOf(err) == status.ResourceExhausted {
-			if errors.Is(err, ErrLPMUnsynced) {
-				// The stream can no longer be parsed, so stop reading it. The
-				// session stays reusable: on http2 this call owns its stream,
-				// and Close tears that down without touching the others.
-				c.mu.Lock()
-				c.sawTerminal = true
-				c.mu.Unlock()
-			}
+			c.mu.Lock()
+			c.sawTerminal = true
+			c.mu.Unlock()
 			return nil, nil, err
 		}
-		// Non-gRPC HTTP error bodies are not LPM. Before any message, drain and
-		// resolve via trailers / HTTP fallback instead of surfacing a parse error.
+		// Non-gRPC HTTP error bodies are not LPM. Only the invalid compressed
+		// flag means "not gRPC bytes"; transport and framing errors must not be
+		// laundered into a fabricated grpc-status.
 		if c.initiator {
 			c.mu.Lock()
 			gotMsg := c.messagesRecv
 			c.mu.Unlock()
-			if !gotMsg {
-				_, _ = io.Copy(io.Discard, c.body)
+			if !gotMsg && errors.Is(err, errInvalidLPMFlag) {
+				c.drainResponseBody()
 				return c.finishClientRecv()
 			}
 		}
-		c.markBad()
+		c.markBadUnlessLimit(err)
 		return nil, nil, err
 	}
 	if enc := c.peerEncoding; enc != "" && enc != compressor.Identity.Name() {
@@ -695,6 +728,17 @@ func (c *call) ensureResponseHeaders() error {
 	c.headersSeen = true
 	c.mu.Unlock()
 	return nil
+}
+
+func (c *call) maxRecvDrain() int64 {
+	if c.cfg.MaxDrainBytes > 0 {
+		return c.cfg.MaxDrainBytes
+	}
+	return 1 << 20
+}
+
+func (c *call) drainResponseBody() {
+	_, _ = io.Copy(io.Discard, io.LimitReader(c.body, c.maxRecvDrain()))
 }
 
 func (c *call) finishClientRecv() ([]byte, func(), error) {

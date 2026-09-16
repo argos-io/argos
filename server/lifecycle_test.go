@@ -184,6 +184,113 @@ func TestFactoryIsolationAcrossListeners(t *testing.T) {
 	}
 }
 
+var errAxisFactory = errors.New("transport factory refused")
+
+// newAbortingServer returns a Server whose second listen surface cannot
+// assemble, so Run aborts after the first surface is already built, plus that
+// first surface's Transport.
+func newAbortingServer(t *testing.T) (*server.Server, *testTransport) {
+	t.Helper()
+	tr := newTestTransport()
+	fr := fake.NewFraming(framing.Sequential)
+	srv := server.New(argos.WithService(svcName,
+		argos.ServiceListener("127.0.0.1:1", testServiceAxes(tr, fr)),
+		argos.ServiceListener("127.0.0.1:2",
+			argos.ServiceTransport(func() (transport.Transport, error) { return nil, errAxisFactory }),
+			argos.ServiceFraming(func() (framing.Framing, error) { return fr, nil }),
+			argos.ServiceCodec(func() (codec.Codec, error) { return rawCodec{}, nil }),
+		),
+	))
+	t.Cleanup(func() { _ = srv.Close() })
+	if err := srv.Register(echoService(), map[string]filter.Handler{
+		methodEcho: func(context.Context, descriptor.Method, stream.Stream) error { return nil },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return srv, tr
+}
+
+func TestStartFailureClosesAssembledTransport(t *testing.T) {
+	srv, tr := newAbortingServer(t)
+
+	if err := srv.Run(context.Background()); !errors.Is(err, errAxisFactory) {
+		t.Fatalf("Run: %v, want %v", err, errAxisFactory)
+	}
+	if !tr.isClosed() {
+		t.Error("aborted Run left the Transport it had assembled open")
+	}
+}
+
+func TestStartFailureLeavesServerRestartable(t *testing.T) {
+	srv, _ := newAbortingServer(t)
+
+	if err := srv.Run(context.Background()); !errors.Is(err, errAxisFactory) {
+		t.Fatalf("first Run: %v, want %v", err, errAxisFactory)
+	}
+	// No listen surface ever went live, so the second Run must report why the
+	// start failed rather than reject the call as a restart.
+	if err := srv.Run(context.Background()); !errors.Is(err, errAxisFactory) {
+		t.Fatalf("second Run: %v, want %v", err, errAxisFactory)
+	}
+	other := descriptor.MustService("test.v1.Other",
+		descriptor.MustMethod("test.v1.Other."+methodEcho, descriptor.Unary))
+	if err := srv.Register(other, map[string]filter.Handler{
+		methodEcho: func(context.Context, descriptor.Method, stream.Stream) error { return nil },
+	}); err != nil {
+		t.Fatalf("Register after a failed start: %v", err)
+	}
+}
+
+func TestCloseDuringStartClosesAssembledTransports(t *testing.T) {
+	tr1, tr2 := newTestTransport(), newTestTransport()
+	fr := fake.NewFraming(framing.Sequential)
+	assembling := make(chan struct{})
+	resume := make(chan struct{})
+
+	srv := server.New(argos.WithService(svcName,
+		argos.ServiceListener("127.0.0.1:1", testServiceAxes(tr1, fr)),
+		// Holds the start inside the assembly loop until the test has closed
+		// the Server, so Close snapshots the live surfaces while there are none.
+		argos.ServiceListener("127.0.0.1:2",
+			argos.ServiceTransport(func() (transport.Transport, error) {
+				close(assembling)
+				<-resume
+				return tr2, nil
+			}),
+			argos.ServiceFraming(func() (framing.Framing, error) { return fr, nil }),
+			argos.ServiceCodec(func() (codec.Codec, error) { return rawCodec{}, nil }),
+		),
+	))
+	t.Cleanup(func() { _ = srv.Close() })
+	if err := srv.Register(echoService(), map[string]filter.Handler{
+		methodEcho: func(context.Context, descriptor.Method, stream.Stream) error { return nil },
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- srv.Run(context.Background()) }()
+
+	<-assembling
+	if err := srv.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	close(resume)
+
+	select {
+	case err := <-runErr:
+		if err != nil {
+			t.Fatalf("Run: %v, want nil after Close", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after Close during start")
+	}
+	if !tr1.isClosed() || !tr2.isClosed() {
+		t.Errorf("Close during start left Transports open: first=%v second=%v",
+			tr1.isClosed(), tr2.isClosed())
+	}
+}
+
 func TestRejectedOptionsSurfaceFromRun(t *testing.T) {
 	tr := newTestTransport()
 	fr := fake.NewFraming(framing.Sequential)

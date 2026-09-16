@@ -106,19 +106,12 @@ func New(opts ...argos.ClientOption) (*Client, error) {
 	}
 
 	target := sel.Target
-	axes, err := cfg.ResolveService(sel)
-	if err != nil {
-		return nil, fmt.Errorf("client: service %q: %w", service, err)
-	}
-	tr, fr, cd, err := axes.Assemble()
+	tr, fr, cd, err := sel.Assemble()
 	if err != nil {
 		return nil, fmt.Errorf("client: service %q: %w", service, err)
 	}
 	if err := checkFramingConfig(fr, cfg); err != nil {
-		_ = tr.Close()
-		if c, ok := fr.(interface{ Close() error }); ok {
-			_ = c.Close()
-		}
+		_ = tr.Close() // Framing and Codec hold nothing to release (README §4.1)
 		return nil, fmt.Errorf("client: %w", err)
 	}
 
@@ -252,6 +245,9 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 	}()
 
 	md := metadata.New(metadata.RoleInitiator, nil)
+	// Per-call budget is on the call ctx for Framing that reads it (envelope
+	// today). wholebody/grpc admission still reserves perCall bytes at the
+	// Client, but those stacks do not TryAcquire from ctx yet.
 	callBudget := budget.New(c.perCall)
 
 	callCtx, callCancel := context.WithCancel(ctx)
@@ -331,10 +327,15 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 		callCancel: callCancel,
 		stopBridge: stopBridge,
 		headersCh:  make(chan struct{}),
+		closedCh:   make(chan struct{}),
 	}
 	// Caller cancel / lifetime cancel must unblock framing Recv/Send.
+	gate := &afterCallGate{call: gotCall}
+	cs.afterCallGate = gate
 	cs.stopWatch = context.AfterFunc(callCtx, func() {
-		_ = gotCall.Close()
+		gate.mu.Lock()
+		defer gate.mu.Unlock()
+		_ = gate.call.Close()
 	})
 	cs.leak = &leakState{
 		cfg:    c.cfg,
@@ -363,6 +364,15 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 	}, cs.leak)
 
 	admitted = false // CallStream.Close releases admission
+
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		abandonOpen()
+		return nil, ErrClosed
+	}
+	c.mu.Unlock()
+
 	return cs, nil
 }
 

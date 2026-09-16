@@ -70,7 +70,29 @@ func TestServiceConfigAssembleReturnsIndependentInstances(t *testing.T) {
 	}
 }
 
-type stubTransport struct{ id int }
+func TestServiceConfigAssembleClosesPartialBuild(t *testing.T) {
+	t.Parallel()
+	tr := &stubTransport{id: 1}
+	sc := argos.ServiceConfig{
+		Transport: func() (transport.Transport, error) { return tr, nil },
+		Framing:   func() (framing.Framing, error) { return &stubFraming{id: 2}, nil },
+		Codec:     func() (codec.Codec, error) { return nil, nil },
+	}
+
+	if _, _, _, err := sc.Assemble(); err == nil {
+		t.Fatal("Assemble accepted a Codec factory that returned no Codec")
+	}
+	// Assemble returns no component with an error, so a Transport it built and
+	// kept would be unreachable and never closed.
+	if !tr.closed.Load() {
+		t.Error("failed Assemble left the Transport it had built open")
+	}
+}
+
+type stubTransport struct {
+	id     int
+	closed atomic.Bool
+}
 
 func (s *stubTransport) Serve(context.Context, func(context.Context, transport.Conn), ...transport.ServerOption) error {
 	return nil
@@ -79,7 +101,7 @@ func (s *stubTransport) Dial(context.Context, transport.DialSpec, ...transport.C
 	return nil, nil
 }
 func (s *stubTransport) Shutdown(context.Context) error { return nil }
-func (s *stubTransport) Close() error                   { return nil }
+func (s *stubTransport) Close() error                   { s.closed.Store(true); return nil }
 
 type stubFraming struct{ id int }
 

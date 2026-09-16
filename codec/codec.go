@@ -3,7 +3,8 @@ package codec
 
 // Codec converts messages to and from bytes. It is a pure function over one
 // whole message: the message layer encodes to a byte slice and hands that slice
-// to a transport, so a Codec never performs I/O and never sees a Framer.
+// to a transport, so a Codec never performs I/O and never sees a Framer. It
+// owns nothing that needs releasing and has no Close (§4.1).
 type Codec interface {
 	// Marshal encodes v. The returned slice is owned by the caller.
 	Marshal(v any) ([]byte, error)

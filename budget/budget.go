@@ -4,6 +4,10 @@
 // TryAcquire never waits: exceeding the remaining capacity returns
 // status.ErrCallsExhausted. Successful acquires return an idempotent release.
 //
+// Today only framing/envelope reads the Budget from the call context; other
+// Framing stacks may adopt it later. The client still reserves perCall bytes
+// at admission for every stack.
+//
 // Byte slices are charged by underlying array capacity. Aliases that share
 // the same (*byte, cap) key do not double-charge; see SliceBudget.
 package budget

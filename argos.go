@@ -7,9 +7,6 @@
 // implementations with server.Register; generated stubs call client.New with
 // WithServiceName.
 //
-// Named axis factories use transport.Registry, framing.Registry, and
-// codec.Registry on Config (WithTransportRegistry, …). Concrete packages
-// expose Register(r) for use at main/tests; there is no root registry API.
 // Configuration is code only — no file format, no reload.
 //
 // Connection-dimension defaults are confirmed by task 7.5 load evidence in
