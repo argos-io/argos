@@ -1,6 +1,6 @@
 # Argos · 文档
 
-框架做什么、和别的 RPC 栈有何不同，见根目录 [README.md](../README.md)。本目录是**设计与接入**细节；**接口以 Go 源码和测试为准**（`transport/transport.go`、`framing/framing.go`、`codec/codec.go`）。
+框架做什么、C/S 覆盖范围与和 grpc-go 等的差别，见根目录 [README.md](../README.md) 与 [architecture.md](architecture.md#协议覆盖范围)。本目录是**设计与接入**细节；**接口以 Go 源码和测试为准**（`transport/transport.go`、`framing/framing.go`、`codec/codec.go`）。
 
 | 文档 | 读者 | 内容 |
 |------|------|------|

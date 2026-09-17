@@ -6,11 +6,11 @@
 
 ## 项目是什么
 
-**Argos** 用 Transport × Framing × Codec 三轴拼协议；连接（`Conn`/`Session`）在 API 里是一等公民。
+**Argos** 用 Transport × Framing × Codec 三轴拼 **C/S 协议**；连接（`Conn`/`Session`）在 API 里是一等公民。gRPC/proto 是一等路径，**非 RPC**（如 `example/resp` RESP2×tcp）同属验证范围。
 
 | | |
 |---|---|
-| 定位 | **验证「协议能这么拼」**，不是拿来直接上生产的 RPC 框架 |
+| 定位 | **验证「C/S 协议能这么分层拼」**，不是拿来直接上生产的通用框架 |
 | 阶段 | 里程碑 ⓪–⑦ 已完成（tag `milestone-7`） |
 | 文档 | `README.md` 产品概述；设计与用法见 `docs/`（见下「协议接入」） |
 

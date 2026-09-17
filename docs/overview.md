@@ -1,6 +1,6 @@
 # 扩展模型概览
 
-你要加新传输、新分帧或换 codec 时，先弄清三轴各管哪一段。
+你要加新传输、新分帧或换 codec 时，先弄清三轴各管哪一段。目标协议不限于 gRPC：**凡能落在「连接 + Session 握手 + Call 交换（可选消息流）」上的 C/S 线协议** 都走同一套 `client` / `server` 组合层；覆盖边界见 [architecture.md](architecture.md#协议覆盖范围)。
 
 ## 三轴各自回答什么
 

@@ -107,5 +107,5 @@ type ServerCall interface {
 
 ## 参考与反例
 
-- **标准 RPC 分帧**：`framing/envelope`、`framing/grpc`、`framing/wholebody`
-- **连接级状态 / 非 metadata RPC**：`example/resp`、`example/synth`（仍实现同一套 `Framing` 接口，但可自定义握手与 `Accept` 语义）
+- **内置分帧（RPC / HTTP unary 等）**：`framing/envelope`、`framing/grpc`、`framing/wholebody`
+- **连接级状态 / 非 gRPC 命令式 C/S**：`example/resp`、`example/synth`（仍实现同一套 `Framing` 接口，但可自定义握手与 `Accept` 语义；证明组合层无需为具体协议特判）
