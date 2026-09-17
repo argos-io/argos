@@ -102,7 +102,7 @@ type ServerCall interface {
 - [ ] Sequential：`MaxDrainBytes`、OpenTimeout、idle/peer close → `Reusable`
 - [ ] `Call.Close` 同步 join + 未读终态 → 不复用
 - [ ] `SendError` / `ErrSendClosed` 与 grpc/envelope 测试对齐
-- [ ] 包依赖不违反 [README §3](../README.md#3-分层与依赖)
+- [ ] 包依赖不违反 [architecture.md](architecture.md#分层与依赖)
 - [ ] 测试：`internal/fake` 或真实 transport 环回
 
 ## 参考与反例

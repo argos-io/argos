@@ -1,5 +1,7 @@
 # 扩展模型概览
 
+你要加新传输、新分帧或换 codec 时，先弄清三轴各管哪一段。
+
 ## 三轴各自回答什么
 
 | 轴 | 问题 | 典型产出 |
@@ -8,7 +10,7 @@
 | **Framing** | 握手、复用几条调用、帧/状态写在哪 | `Session` → `Call` |
 | **Codec** | 业务消息 ↔ 字节 | 纯函数，无 I/O |
 
-协议 = 三轴**合法组合**。组合层（`client` / `server`）不为具体实现写 `switch`；不兼容的组合在 `New*Session` 或 `OpenStream` 等处**明确失败**，不静默降级。
+协议 = 三轴**合法组合**。`client` / `server` 不会为某个具体实现写 `switch`；配错了在 `New*Session` 或 `OpenStream` 等地方**直接报错**，不会悄悄换协议。
 
 ## 连接是一等事实
 
@@ -41,7 +43,7 @@ Transport.Dial/Serve → Conn
 - 不用 gRPC 的二进制不得传递依赖 `framing/grpc`
 - 复用策略只在 `internal/sessionpool`（客户端池读 `Framing.Reuse()`）
 
-完整表见 [README.md §3](../README.md#3-分层与依赖)。
+完整表见 [architecture.md](architecture.md#分层与依赖)。
 
 ## 扩展验收
 

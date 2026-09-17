@@ -1,18 +1,18 @@
-# AGENTS.md · argos v2
+# AGENTS.md · Argos
 
-给在本仓库工作的编码代理的约定。整体设计与用法见根目录 `README.md`；实现真源是代码 + 测试 + 本文件。Go 惯例对齐 [Effective Go](https://go.dev/doc/effective_go) 与 [Code Review Comments](https://go.dev/wiki/CodeReviewComments)。
+给在本仓库干活的编码代理用的约定。人读整体设计看根目录 `README.md`；**行为以代码 + 测试 + 本文件为准**。Go 风格对齐 [Effective Go](https://go.dev/doc/effective_go) 与 [Code Review Comments](https://go.dev/wiki/CodeReviewComments)。
 
 ---
 
 ## 项目是什么
 
-**argos v2** 重写运行时内核：Transport × Framing × Codec 三轴组装协议；连接（`Conn`/`Session`）是一等事实。分支 `v2`。
+**Argos** 用 Transport × Framing × Codec 三轴拼协议；连接（`Conn`/`Session`）在 API 里是一等公民。
 
 | | |
 |---|---|
-| 定位 | **验证可组装模型**，不是生产 RPC 框架 |
+| 定位 | **验证「协议能这么拼」**，不是拿来直接上生产的 RPC 框架 |
 | 阶段 | 里程碑 ⓪–⑦ 已完成（tag `milestone-7`） |
-| 文档 | `README.md` 整体设计；**协议接入**见 `docs/`（见下「协议接入」） |
+| 文档 | `README.md` 产品概述；设计与用法见 `docs/`（见下「协议接入」） |
 
 ---
 
@@ -36,7 +36,7 @@ docs/          # 协议接入（Transport/Framing/Codec 抽象与检查单）
 Makefile · .github/workflows/ci.yml · invariants_test.go
 ```
 
-依赖方向硬约束见 `README.md` §3；由 `invariants_test.go` 强制。
+依赖方向硬约束见 [docs/architecture.md](docs/architecture.md)；由 `invariants_test.go` 强制。
 
 ---
 
