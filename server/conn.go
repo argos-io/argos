@@ -182,6 +182,9 @@ func (s *Server) handleCall(
 
 	callCtx = metadata.ContextWith(callCtx, md)
 	callCtx = budget.ContextWith(callCtx, b)
+	if bs, ok := call.(framing.BudgetSetter); ok {
+		bs.SetBudget(b)
+	}
 
 	methodName := call.Method()
 	entry, ok := lookup(routes, methodName)

@@ -1,4 +1,4 @@
-// Package http1 implements a StreamConn Transport over cleartext HTTP/1.1.
+// Package http1 implements a StreamConn Transport over HTTP/1.1.
 //
 // Client Dial returns a StreamConn endpoint handle; OpenStream starts one
 // request and returns a writable Carrier before response headers arrive.
@@ -7,8 +7,9 @@
 // committed once via WriteResponse (never via an early WriteHeader(200)).
 //
 // This package moves bytes and opaque headers only. It does not import
-// framing, descriptor, codec, or any gRPC packages. TLS is left for a later
-// option; Serve/Dial use cleartext HTTP/1.1.
+// framing, descriptor, codec, or any gRPC packages. Cleartext is the default;
+// WithServerTLS / WithClientTLS enable TLS (HTTP/1.1 only — HTTP/2 upgrade
+// is disabled on the client, matching pre-TLS behaviour).
 package http1
 
 import (
@@ -40,10 +41,50 @@ var (
 	_ transport.UnaryResponseWriter  = (*serverCarrier)(nil)
 )
 
+// Option configures a Transport. WithServerTLS / WithClientTLS select TLS
+// versus cleartext HTTP/1.1.
+type Option interface {
+	apply(*options)
+}
+
+type options struct {
+	serverTLS *tls.Config
+	clientTLS *tls.Config
+}
+
+type optionFunc func(*options)
+
+func (f optionFunc) apply(o *options) { f(o) }
+
+// WithServerTLS wraps the Serve listener with TLS. When nil (default), Serve
+// uses cleartext HTTP/1.1. The config is cloned; MinVersion defaults to TLS 1.2.
+func WithServerTLS(cfg *tls.Config) Option {
+	return optionFunc(func(o *options) { o.serverTLS = cfg })
+}
+
+// WithClientTLS sets TLS for client OpenStream dials. When nil (default), Dial
+// uses cleartext. The config is cloned; MinVersion defaults to TLS 1.2.
+func WithClientTLS(cfg *tls.Config) Option {
+	return optionFunc(func(o *options) { o.clientTLS = cfg })
+}
+
+func cloneTLS(cfg *tls.Config) *tls.Config {
+	if cfg == nil {
+		cfg = &tls.Config{}
+	}
+	c := cfg.Clone()
+	if c.MinVersion == 0 {
+		c.MinVersion = tls.VersionTLS12
+	}
+	return c
+}
+
 // Transport is an HTTP/1.1 Transport. The shared http.Client (and its
 // connection pool) is owned by Transport; StreamConn.Close must not shut it
 // down.
 type Transport struct {
+	opts options
+
 	mu sync.Mutex
 
 	listener net.Listener
@@ -61,9 +102,16 @@ type Transport struct {
 	serveDone chan struct{}
 }
 
-// New returns a cleartext HTTP/1.1 Transport.
-func New() transport.Transport {
+// New returns an HTTP/1.1 Transport.
+func New(opts ...Option) transport.Transport {
+	var o options
+	for _, opt := range opts {
+		if opt != nil {
+			opt.apply(&o)
+		}
+	}
 	t := &Transport{
+		opts:        o,
 		streamConns: make(map[*streamConn]struct{}),
 		serverConns: make(map[*serverConn]struct{}),
 	}
@@ -72,15 +120,17 @@ func New() transport.Transport {
 }
 
 func (t *Transport) newHTTPClient() *http.Client {
-	// Non-nil empty TLSNextProto disables automatic HTTP/2 (net/http docs).
-	return &http.Client{
-		Transport: &http.Transport{
-			ForceAttemptHTTP2: false,
-			TLSNextProto:      map[string]func(authority string, c *tls.Conn) http.RoundTripper{},
-			Proxy:             http.ProxyFromEnvironment,
-			DialContext:       (&net.Dialer{}).DialContext,
-		},
+	tr := &http.Transport{
+		ForceAttemptHTTP2: false,
+		// Non-nil empty TLSNextProto disables automatic HTTP/2 (net/http docs).
+		TLSNextProto: map[string]func(authority string, c *tls.Conn) http.RoundTripper{},
+		Proxy:        http.ProxyFromEnvironment,
+		DialContext:  (&net.Dialer{}).DialContext,
 	}
+	if t.opts.clientTLS != nil {
+		tr.TLSClientConfig = cloneTLS(t.opts.clientTLS)
+	}
+	return &http.Client{Transport: tr}
 }
 
 // Addr returns the listener address after Serve has bound, or nil.
@@ -93,8 +143,8 @@ func (t *Transport) Addr() net.Addr {
 	return t.listener.Addr()
 }
 
-// Serve listens with cleartext HTTP/1.1 and passes each inbound request to
-// onConn as a CarrierConn.
+// Serve listens with cleartext or TLS HTTP/1.1 and passes each inbound request
+// to onConn as a CarrierConn.
 func (t *Transport) Serve(ctx context.Context, onConn func(context.Context, transport.Conn), opts ...transport.ServerOption) error {
 	settings := transport.ApplyServerOptions(opts...)
 	if settings.ListenAddress == "" {
@@ -104,6 +154,9 @@ func (t *Transport) Serve(ctx context.Context, onConn func(context.Context, tran
 	ln, err := net.Listen("tcp", settings.ListenAddress)
 	if err != nil {
 		return fmt.Errorf("http1: listen %s: %w", settings.ListenAddress, err)
+	}
+	if t.opts.serverTLS != nil {
+		ln = tls.NewListener(ln, cloneTLS(t.opts.serverTLS))
 	}
 
 	t.mu.Lock()
@@ -213,7 +266,7 @@ func (t *Transport) Dial(ctx context.Context, spec transport.DialSpec, _ ...tran
 		return nil, errors.New("http1: no client")
 	}
 
-	base := dialBaseURL(spec.Endpoint)
+	base := dialBaseURL(spec.Endpoint, t.opts.clientTLS != nil)
 	c := newStreamConn(client, base)
 	// An endpoint handle is tracked only while it is open: Session recycles
 	// handles on idle/lifetime timeouts, and the transport must not retain
@@ -231,13 +284,17 @@ func (t *Transport) Dial(ctx context.Context, spec transport.DialSpec, _ ...tran
 	return c, nil
 }
 
-func dialBaseURL(endpoint string) string {
+func dialBaseURL(endpoint string, preferHTTPS bool) string {
 	switch {
 	case strings.HasPrefix(endpoint, "http://"),
 		strings.HasPrefix(endpoint, "https://"):
 		return strings.TrimRight(endpoint, "/")
 	default:
-		return "http://" + endpoint
+		scheme := "http"
+		if preferHTTPS {
+			scheme = "https"
+		}
+		return scheme + "://" + endpoint
 	}
 }
 

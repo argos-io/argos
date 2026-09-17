@@ -20,7 +20,7 @@ server: Transport.Serve → Conn → NewServerSession
 ```
 
 - 会话池维护**在途调用引用计数**；`Sequential` / `OneCallPerConn` 承载力为 1，`Concurrent` 无上限（忙则 `ErrSessionBusy`）。空闲受 `MaxIdleSessions` / `SessionIdleTimeout` / `MaxSessionLifetime` 约束。
-- **`MaxBufferedBytes`**：`perCall = MaxBufferedBytes / MaxConcurrentCalls` 放入调用 ctx 的 `budget.Budget`。**当前仅 `framing/envelope` 在读写路径 TryAcquire**；wholebody / grpc 等仍只做并发槽位准入。
+- **`MaxBufferedBytes`**：`perCall = MaxBufferedBytes / MaxConcurrentCalls` 放入调用 ctx 的 `budget.Budget`；`framing/envelope`、`framing/grpc`、`framing/wholebody` 在读写路径 `TryAcquire`。服务端在 `admit` 后通过 `framing.BudgetSetter` 晚绑定到 Call。
 - **生命周期**：只有 `Transport` 在工厂接口上声明 `Close()`；资源在 `Conn` / `Session` / `Call`。`Framing` / `Codec` 工厂不得持有需释放的资源。
 
 ## 调用收尾约定
@@ -51,7 +51,7 @@ cli, err := client.New(
 - **零值 = 默认**；显式关闭可选限额：`argos.Disabled`（仅 `MaxIdleSessions` / `SessionIdleTimeout` / `MaxSessionLifetime`）。
 - **Option 分端**：`Option` 通用；`ClientOption` → `client.New`；`ServerOption` → `server.New`。
 - 客户端：三轴覆盖 / `WithTarget` > `Services[name]`；服务名只来自 `WithServiceName`。
-- `server.New` 不返回 error；非法组合由 `Run` 报错。TLS 在 `transport/http2`；gRPC 压缩在 `framing/grpc`。
+- `server.New` 不返回 error；非法组合由 `Run` 报错。TLS 在 `transport/http2` 与 `transport/http1`（`WithServerTLS` / `WithClientTLS`）；gRPC 压缩在 `framing/grpc`。
 
 ### 默认值
 
@@ -96,6 +96,10 @@ status.WithDetails(err, ...) // 中性 Detail；framing/grpc 翻译为 Any
 | `status.ErrCallsExhausted` | 调用准入耗尽 |
 
 连接级错误经 `WithConnErrorObserver` 上报，不使 `Transport.Serve` 返回。
+
+## gRPC 生态可选包
+
+Health、Reflection、客户端重试与同端口挂载方式见 [grpc-ecosystem.md](grpc-ecosystem.md)。可运行示例：`example/echo/grpc_ecosystem_test.go`。
 
 ## 本地验证
 

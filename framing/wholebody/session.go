@@ -7,6 +7,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/argos-io/argos/budget"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/metadata"
@@ -113,6 +114,7 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 		return nil, fmt.Errorf("framing/wholebody: OpenStream Carrier missing ResponseHeaderReader")
 	}
 
+	b, _ := budget.FromContext(ctx)
 	return &call{
 		client:    s,
 		carrier:   car,
@@ -124,6 +126,7 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 		codec:     s.codec,
 		initiator: true,
 		localCar:  true,
+		budget:    b,
 	}, nil
 }
 

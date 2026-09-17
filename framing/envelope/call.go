@@ -92,6 +92,12 @@ type call struct {
 	curBuffered  atomic.Int64
 }
 
+func (c *call) SetBudget(b budget.Budget) {
+	c.mu.Lock()
+	c.budget = b
+	c.mu.Unlock()
+}
+
 func newCall(s *session, id uint64, method string, initiator bool, md metadata.CallMetadata, shape descriptor.Shape, b budget.Budget) *call {
 	ra := s.cfg.ReadAheadMessages
 	if ra < 1 {
@@ -219,17 +225,20 @@ func (c *call) releaseDataSlot() {
 }
 
 func (c *call) chargePayload(payload []byte) (func(), error) {
-	if c.budget == nil {
+	c.mu.Lock()
+	b := c.budget
+	c.mu.Unlock()
+	if b == nil {
 		return nil, nil
 	}
 	var (
 		rel func()
 		err error
 	)
-	if sb, ok := c.budget.(budget.SliceBudget); ok {
+	if sb, ok := b.(budget.SliceBudget); ok {
 		rel, err = sb.TryAcquireSlice(payload)
 	} else {
-		rel, err = c.budget.TryAcquire(int64(cap(payload)))
+		rel, err = b.TryAcquire(int64(cap(payload)))
 	}
 	if err != nil {
 		return nil, err

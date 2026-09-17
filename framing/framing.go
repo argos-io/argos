@@ -10,6 +10,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/argos-io/argos/budget"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/transport"
@@ -232,6 +233,14 @@ type Call interface {
 	// Carrier hygiene: if this call closes without reading protocol terminal
 	// state (no STATUS / no io.EOF), Session.Reusable() must become false (§2.4).
 	Close() error
+}
+
+// BudgetSetter is implemented by Calls that honor per-call byte budgets. The
+// composition layer installs the budget after admission (server) or via OpenCall
+// ctx (client).
+type BudgetSetter interface {
+	Call
+	SetBudget(b budget.Budget)
 }
 
 // ServerCall extends Call with Accept. Only the server needs Accept: it parses

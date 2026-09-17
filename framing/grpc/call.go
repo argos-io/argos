@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/argos-io/argos/budget"
 	"github.com/argos-io/argos/compressor"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
@@ -121,6 +122,7 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 		return nil, fmt.Errorf("framing/grpc: OpenStream Carrier is not ByteStreamCarrier")
 	}
 
+	b, _ := budget.FromContext(ctx)
 	c := &call{
 		client:      s,
 		carrier:     car,
@@ -135,6 +137,7 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 		initiator:   true,
 		compressors: s.compressors,
 		sendComp:    sendComp,
+		budget:      b,
 	}
 	if timeout > 0 {
 		c.deadline = time.Now().Add(timeout)
@@ -314,11 +317,26 @@ type call struct {
 	// and the remote status.
 	sendErr error
 
+	budget budget.Budget
+
 	sending atomic.Bool
 	recving atomic.Bool
 
 	headersOnce sync.Once
 	headersErr  error
+}
+
+func (c *call) SetBudget(b budget.Budget) {
+	c.mu.Lock()
+	c.budget = b
+	c.mu.Unlock()
+}
+
+func (c *call) chargePayload(payload []byte) (func(), error) {
+	c.mu.Lock()
+	b := c.budget
+	c.mu.Unlock()
+	return budget.ChargeSlice(b, payload)
 }
 
 func (c *call) Method() string { return c.method }
@@ -486,6 +504,11 @@ func (c *call) Send(payload []byte) error {
 	}
 	// Copy so caller may reuse the buffer after return.
 	cp := append([]byte(nil), data...)
+	if rel, err := c.chargePayload(cp); err != nil {
+		return err
+	} else if rel != nil {
+		defer rel()
+	}
 	compressed, wire, err := compressMessage(c.sendComp, cp)
 	if err != nil {
 		// Local encoder failure: nothing was written, so the connection is
@@ -688,7 +711,14 @@ func (c *call) Recv() (payload []byte, release func(), err error) {
 	c.mu.Lock()
 	c.messagesRecv = true
 	c.mu.Unlock()
-	return data, func() {}, nil
+	rel, err := c.chargePayload(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	if rel == nil {
+		rel = func() {}
+	}
+	return data, rel, nil
 }
 
 func (c *call) ensureResponseHeaders() error {

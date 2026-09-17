@@ -6,6 +6,7 @@
 |------|------|------|
 | [architecture.md](architecture.md) | 所有人 | 目标、概念模型、包依赖 DAG |
 | [usage.md](usage.md) | 使用框架 | 运行时路径、配置与默认值、错误、调用约定、`make verify` |
+| [grpc-ecosystem.md](grpc-ecosystem.md) | gRPC 栈 | Health / Reflection / Retry 接入示例 |
 | [codegen.md](codegen.md) | 使用 proto | stub 生成、message model |
 | [overview.md](overview.md) | 扩展组合 | 三轴挂接摘要、扩展验收 |
 | [transport.md](transport.md) | 新传输 | `Transport` / `Conn` / `Carrier` |
