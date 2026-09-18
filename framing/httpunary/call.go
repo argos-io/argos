@@ -1,4 +1,4 @@
-package wholebody
+package httpunary
 
 import (
 	"fmt"
@@ -17,7 +17,7 @@ import (
 	"github.com/argos-io/argos/transport"
 )
 
-// call is one wholebody Call (client or server). Unary only: at most one
+// call is one httpunary Call (client or server). Unary only: at most one
 // buffered request/response body, committed on HalfClose (client) or Finish
 // (server via UnaryResponseWriter).
 type call struct {
@@ -31,6 +31,9 @@ type call struct {
 	cfg     framing.Config
 	maxMsg  int64
 	codec   string
+
+	contentType func(codecName string) string
+	encodeError func(err error) (contentType string, body []byte)
 
 	initiator bool
 	localCar  bool
@@ -85,7 +88,7 @@ func checkInboundMeta(cfg framing.Config, md metadata.Metadata) error {
 	}
 	if sz := metadata.WireSize(md); sz > max {
 		return status.Error(status.ResourceExhausted,
-			fmt.Sprintf("framing/wholebody: inbound metadata %d exceeds limit %d", sz, max))
+			fmt.Sprintf("framing/httpunary: inbound metadata %d exceeds limit %d", sz, max))
 	}
 	return nil
 }
@@ -152,14 +155,14 @@ func (c *call) wakeRead() {
 	}
 }
 
-// SendHeaders is unsupported on wholebody/http1: early commit would freeze a
+// SendHeaders is unsupported on httpunary/http1: early commit would freeze a
 // 200 that Finish could no longer change (§4.6 / §9-8).
 func (c *call) SendHeaders() error {
 	if c.initiator {
-		return status.Error(status.Unimplemented, "framing/wholebody: SendHeaders unsupported for initiator")
+		return status.Error(status.Unimplemented, "framing/httpunary: SendHeaders unsupported for initiator")
 	}
 	return status.Error(status.Unimplemented,
-		"framing/wholebody: SendHeaders unsupported (Framing=wholebody; UnaryResponseWriter commits at Finish)")
+		"framing/httpunary: SendHeaders unsupported (UnaryResponseWriter commits at Finish)")
 }
 
 func (c *call) Send(payload []byte) error {
@@ -183,11 +186,11 @@ func (c *call) Send(payload []byte) error {
 	}
 	if c.initiator && c.reqBuf != nil {
 		c.mu.Unlock()
-		return status.Error(status.Internal, "framing/wholebody: unary allows one request message")
+		return status.Error(status.Internal, "framing/httpunary: unary allows one request message")
 	}
 	if !c.initiator && c.respBuf != nil {
 		c.mu.Unlock()
-		return status.Error(status.Internal, "framing/wholebody: unary allows one response message")
+		return status.Error(status.Internal, "framing/httpunary: unary allows one response message")
 	}
 	c.mu.Unlock()
 
@@ -197,7 +200,7 @@ func (c *call) Send(payload []byte) error {
 	}
 	if c.maxMsg > 0 && int64(len(data)) > c.maxMsg {
 		return status.Error(status.ResourceExhausted,
-			fmt.Sprintf("framing/wholebody: Send payload %d > max %d", len(data), c.maxMsg))
+			fmt.Sprintf("framing/httpunary: Send payload %d > max %d", len(data), c.maxMsg))
 	}
 	cp := append([]byte(nil), data...)
 	rel, err := c.chargePayload(cp)
@@ -220,7 +223,7 @@ func (c *call) Send(payload []byte) error {
 
 func (c *call) HalfClose() error {
 	if !c.initiator {
-		return status.Error(status.Unimplemented, "framing/wholebody: HalfClose unsupported for responder")
+		return status.Error(status.Unimplemented, "framing/httpunary: HalfClose unsupported for responder")
 	}
 	c.mu.Lock()
 	if c.closed {
@@ -252,7 +255,7 @@ func (c *call) HalfClose() error {
 	}
 	sc, ok := c.carrier.(transport.SendCloser)
 	if !ok {
-		return status.Error(status.Unimplemented, "framing/wholebody: carrier has no CloseSend")
+		return status.Error(status.Unimplemented, "framing/httpunary: carrier has no CloseSend")
 	}
 	if err := sc.CloseSend(); err != nil {
 		return c.sendFailed(err)
@@ -262,7 +265,7 @@ func (c *call) HalfClose() error {
 
 func (c *call) Finish(err error) error {
 	if c.initiator {
-		return status.Error(status.Unimplemented, "framing/wholebody: Finish unsupported for initiator")
+		return status.Error(status.Unimplemented, "framing/httpunary: Finish unsupported for initiator")
 	}
 	c.mu.Lock()
 	if c.closed {
@@ -278,7 +281,7 @@ func (c *call) Finish(err error) error {
 
 	urw, ok := c.carrier.(transport.UnaryResponseWriter)
 	if !ok {
-		return status.Error(status.Unimplemented, "framing/wholebody: carrier has no UnaryResponseWriter")
+		return status.Error(status.Unimplemented, "framing/httpunary: carrier has no UnaryResponseWriter")
 	}
 
 	var userMD metadata.Metadata
@@ -299,11 +302,19 @@ func (c *call) Finish(err error) error {
 		if body == nil {
 			body = []byte{}
 		}
-		ctype = ContentType(c.codec)
+		if c.contentType != nil {
+			ctype = c.contentType(c.codec)
+		} else {
+			ctype = ContentType(c.codec)
+		}
 	} else {
 		httpSt = httpstatus.ToHTTP(status.CodeOf(err))
-		body = EncodeErrorBody(err)
-		ctype = "application/json"
+		if c.encodeError != nil {
+			ctype, body = c.encodeError(err)
+		} else {
+			body = EncodeErrorBody(err)
+			ctype = "application/json"
+		}
 	}
 
 	hs := transport.Headers{{Name: "content-type", Value: ctype}}
@@ -372,7 +383,7 @@ func (c *call) recvServer() ([]byte, func(), error) {
 func (c *call) recvClient() ([]byte, func(), error) {
 	rh, ok := c.carrier.(transport.ResponseHeaderReader)
 	if !ok {
-		return nil, nil, fmt.Errorf("framing/wholebody: carrier missing ResponseHeaderReader")
+		return nil, nil, fmt.Errorf("framing/httpunary: carrier missing ResponseHeaderReader")
 	}
 	httpSt, err := rh.ResponseStatus()
 	if err != nil {
@@ -466,12 +477,11 @@ type serverCall struct {
 
 func (c *serverCall) Accept(m descriptor.Method) error {
 	if m.IsZero() {
-		return status.Error(status.InvalidArgument, "framing/wholebody: zero Method")
+		return status.Error(status.InvalidArgument, "framing/httpunary: zero Method")
 	}
 	if m.Shape() != descriptor.Unary {
 		return status.Error(status.Unimplemented, fmt.Sprintf(
-			"framing/wholebody: shape %v unsupported (Framing=wholebody Shape=%v; only Unary)",
-			m.Shape(), m.Shape()))
+			"framing/httpunary: shape %v unsupported (only Unary)", m.Shape()))
 	}
 	return nil
 }
@@ -486,14 +496,14 @@ func readAllLimited(r io.Reader, limit int64) ([]byte, error) {
 		// ResourceExhausted so callers can tell a limit we chose from damage to
 		// the connection; see markBadUnlessLimit.
 		return nil, status.Error(status.ResourceExhausted,
-			fmt.Sprintf("framing/wholebody: message exceeds max size %d", limit))
+			fmt.Sprintf("framing/httpunary: message exceeds max size %d", limit))
 	}
 	return b, nil
 }
 
 var (
-	errConcurrentSend = fmt.Errorf("framing/wholebody: concurrent Send")
-	errConcurrentRecv = fmt.Errorf("framing/wholebody: concurrent Recv")
-	errSendFinished   = fmt.Errorf("framing/wholebody: send already finished")
-	errCallClosed     = fmt.Errorf("framing/wholebody: call closed")
+	errConcurrentSend = fmt.Errorf("framing/httpunary: concurrent Send")
+	errConcurrentRecv = fmt.Errorf("framing/httpunary: concurrent Recv")
+	errSendFinished   = fmt.Errorf("framing/httpunary: send already finished")
+	errCallClosed     = fmt.Errorf("framing/httpunary: call closed")
 )

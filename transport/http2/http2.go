@@ -479,4 +479,7 @@ func applyHeaders(dst http.Header, src transport.Headers) {
 	}
 }
 
-var errAborted = errors.New("http2: aborted")
+var (
+	errAborted       = errors.New("http2: aborted")
+	errNoRequestBody = errors.New("http2: request has no body")
+)

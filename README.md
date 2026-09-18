@@ -6,7 +6,7 @@ Argos 把 **连接和会话（`Conn` / `Session`）** 放在 API 中心——握
 
 > **定位**：验证「C/S 协议真的可以这么分层组装」的研究型运行时，**不是**面向生产的通用框架（既不承诺 grpc-go 级 RPC 生态，也不承诺完整 Redis/MySQL 驱动）。行为以代码与测试为准。
 
-**覆盖范围（摘要）**：以 **「连接 + 可命名的交换（Call）+ 可选消息流」** 为主的 C/S 协议是核心设计区（gRPC、wholebody、类 Redis 命令）。**连接级状态、pipeline、以字节管道为主角的 payload** 由 **Framing / Session** 内化，不保证现成 `Stream` 路径即 wire 上的最优映射；边界见 [architecture.md](docs/architecture.md#协议覆盖范围)。
+**覆盖范围（摘要）**：以 **「连接 + 可命名的交换（Call）+ 可选消息流」** 为主的 C/S 协议是核心设计区（gRPC、httpunary、类 Redis 命令）。**连接级状态、pipeline、以字节管道为主角的 payload** 由 **Framing / Session** 内化，不保证现成 `Stream` 路径即 wire 上的最优映射；边界见 [architecture.md](docs/architecture.md#协议覆盖范围)。
 
 ## 架构一览
 
@@ -17,7 +17,7 @@ flowchart TB
   subgraph axes["协议 = Transport × Framing × Codec"]
     direction LR
     T["Transport<br/>tcp · ws · udp · http1 · http2"]
-    F["Framing<br/>grpc · wholebody · 自建 · …"]
+    F["Framing<br/>grpc · httpunary · 自建 · …"]
     K["Codec<br/>protobuf · json · …"]
   end
 
@@ -52,7 +52,7 @@ flowchart TB
 | 流式 vs unary | 同一条路径 | 常有两套 API 或语义分叉 |
 | 目标 | 证明多种 C/S 协议形状可组装、可测（含 gRPC 与 non-gRPC） | 生产可用、生态完整 |
 
-内置已验证组合（含 gRPC、wholebody 及 `example/resp`、`example/synth`）见 **[兼容性矩阵](docs/compatibility-matrix.md)**。
+内置已验证组合（含 gRPC、httpunary 及 `example/resp`、`example/synth`）见 **[兼容性矩阵](docs/compatibility-matrix.md)**。
 
 ---
 

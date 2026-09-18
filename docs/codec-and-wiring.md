@@ -18,7 +18,7 @@ type Codec interface {
 | `Unmarshal` | 不得 retain `b` 的子切片；要持久化须拷贝 |
 | 可选 `Named` | `CodecName() string`，用于与 `SessionSpec.CodecName` 对齐 |
 
-内置 `protobuf` / `json` 面向 `proto.Message`。wholebody 默认 JSON + protojson；grpc 默认 protobuf。类型与 codec 不匹配在**首次调用**失败（见 [codegen.md](codegen.md)）。
+内置 `protobuf` / `json` 面向 `proto.Message`。httpunary 默认 JSON + protojson；grpc 默认 protobuf。类型与 codec 不匹配在**首次调用**失败（见 [codegen.md](codegen.md)）。
 
 自定义消息模型（非 proto）须自带 `Codec` 并在 `ServiceCodec` 工厂中返回。
 

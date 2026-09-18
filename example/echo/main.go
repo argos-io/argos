@@ -18,7 +18,7 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	trG, frG, cdG := echov1.GRPCAxes()
-	trH, frH, cdH := echov1.WholebodyHTTP1Axes()
+	trH, frH, cdH := echov1.HTTPUnaryRPCAxes()
 
 	srv := server.New(
 		argos.WithService(echoService,

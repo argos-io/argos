@@ -1,4 +1,4 @@
-package wholebody
+package httpunary
 
 import (
 	"encoding/json"

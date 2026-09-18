@@ -1,4 +1,4 @@
-package wholebody
+package httpunary
 
 import (
 	"context"
@@ -15,11 +15,14 @@ import (
 	"github.com/argos-io/argos/transport"
 )
 
-// clientSession is a Concurrent wholebody client session over StreamConn.
 type clientSession struct {
 	conn  transport.StreamConn
 	cfg   framing.Config
 	codec string
+
+	router      Router
+	contentType func(codecName string) string
+	encodeError func(err error) (contentType string, body []byte)
 
 	mu       sync.Mutex
 	closed   bool
@@ -61,12 +64,11 @@ func (s *clientSession) Close() error {
 
 func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec framing.CallSpec) (framing.Call, error) {
 	if m.IsZero() {
-		return nil, status.Error(status.InvalidArgument, "framing/wholebody: zero Method")
+		return nil, status.Error(status.InvalidArgument, "framing/httpunary: zero Method")
 	}
 	if m.Shape() != descriptor.Unary {
 		return nil, status.Error(status.Unimplemented, fmt.Sprintf(
-			"framing/wholebody: shape %v unsupported (Framing=wholebody Shape=%v; only Unary)",
-			m.Shape(), m.Shape()))
+			"framing/httpunary: shape %v unsupported (only Unary)", m.Shape()))
 	}
 	select {
 	case <-ctx.Done():
@@ -77,7 +79,7 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 	s.mu.Lock()
 	if s.closed || !s.reusable {
 		s.mu.Unlock()
-		return nil, status.Error(status.Unavailable, "framing/wholebody: session not reusable")
+		return nil, status.Error(status.Unavailable, "framing/httpunary: session not reusable")
 	}
 	s.inFlight++
 	s.mu.Unlock()
@@ -87,7 +89,11 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 		outgoing = spec.Metadata.OutgoingHeaders()
 		_ = metadata.FreezeOutgoingHeaders(spec.Metadata)
 	}
-	preface := BuildRequestPreface(m, s.codec, outgoing)
+	preface, err := s.router.BuildPreface(m, s.codec, outgoing)
+	if err != nil {
+		s.endFlight()
+		return nil, err
+	}
 
 	car, err := s.conn.OpenStream(ctx, preface)
 	if err != nil {
@@ -101,41 +107,46 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 	if !ok {
 		_ = car.Abort()
 		s.endFlight()
-		return nil, fmt.Errorf("framing/wholebody: OpenStream Carrier is not ByteStreamCarrier")
+		return nil, fmt.Errorf("framing/httpunary: OpenStream Carrier is not ByteStreamCarrier")
 	}
 	if _, ok := car.(transport.SendCloser); !ok {
 		_ = car.Abort()
 		s.endFlight()
-		return nil, fmt.Errorf("framing/wholebody: OpenStream Carrier missing SendCloser")
+		return nil, fmt.Errorf("framing/httpunary: OpenStream Carrier missing SendCloser")
 	}
 	if _, ok := car.(transport.ResponseHeaderReader); !ok {
 		_ = car.Abort()
 		s.endFlight()
-		return nil, fmt.Errorf("framing/wholebody: OpenStream Carrier missing ResponseHeaderReader")
+		return nil, fmt.Errorf("framing/httpunary: OpenStream Carrier missing ResponseHeaderReader")
 	}
 
 	b, _ := budget.FromContext(ctx)
 	return &call{
-		client:    s,
-		carrier:   car,
-		body:      bs,
-		method:    m.FullName(),
-		md:        spec.Metadata,
-		cfg:       s.cfg,
-		maxMsg:    s.cfg.MaxMessageSize,
-		codec:     s.codec,
-		initiator: true,
-		localCar:  true,
-		budget:    b,
+		client:      s,
+		carrier:     car,
+		body:        bs,
+		method:      m.FullName(),
+		md:          spec.Metadata,
+		cfg:         s.cfg,
+		maxMsg:      s.cfg.MaxMessageSize,
+		codec:       s.codec,
+		contentType: s.contentType,
+		encodeError: s.encodeError,
+		initiator:   true,
+		localCar:    true,
+		budget:      b,
 	}, nil
 }
 
-// serverSession wraps one HTTP request CarrierConn. AcceptCall succeeds once.
 type serverSession struct {
 	conn    transport.CarrierConn
 	carrier transport.Carrier
 	cfg     framing.Config
 	codec   string
+
+	router      Router
+	contentType func(codecName string) string
+	encodeError func(err error) (contentType string, body []byte)
 
 	mu       sync.Mutex
 	closed   bool
@@ -174,38 +185,41 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 
 	rh, ok := s.carrier.(transport.RequestHeaderReader)
 	if !ok {
-		return nil, fmt.Errorf("framing/wholebody: server Carrier missing RequestHeaderReader")
+		return nil, fmt.Errorf("framing/httpunary: server Carrier missing RequestHeaderReader")
 	}
 	bs, ok := s.carrier.(transport.ByteStreamCarrier)
 	if !ok {
-		return nil, fmt.Errorf("framing/wholebody: server Carrier is not ByteStreamCarrier")
+		return nil, fmt.Errorf("framing/httpunary: server Carrier is not ByteStreamCarrier")
 	}
 	if _, ok := s.carrier.(transport.UnaryResponseWriter); !ok {
-		return nil, fmt.Errorf("framing/wholebody: server Carrier missing UnaryResponseWriter")
+		return nil, fmt.Errorf("framing/httpunary: server Carrier missing UnaryResponseWriter")
 	}
 
 	inMD := DecodeMetadata(rh.RequestHeaders())
 
 	newServerCall := func(method string) *serverCall {
 		return &serverCall{call: &call{
-			server:    s,
-			carrier:   s.carrier,
-			body:      bs,
-			method:    method,
-			md:        spec.Metadata,
-			cfg:       s.cfg,
-			maxMsg:    s.cfg.MaxMessageSize,
-			codec:     s.codec,
-			initiator: false,
+			server:      s,
+			carrier:     s.carrier,
+			body:        bs,
+			method:      method,
+			md:          spec.Metadata,
+			cfg:         s.cfg,
+			maxMsg:      s.cfg.MaxMessageSize,
+			codec:       s.codec,
+			contentType: s.contentType,
+			encodeError: s.encodeError,
+			initiator:   false,
 		}}
 	}
 
-	svc, meth, err := ParseMethodPath(rh.RequestTarget())
+	fullName, err := s.router.ResolveAccept(rh.RequestMethod(), rh.RequestTarget(), inMD)
 	if err != nil {
-		return newServerCall(""), fmt.Errorf("%w: %w", framing.ErrCallRejected,
-			status.Error(status.InvalidArgument, err.Error()))
+		if fullName != "" {
+			return newServerCall(fullName), err
+		}
+		return newServerCall(""), err
 	}
-	fullName := svc + "." + meth
 	if err := checkInboundMeta(s.cfg, inMD); err != nil {
 		return newServerCall(fullName), fmt.Errorf("%w: %w", framing.ErrCallRejected, err)
 	}

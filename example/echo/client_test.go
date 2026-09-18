@@ -17,7 +17,7 @@ func TestClientEchoTransports(t *testing.T) {
 		axes func() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc)
 	}{
 		{name: "grpc_http2", axes: GRPCAxes},
-		{name: "wholebody_http1", axes: WholebodyHTTP1Axes},
+		{name: "httpunary_rpc_http1", axes: HTTPUnaryRPCAxes},
 	}
 
 	for _, tc := range cases {

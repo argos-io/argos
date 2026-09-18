@@ -11,7 +11,7 @@ import (
 )
 
 // startEchoServer responds to each request with its body, one exchange at a
-// time; wholebody×http1 reuses one endpoint handle for many calls, so the
+// time; httpunary×http1 reuses one endpoint handle for many calls, so the
 // carrier map must not grow with them.
 func startEchoServer(t *testing.T) string {
 	t.Helper()

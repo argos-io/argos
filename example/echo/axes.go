@@ -7,7 +7,7 @@ import (
 	"github.com/argos-io/argos/codec/protobuf"
 	"github.com/argos-io/argos/framing"
 	grpcframing "github.com/argos-io/argos/framing/grpc"
-	"github.com/argos-io/argos/framing/wholebody"
+	"github.com/argos-io/argos/framing/httpunary"
 	"github.com/argos-io/argos/transport"
 	argoshttp1 "github.com/argos-io/argos/transport/http1"
 	argoshttp2 "github.com/argos-io/argos/transport/http2"
@@ -21,9 +21,10 @@ func GRPCAxes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
 		argos.CodecFunc(func() (codec.Codec, error) { return protobuf.New(), nil })
 }
 
-func WholebodyHTTP1Axes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
+// HTTPUnaryRPCAxes is http1 + RPC-path httpunary + json.
+func HTTPUnaryRPCAxes() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc) {
 	return argos.TransportFunc(func() (transport.Transport, error) { return argoshttp1.New(), nil }),
-		argos.FramingFunc(func() (framing.Framing, error) { return wholebody.New(), nil }),
+		argos.FramingFunc(func() (framing.Framing, error) { return httpunary.NewRPC(), nil }),
 		argos.CodecFunc(func() (codec.Codec, error) { return jsoncodec.New(), nil })
 }
 

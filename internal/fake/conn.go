@@ -583,7 +583,15 @@ func (h *httpCarrier) Write(p []byte) (int, error) {
 
 func (h *httpCarrier) CloseSend() error { return h.pw.Close() }
 
-func (h *httpCarrier) RequestTarget() string             { return h.preface.RequestTarget }
+func (h *httpCarrier) RequestTarget() string { return h.preface.RequestTarget }
+
+func (h *httpCarrier) RequestMethod() string {
+	if h.preface.Method == "" {
+		return "POST"
+	}
+	return h.preface.Method
+}
+
 func (h *httpCarrier) RequestHeaders() transport.Headers { return h.preface.Headers }
 
 func (h *httpCarrier) ResponseStatus() (int, error) {

@@ -70,7 +70,7 @@ const (
 	// time (e.g. example/resp × tcp).
 	Sequential
 	// Concurrent: one connection carries many concurrent calls
-	// (e.g. grpc × http2, wholebody × http1).
+	// (e.g. grpc × http2, httpunary × http1).
 	Concurrent
 )
 
@@ -89,7 +89,7 @@ type Framing interface {
 	Reuse() ReuseModel
 	// NewClientSession completes connection-level handshake and auth (MySQL
 	// greeting+auth, Redis HELLO/AUTH, protocol-initiated TLS upgrade). For
-	// protocols without handshake (grpc, wholebody) it only asserts
+	// protocols without handshake (grpc, httpunary) it only asserts
 	// narrow interfaces and performs no I/O.
 	// On success the Session owns Conn; on failure the composition layer closes Conn.
 	NewClientSession(ctx context.Context, c transport.Conn, spec SessionSpec) (ClientSession, error)
@@ -196,7 +196,7 @@ type Call interface {
 	// produce context.
 	Deadline() (time.Time, bool)
 	// SendHeaders is responder-only; it submits current initial metadata
-	// (empty headers allowed). wholebody/http1 and the
+	// (empty headers allowed). httpunary/http1 and the
 	// initiator return a stable status.Unimplemented error.
 	SendHeaders() error
 	// Recv returns payload and a non-nil idempotent release on success;

@@ -36,12 +36,12 @@ var section9Checklist = []section9Evidence{
 	{id: "§9-2a", title: "§3 / §3.1 dependency table", pkg: ".", test: "TestInvariantDependencyTable"},
 	{id: "§9-2b", title: "resp+tcp transitive no gRPC", pkg: ".", test: "TestInvariantTransitiveRespTCPNoGRPC"},
 	{id: "§9-2c", title: "transport/udp transitive no genproto", pkg: ".", test: "TestInvariantTransitiveTransportUDPNoGenproto"},
-	{id: "§9-2d", title: "wholebody+http1 transitive no gRPC", pkg: ".", test: "TestInvariantTransitiveWholebodyHTTP1NoGRPC"},
+	{id: "§9-2d", title: "httpunary+http1 transitive no gRPC", pkg: ".", test: "TestInvariantTransitiveHTTPUnaryHTTP1NoGRPC"},
 
 	// §9-3: Conn/Carrier matrix + shape rejects (thin combo gate).
 	{id: "§9-3a", title: "Conn/Carrier interface matrix (5 transports)", pkg: "./transport", test: "TestConnCarrierMatrix"},
 	{id: "§9-3b", title: "gRPC AcceptCall reject returns finishable call", pkg: "./framing/grpc", test: "TestAcceptCallRejectReturnsFinishableCall"},
-	{id: "§9-3c", title: "wholebody rejects non-unary before handler", pkg: "./framing/wholebody", test: "TestAcceptRejectsNonUnary"},
+	{id: "§9-3c", title: "httpunary rejects non-unary before handler", pkg: "./framing/httpunary", test: "TestAcceptRejectsNonUnary"},
 	{id: "§9-3d", title: "narrow-interface config error path", pkg: "./client", test: "TestNarrowInterfaceAssertStaysConfigError"},
 	{id: "§9-3e", title: "server has no concrete Framing type-switch", pkg: "./server", test: "TestNoConcreteFramingTypeSwitch"},
 
@@ -55,7 +55,7 @@ var section9Checklist = []section9Evidence{
 	{id: "§9-5a", title: "client Close rejects Open", pkg: "./client", test: "TestCloseIdempotentAndRejectsOpen"},
 	{id: "§9-5b", title: "client Close no goroutine leak", pkg: "./client", test: "TestCloseNoGoroutineLeak"},
 	{id: "§9-5c", title: "server Shutdown drains in-flight", pkg: "./server", test: "TestShutdownDrainsInFlightCall"},
-	{id: "§9-5d", title: "wholebody early rejection keeps response readable", pkg: "./framing/wholebody", test: "TestEarlyRejectionKeepsResponseReadable"},
+	{id: "§9-5d", title: "httpunary early rejection keeps response readable", pkg: "./framing/httpunary", test: "TestEarlyRejectionKeepsResponseReadable"},
 	{id: "§9-5e", title: "resp SendHeaders unimplemented next call works", pkg: "./example/resp", test: "TestSendHeadersUnimplementedNextCallWorks"},
 
 	// §9-6: gRPC interop formal gate.
@@ -78,8 +78,8 @@ var section9Checklist = []section9Evidence{
 	{id: "§9-7e", title: "metadata concurrent race", pkg: "./metadata", test: "TestConcurrentAddAndGettersRace"},
 
 	// §9-8: HTTP/1 commit / SendHeaders unimplemented.
-	{id: "§9-8a", title: "Send then Finish commits error not 200", pkg: "./framing/wholebody", test: "TestFinishAfterSendCommitsErrorNot200"},
-	{id: "§9-8b", title: "SendHeaders Unimplemented no HTTP 200", pkg: "./framing/wholebody", test: "TestSendHeadersUnimplementedNoCommit"},
+	{id: "§9-8a", title: "Send then Finish commits error not 200", pkg: "./framing/httpunary", test: "TestFinishAfterSendCommitsErrorNot200"},
+	{id: "§9-8b", title: "SendHeaders Unimplemented no HTTP 200", pkg: "./framing/httpunary", test: "TestSendHeadersUnimplementedNoCommit"},
 	{id: "§9-8c", title: "http1 WriteResponse after buffered send can be error", pkg: "./transport/http1", test: "TestWriteResponseAfterBufferedSendCanBeError"},
 	{id: "§9-8d", title: "UDP SendHeaders unsupported (datagram)", pkg: "./metadata", test: "TestSendHeadersReturnsUnimplementedNoFreeze"},
 
@@ -101,7 +101,7 @@ var section9Checklist = []section9Evidence{
 	{id: "§9-11e", title: "inbound conn idle closes Accept", pkg: "./server", test: "TestInboundConnIdleClosesAccept"},
 
 	// §9-12: six-shape assemblability gate.
-	{id: "§9-12a", title: "echo shapes (grpc/wholebody)", pkg: "./example/echo", test: "TestClientEchoTransports"},
+	{id: "§9-12a", title: "echo shapes (grpc/httpunary)", pkg: "./example/echo", test: "TestClientEchoTransports"},
 	{id: "§9-12b", title: "resp×tcp SET/GET same connection", pkg: "./example/resp", test: "TestSetGetSameConnection"},
 	{id: "§9-12c", title: "synth×tcp greeting before call", pkg: "./example/synth", test: "TestGreetingReceivedBeforeCall"},
 	{id: "§9-12d", title: "composition layer no concrete protocol names", pkg: ".", test: "TestInvariantCompositionNoConcreteProtocolNames"},

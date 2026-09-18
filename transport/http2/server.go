@@ -50,6 +50,7 @@ type serverCarrier struct {
 
 	reqHeaders transport.Headers
 	target     string
+	method     string
 }
 
 func newServerCarrier(w http.ResponseWriter, r *http.Request) *serverCarrier {
@@ -62,11 +63,15 @@ func newServerCarrier(w http.ResponseWriter, r *http.Request) *serverCarrier {
 		r:          r,
 		reqHeaders: headersFromHTTP(r.Header),
 		target:     target,
+		method:     r.Method,
 	}
 }
 
 // RequestTarget returns the HTTP request target (:path / RequestURI).
 func (c *serverCarrier) RequestTarget() string { return c.target }
+
+// RequestMethod returns the HTTP request method.
+func (c *serverCarrier) RequestMethod() string { return c.method }
 
 // RequestHeaders returns opaque inbound request headers.
 func (c *serverCarrier) RequestHeaders() transport.Headers { return c.reqHeaders }

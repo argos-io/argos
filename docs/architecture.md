@@ -8,13 +8,13 @@ Argos 是 **C/S 协议组合运行时**：分层组装 **建连（Transport）�
 
 - 连接可复用，工作单元是 **一次或一段交换**（unary、client/server/bidi 流）。
 - 交换在 API 上可对应 **method / 命令 / HTTP :path** 等（由 Framing 映射到 `descriptor.Method` 或 synthetic method）。
-- 典型：**gRPC**、**wholebody**、**类 Redis/Memcached 命令往返**（`example/resp`）。
+- 典型：**gRPC**、**httpunary**、**类 Redis/Memcached 命令往返**（`example/resp`）。
 
 **条件覆盖**——映射存在且分层仍诚实，但状态与 wire 不完全等于「一次 `Open` = 一次 Call」：
 
 - **连接级状态**（事务、SUBSCRIBE 独占、prepared stmt）：落在 `Session`（`Reusable()`、exclusive）或 **长期 Call**；组合层 **无** DB Session 式亲和 API（见 [usage.md](usage.md) 调用收尾）。
 - **同连接 pipeline（无多路复用标号）**：须在 **Framing 内队列**，不应暴露为多个并发 Call 抢同一 Sequential `Carrier`。
-- **以无消息边界的字节管道为主的 payload**（大 HTTP body、COPY/LOAD）：Transport 的 `ByteStreamCarrier` 可流式 I/O；**现成 `Call` 以 `[]byte` 消息为主**，wholebody/grpc 内置路径不主张为第一公民；需扩展 Framing 语义或 Session 内状态机。
+- **以无消息边界的字节管道为主的 payload**（大 HTTP body、COPY/LOAD）：Transport 的 `ByteStreamCarrier` 可流式 I/O；**现成 `Call` 以 `[]byte` 消息为主**，httpunary/grpc 内置路径不主张为第一公民；需扩展 Framing 语义或 Session 内状态机。
 
 **非目标**（与「能不能映射」无关，是产品边界）：见下节。
 
@@ -96,7 +96,7 @@ const (
 | `transport/{tcp,ws,udp,http1,http2}` | `transport`、`status` | |
 | `framing` | `transport`、`descriptor`、`metadata`、`budget`、`status` | 不 import `compressor` |
 | `framing/grpc` | 同 `framing` + `compressor` + `internal/httpstatus` + genproto | 唯一可 import genproto |
-| `framing/wholebody` | 同 `framing` + `internal/httpstatus` | |
+| `framing/httpunary` | 同 `framing` + `internal/httpstatus` | |
 | `stream` / `filter` / `resolver` | 见表意 | |
 | `argos`（根） | `transport`、`framing`、`codec`、`filter` | Config / ServiceConfig；不 import 具体 transport 实现 |
 | `client` / `server` | 除 `internal/*` 外上述；client 另加 resolver、sessionpool | 唯一组合层 |

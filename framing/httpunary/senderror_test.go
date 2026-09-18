@@ -1,4 +1,4 @@
-package wholebody_test
+package httpunary_test
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
-	"github.com/argos-io/argos/framing/wholebody"
+	"github.com/argos-io/argos/framing/httpunary"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/stream"
@@ -49,7 +49,7 @@ func (bytesCodec) Unmarshal(b []byte, v any) error {
 
 func (bytesCodec) CodecName() string { return "bytes" }
 
-// TestEarlyRejectionKeepsResponseReadable is the wholebody payoff end to end on
+// TestEarlyRejectionKeepsResponseReadable is the httpunary payoff end to end on
 // the real HTTP/1.1 transport: the server rejects the request without reading
 // its body (the classic Unauthenticated-on-upload case), so the initiator's
 // body write dies with a transport write error while the 401 response is
@@ -60,7 +60,7 @@ func TestEarlyRejectionKeepsResponseReadable(t *testing.T) {
 	t.Parallel()
 
 	rejection := status.Error(status.Unauthenticated, "token expired")
-	body := wholebody.EncodeErrorBody(rejection)
+	body := httpunary.EncodeErrorBody(rejection)
 
 	// The handler answers immediately and never reads the request body, which
 	// is what makes the client's body write fail: net/http stops reading the
@@ -82,7 +82,7 @@ func TestEarlyRejectionKeepsResponseReadable(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	method := descriptor.MustMethod("svc.Senderror", descriptor.Unary)
-	cs, err := wholebody.New().NewClientSession(ctx, conn, framing.SessionSpec{CodecName: "bytes"})
+	cs, err := httpunary.NewRPC().NewClientSession(ctx, conn, framing.SessionSpec{CodecName: "bytes"})
 	if err != nil {
 		t.Fatalf("NewClientSession: %v", err)
 	}

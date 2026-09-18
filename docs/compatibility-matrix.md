@@ -7,11 +7,11 @@
 | Transport | Framing | Codec | `Reuse()` | 证明点 |
 |-----------|---------|-------|-----------|--------|
 | http2 | grpc | protobuf | Concurrent | 多路复用、H2 头/trailers、gRPC 压缩 |
-| http1 | wholebody | json | Concurrent | 整 body 一次提交、仅 unary |
+| http1 | httpunary | json | Concurrent | 整 body 一次提交、仅 unary |
 | tcp | resp（example） | — | Sequential | 连接级 HELLO/AUTH、无 metadata |
 | tcp | synth（example） | — | Sequential | 服务端先发 greeting 等合成行为 |
 
-echo 多传输入口：`example/echo/axes.go`（grpc × http2、wholebody × http1）。
+echo 多传输入口：`example/echo/axes.go`（grpc × http2、httpunary × http1）。
 
 ## Conn × Framing 角色
 
@@ -23,7 +23,7 @@ echo 多传输入口：`example/echo/axes.go`（grpc × http2、wholebody × htt
 
 ## Carrier 能力 × 用途
 
-| 能力 | grpc | wholebody | example/resp (tcp) |
+| 能力 | grpc | httpunary | example/resp (tcp) |
 |------|------|-----------|---------------------|
 | `ByteStreamCarrier` | ✓ | ✓ | ✓ |
 | `MessageCarrier` | — | — | — |
@@ -40,12 +40,12 @@ echo 多传输入口：`example/echo/axes.go`（grpc × http2、wholebody × htt
 | Framing | Unary | 客户端流 | 服务端流 | 双向流 |
 |---------|-------|----------|----------|--------|
 | grpc | ✓ | ✓ | ✓ | ✓ |
-| wholebody | ✓ | ✗（Accept 拒绝） | ✗ | ✗ |
+| httpunary | ✓ | ✗（Accept 拒绝） | ✗ | ✗ |
 | example/resp | ✓ | ✗ | ✓（SUBSCRIBE 等） | ✗ |
 
 ## 不打算支持的组合
 
-- 任意 Framing 配不匹配的 Conn（如 wholebody 配无 `StreamConn`/`UnaryResponseWriter` 路径）→ 应在 `New*Session` 失败。
+- 任意 Framing 配不匹配的 Conn（如 httpunary 配无 `StreamConn`/`UnaryResponseWriter` 路径）→ 应在 `New*Session` 失败。
 - udp 上多路复用、非 gRPC 的通用 H2 应用协议 → 见 README 非目标。
 
 新增组合时：在本表加一行，并补充 `New*Session` 断言测试或 echo 集成用例。

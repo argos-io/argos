@@ -295,12 +295,12 @@ func TestInvariantTransitiveTransportUDPNoGenproto(t *testing.T) {
 	assertTransitiveNoGRPC(t, "transport/udp", "./transport/udp")
 }
 
-// TestInvariantTransitiveWholebodyHTTP1NoGRPC is Task 6.3 / §9-2:
-// wholebody + http1 must not transitively depend on gRPC framing, binding,
+// TestInvariantTransitiveHTTPUnaryHTTP1NoGRPC is Task 6.3 / §9-2:
+// httpunary + http1 must not transitively depend on gRPC framing, binding,
 // compressor, or genproto (same neutrality gate as resp+tcp).
-func TestInvariantTransitiveWholebodyHTTP1NoGRPC(t *testing.T) {
+func TestInvariantTransitiveHTTPUnaryHTTP1NoGRPC(t *testing.T) {
 	t.Parallel()
-	assertTransitiveNoGRPC(t, "wholebody+http1", "./framing/wholebody", "./transport/http1")
+	assertTransitiveNoGRPC(t, "httpunary+http1", "./framing/httpunary", "./transport/http1")
 }
 
 func assertTransitiveNoGRPC(t *testing.T, label string, patterns ...string) {
@@ -506,7 +506,7 @@ func TestInvariantCompositionNoConcreteProtocolNames(t *testing.T) {
 	// Word-boundary tokens: avoid matching "Response" for "resp", etc.
 	forbidden := []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\bgrpc\b`),
-		regexp.MustCompile(`(?i)\bwholebody\b`),
+		regexp.MustCompile(`(?i)\bhttpunary\b`),
 		regexp.MustCompile(`(?i)\bresp\b`),
 		regexp.MustCompile(`(?i)\bsynth\b`),
 		regexp.MustCompile(`(?i)\bhttp2\b`),

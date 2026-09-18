@@ -50,21 +50,31 @@ func (c *streamConn) OpenStream(ctx context.Context, p transport.RequestPreface)
 		return nil, err
 	}
 
-	pr, pw := io.Pipe()
+	method := transport.PrefaceHTTPMethod(p)
 	reqCtx, cancel := context.WithCancel(ctx)
 	car := &clientCarrier{
 		conn:   c,
-		pw:     pw,
-		pr:     pr,
 		cancel: cancel,
 		ready:  make(chan struct{}),
 	}
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, u, pr)
+	var reqBody io.Reader = http.NoBody
+	if method != http.MethodGet && method != http.MethodHead {
+		pr, pw := io.Pipe()
+		car.pw = pw
+		car.pr = pr
+		reqBody = pr
+	}
+
+	req, err := http.NewRequestWithContext(reqCtx, method, u, reqBody)
 	if err != nil {
 		cancel()
-		_ = pw.Close()
-		_ = pr.Close()
+		if car.pw != nil {
+			_ = car.pw.Close()
+		}
+		if car.pr != nil {
+			_ = car.pr.Close()
+		}
 		return nil, err
 	}
 	applyHeaders(req.Header, p.Headers)
@@ -73,8 +83,12 @@ func (c *streamConn) OpenStream(ctx context.Context, p transport.RequestPreface)
 	if c.closed.Load() {
 		c.mu.Unlock()
 		cancel()
-		_ = pw.Close()
-		_ = pr.Close()
+		if car.pw != nil {
+			_ = car.pw.Close()
+		}
+		if car.pr != nil {
+			_ = car.pr.Close()
+		}
 		return nil, errAborted
 	}
 	c.carriers[car] = struct{}{}
@@ -84,7 +98,9 @@ func (c *streamConn) OpenStream(ctx context.Context, p transport.RequestPreface)
 	go func() {
 		resp, err := c.client.Do(req)
 		if err != nil {
-			_ = pr.CloseWithError(err)
+			if car.pr != nil {
+				_ = car.pr.CloseWithError(err)
+			}
 			if resp != nil && resp.Body != nil {
 				_ = resp.Body.Close()
 			}
@@ -216,6 +232,9 @@ func (c *clientCarrier) waitReady() error {
 
 // Write writes to the request body. Safe before response headers arrive.
 func (c *clientCarrier) Write(p []byte) (int, error) {
+	if c.pw == nil {
+		return 0, c.sendErr(errNoRequestBody)
+	}
 	n, err := c.pw.Write(p)
 	return n, c.sendErr(err)
 }
@@ -260,6 +279,9 @@ func (c *clientCarrier) Read(p []byte) (int, error) {
 // CloseSend ends the request body (HTTP/2 END_STREAM on the request side).
 func (c *clientCarrier) CloseSend() error {
 	if c.sendClosed.Swap(true) {
+		return nil
+	}
+	if c.pw == nil {
 		return nil
 	}
 	return c.sendErr(c.pw.Close())
@@ -315,8 +337,12 @@ func (c *clientCarrier) Abort() error {
 	c.mu.Unlock()
 
 	c.cancel()
-	_ = c.pw.CloseWithError(errAborted)
-	_ = c.pr.CloseWithError(errAborted)
+	if c.pw != nil {
+		_ = c.pw.CloseWithError(errAborted)
+	}
+	if c.pr != nil {
+		_ = c.pr.CloseWithError(errAborted)
+	}
 	if resp != nil && resp.Body != nil {
 		_ = resp.Body.Close()
 	}

@@ -37,7 +37,7 @@ func (c *serverConn) Close() error {
 // serverCarrier is the server-side byte-stream + UnaryResponseWriter carrier.
 //
 // Write buffers response body bytes without calling WriteHeader — that is the
-// whole point of UnaryResponseWriter: framing/wholebody can "Send" into the
+// whole point of UnaryResponseWriter: framing/httpunary can "Send" into the
 // buffer, then Finish via WriteResponse with either success or error status.
 type serverCarrier struct {
 	w http.ResponseWriter
@@ -55,6 +55,7 @@ type serverCarrier struct {
 
 	reqHeaders transport.Headers
 	target     string
+	method     string
 }
 
 func newServerCarrier(w http.ResponseWriter, r *http.Request) *serverCarrier {
@@ -67,11 +68,15 @@ func newServerCarrier(w http.ResponseWriter, r *http.Request) *serverCarrier {
 		r:          r,
 		reqHeaders: headersFromHTTP(r.Header),
 		target:     target,
+		method:     r.Method,
 	}
 }
 
 // RequestTarget returns the HTTP request target (:path / RequestURI).
 func (c *serverCarrier) RequestTarget() string { return c.target }
+
+// RequestMethod returns the HTTP request method.
+func (c *serverCarrier) RequestMethod() string { return c.method }
 
 // RequestHeaders returns opaque inbound request headers.
 func (c *serverCarrier) RequestHeaders() transport.Headers { return c.reqHeaders }
@@ -94,7 +99,7 @@ func (c *serverCarrier) Write(p []byte) (int, error) {
 }
 
 // WriteResponse commits status, headers, and body in one shot. The body
-// argument is the final response body (framing/wholebody passes it at Finish);
+// argument is the final response body (framing/httpunary passes it at Finish);
 // any prior Write buffer is discarded so a handler "Send" then error path can
 // replace a buffered success body with an error body.
 //

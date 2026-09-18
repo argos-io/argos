@@ -26,6 +26,7 @@ type Headers []Header
 // preface is submitted with OpenStream.
 type RequestPreface struct {
 	RequestTarget string  // HTTP :path; empty for other transports
+	Method        string  // HTTP method; empty means POST on OpenStream
 	Headers       Headers // already encoded by Framing
 }
 
@@ -201,6 +202,7 @@ type SendCloser interface {
 type RequestHeaderReader interface {
 	Carrier
 	RequestTarget() string
+	RequestMethod() string
 	RequestHeaders() Headers
 }
 

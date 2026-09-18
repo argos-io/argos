@@ -29,12 +29,12 @@ lint:
 accept:
 	go test . -run 'Invariant|Accept|Section9' -count=1
 
-# example/echo multi-transport end-to-end (grpc + wholebody).
+# example/echo multi-transport end-to-end (grpc + httpunary).
 test-integration:
 	go test ./example/echo/ -count=1 -timeout 180s
 
 # Transitive dependency gate (§3.1-15 / §9-2): resp+tcp, transport/udp, and
-# wholebody+http1 must not pull gRPC/genproto.
+# httpunary+http1 must not pull gRPC/genproto.
 test-deps:
 	go test . -run Transitive -count=1
 

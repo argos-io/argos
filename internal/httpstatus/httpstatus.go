@@ -1,7 +1,7 @@
 // Package httpstatus provides the single bidirectional map between HTTP
 // status codes and status.Code.
 //
-// Outbound (ToHTTP) is used by framing/wholebody. Inbound (FromHTTP) is the
+// Outbound (ToHTTP) is used by framing/httpunary. Inbound (FromHTTP) is the
 // fallback when framing/grpc receives an HTTP response without grpc-status.
 //
 // ToHTTP follows google.rpc.Code HTTP mappings and grpc-gateway's
@@ -69,7 +69,7 @@ func ToHTTP(c status.Code) int {
 
 // FromHTTP returns the status.Code corresponding to an HTTP status.
 //
-// This is a semantic reverse of ToHTTP for wholebody / grpc HTTP fallback,
+// This is a semantic reverse of ToHTTP for httpunary / grpc HTTP fallback,
 // not grpc-go's transport HTTPStatusConvTab (which e.g. maps 404→Unimplemented
 // for HTTP/2 framing failures). Where multiple Codes share an HTTP status,
 // the reverse prefers:

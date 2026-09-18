@@ -1,9 +1,8 @@
-package wholebody
+package httpunary
 
 import (
 	"strings"
 
-	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/transport"
 )
@@ -61,16 +60,4 @@ func DecodeMetadata(hs transport.Headers) metadata.Metadata {
 		out[key] = append(out[key], h.Value)
 	}
 	return out
-}
-
-// BuildRequestPreface builds OpenStream preface: path, content-type, metadata.
-func BuildRequestPreface(m descriptor.Method, codecName string, outgoing metadata.Metadata) transport.RequestPreface {
-	hs := transport.Headers{
-		{Name: "content-type", Value: ContentType(codecName)},
-	}
-	hs = append(hs, EncodeMetadata(outgoing)...)
-	return transport.RequestPreface{
-		RequestTarget: MethodPath(m),
-		Headers:       hs,
-	}
 }

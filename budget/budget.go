@@ -5,7 +5,7 @@
 // status.ErrCallsExhausted. Successful acquires return an idempotent release.
 //
 // Framing implementations that read the Budget from the call context (e.g.
-// grpc, wholebody) charge payload bytes; other
+// grpc, httpunary) charge payload bytes; other
 // Framing stacks may adopt it later. The client still reserves perCall bytes
 // at admission for every stack.
 //
