@@ -76,9 +76,7 @@ func TestNewAcceptsCodecWithoutName(t *testing.T) {
 
 // The Client reads an axis' limits but never writes to them: one axis may be
 // shared, and a bind-time write would silently overwrite the limits every other
-// user already depends on. Options naming different numbers is not an error —
-// its values size the Client's own per-call reservation — and the axis is left
-// exactly as it was built.
+// user already depends on.
 func TestNewLeavesAxisLimitsAlone(t *testing.T) {
 	t.Parallel()
 	const limit = int64(1 << 20)
@@ -91,10 +89,7 @@ func TestNewLeavesAxisLimitsAlone(t *testing.T) {
 	cli, err := newClientLoopback(t, ax,
 		argos.WithServiceName(testService),
 		argos.WithTarget(testTarget),
-		// Deliberately not the axis' numbers: nothing may reach the axis.
-		argos.WithMaxMessageSize(2*limit),
-		argos.WithMaxFrameSize(2*limit),
-		argos.WithReadAheadMessages(2),
+		argos.WithMaxConcurrentCalls(2),
 		argos.WithCodec(teststack.CodecName(t, namedCodec{name: "json"})),
 	)
 	if err != nil {

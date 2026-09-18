@@ -44,7 +44,6 @@ type hasAddr interface {
 func baseOptions() *argos.Options {
 	return &argos.Options{
 		MaxConcurrentCalls: 16,
-		MaxBufferedBytes:   16 * 16 * 1024 * 1024,
 		HandshakeTimeout:   5 * time.Second,
 		ListenAddress:      testListenAddr,
 	}
@@ -82,8 +81,10 @@ func startRESP(t *testing.T, register func(*server.Server, *Store) error, frOpts
 	// A bare axis is what most of these tests want: the pool limits live on the
 	// axis alone, so there is nothing for Options to agree with. A test that
 	// cares about pool behaviour names the numbers in frOpts.
-	srvAxis := New(frOpts...)
-	cliAxis := New(frOpts...)
+	// Default pool keeps no idle sessions (MaxIdleSessions=0); reuse tests need idle slots.
+	poolOpt := WithPool(0, 8, 50*time.Second, 30*time.Minute)
+	srvAxis := New(poolOpt)
+	cliAxis := New(append([]Option{poolOpt}, frOpts...)...)
 	srvTr := teststack.TransportName(t, srvAxis)
 	cliTr := teststack.TransportName(t, cliAxis)
 

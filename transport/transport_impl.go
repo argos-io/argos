@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/argos-io/argos/budget"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/metadata"
 )
@@ -209,14 +208,6 @@ type ServerCall interface {
 	// business dispatch and no I/O; it only checks Shape and wire capability.
 	// It does not check the method name — that matches by construction.
 	Accept(m descriptor.Method) error
-}
-
-// BudgetSetter is implemented by Calls that honor per-call byte budgets. The
-// composition layer installs the budget after admission (server) or through the
-// OpenCall ctx (client).
-type BudgetSetter interface {
-	Call
-	SetBudget(b budget.Budget)
 }
 
 // ErrCallRejected is AcceptCall-only: this call is illegal but the connection

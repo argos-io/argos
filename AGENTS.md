@@ -19,7 +19,7 @@
 ## 目录
 
 ```
-descriptor/  status/  metadata/  budget/
+descriptor/  status/  metadata/
 transport/  transport_impl.go  transport/{tcp,ws,udp,http1,http2,grpc,httpunary}/
 codec/  codec/{protobuf,json}/
 compressor/  compressor/{gzip,grpccodec}/
@@ -57,7 +57,7 @@ Makefile · .github/workflows/ci.yml · invariants_test.go
 2. **axis 生命周期归构造方**：`transport.Transport` 无 `Close`/`Shutdown`——生命周期就是构造它的 ctx，`Serve` 随该 ctx 结束；要显式释放的实现自带 `Close`（如 `transport/grpc`）。组合层对共享实例**既不 `Close` 也不改配置**：limits / 池 / codec 名只在构造期用 `WithLimits` / `WithPool` / `WithCodecName` 定死——那些数字只有构造处一个来源，`argos.Options` 不带它们，没有第二份可对照的拷贝；装配期只核对 codec 名（`internal/transportbind.CheckCodecName`），不一致即报错；谁构造谁关闭。组合层自身亦无可释放资源：`client.Client` 无 `Close`；`server.Server` 靠 `Run(ctx)` 的 ctx 停止，`Shutdown(ctx)` 只是取消该 ctx 并等 `Run` 返回，不碰 transport，也不打断在途连接。**停止 = 不再接受新调用**，不等于在途调用已结束：`Run` 只等监听面的 `Serve` 返回，处理器跑在 transport 自己的协程上，server 从不 join 它们；要等连接排空，由轴的所有者调轴自己的 `Shutdown(ctx)`。
 3. **ServerConn.Handshake**：握手超时与错误上报在 server 组合层；Transport 内只做协议 I/O。
 4. **`AcceptCall`**：`ErrCallRejected` 须返回可 `Finish` 的 `ServerCall`；连接级错误才结束 accept 循环。
-5. **transport 根包** 可 import `descriptor` / `metadata` / `budget`（接口签名需要），**不** import `codec`；完整线栈实现（`transport/grpc`、`transport/httpunary`）可 import `internal/session`、`internal/sessionpool`（池在 axis 内），字节管道（`tcp`/`ws`/`udp`/`http1`/`http2`）不得 import `descriptor` / `metadata` / `budget`。
+5. **transport 根包** 可 import `descriptor` / `metadata`（接口签名需要），**不** import `codec`；完整线栈实现（`transport/grpc`、`transport/httpunary`）可 import `internal/session`、`internal/sessionpool`（池在 axis 内），字节管道（`tcp`/`ws`/`udp`/`http1`/`http2`）不得 import `descriptor` / `metadata`。
 6. 行为变更配测试；提交前 `make verify`。
 
 `docs/` 只放**接入与契约**说明，不写计划草稿或未决决策（仍直接改 README + 代码）。

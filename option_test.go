@@ -79,32 +79,31 @@ func TestWithServiceMergesIntoExistingEntry(t *testing.T) {
 
 func TestWithClientOptionsOrderIndependent(t *testing.T) {
 	t.Parallel()
-	base := &Options{MaxFrameSize: 2 * miB, MaxConcurrentCalls: 7}
-	const msgSize = 1 * miB
+	base := &Options{MaxConcurrentCalls: 7, MaxHeaderBytes: 2 * miB}
+	const maxCalls = 9
 
-	first, err := ClientOptions(WithClientOptions(base), WithMaxMessageSize(msgSize))
+	first, err := ClientOptions(WithClientOptions(base), WithMaxConcurrentCalls(maxCalls))
 	if err != nil {
 		t.Fatal(err)
 	}
-	last, err := ClientOptions(WithMaxMessageSize(msgSize), WithClientOptions(base))
+	last, err := ClientOptions(WithMaxConcurrentCalls(maxCalls), WithClientOptions(base))
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertSameFields(t, *first, *last)
 
-	if first.MaxMessageSize != msgSize {
-		t.Errorf("MaxMessageSize = %d, want %d", first.MaxMessageSize, msgSize)
+	if first.MaxConcurrentCalls != maxCalls {
+		t.Errorf("MaxConcurrentCalls = %d, want %d", first.MaxConcurrentCalls, maxCalls)
 	}
-	if first.MaxFrameSize != 2*miB || first.MaxConcurrentCalls != 7 {
-		t.Errorf("base not carried through: MaxFrameSize=%d MaxConcurrentCalls=%d",
-			first.MaxFrameSize, first.MaxConcurrentCalls)
+	if first.MaxHeaderBytes != 2*miB {
+		t.Errorf("base not carried through: MaxHeaderBytes=%d", first.MaxHeaderBytes)
 	}
 
-	srvFirst, err := ServerOptions(WithServerOptions(base), WithServerMaxMessageSize(msgSize))
+	srvFirst, err := ServerOptions(WithServerOptions(base), WithServerMaxConcurrentCalls(maxCalls))
 	if err != nil {
 		t.Fatal(err)
 	}
-	srvLast, err := ServerOptions(WithServerMaxMessageSize(msgSize), WithServerOptions(base))
+	srvLast, err := ServerOptions(WithServerMaxConcurrentCalls(maxCalls), WithServerOptions(base))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,10 +171,10 @@ func TestConstructorsCopyTheBaseOptions(t *testing.T) {
 
 func TestNilOptionRejected(t *testing.T) {
 	t.Parallel()
-	if _, err := ClientOptions(WithMaxMessageSize(1*miB), nil); err == nil {
+	if _, err := ClientOptions(WithMaxConcurrentCalls(2), nil); err == nil {
 		t.Error("ClientOptions(nil): want error")
 	}
-	if _, err := ServerOptions(WithServerMaxMessageSize(1*miB), nil); err == nil {
+	if _, err := ServerOptions(WithServerMaxConcurrentCalls(2), nil); err == nil {
 		t.Error("ServerOptions(nil): want error")
 	}
 }
@@ -276,8 +275,8 @@ func TestOptionSideTyping(t *testing.T) {
 		{"WithServiceName", WithServiceName("echo.v1.EchoService"), true, false},
 		{"WithClientService", WithClientService("echo.v1.EchoService", ServiceTarget("ip://127.0.0.1:1")), true, false},
 		{"WithServerService", WithServerService("echo.v1.EchoService", ServiceListenAddress(":0")), false, true},
-		{"WithMaxMessageSize", WithMaxMessageSize(1 * miB), true, false},
-		{"WithServerMaxMessageSize", WithServerMaxMessageSize(1 * miB), false, true},
+		{"WithMaxConcurrentCalls", WithMaxConcurrentCalls(2), true, false},
+		{"WithServerMaxConcurrentCalls", WithServerMaxConcurrentCalls(2), false, true},
 	} {
 		if _, ok := tc.opt.(ClientOption); ok != tc.client {
 			t.Errorf("%s satisfies ClientOption = %v, want %v", tc.name, ok, tc.client)

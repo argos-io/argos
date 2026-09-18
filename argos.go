@@ -10,6 +10,6 @@
 //
 // Configuration is code only — no file format, no reload.
 //
-// Connection-dimension defaults are confirmed by task 7.5 load evidence in
-// example/resp/LOAD.md (§6.1).
+// Composition-layer limits default to zero (no cap). Session and pool limits
+// live on each transport axis; their defaults are zero as well.
 package argos

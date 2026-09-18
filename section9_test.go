@@ -93,9 +93,7 @@ var section9Checklist = []section9Evidence{
 
 	// §9-9: budget / admission / §6.1 defaults.
 	{id: "§9-9a", title: "§6.1 defaults match", pkg: ".", test: "TestDefaultsMatchSection61"},
-	{id: "§9-9b", title: "budget product conflict lists fields", pkg: ".", test: "TestBudgetProductConflict"},
 	{id: "§9-9c", title: "client admission exhausted", pkg: "./client", test: "TestAdmissionExhausted"},
-	{id: "§9-9d", title: "slice alias no double charge", pkg: "./budget", test: "TestSliceAliasNoDoubleCharge"},
 
 	// §9-10: codegen + echo example.
 	{id: "§9-10a", title: "echo multi-transport unary", pkg: "./example/echo", test: "TestClientEchoTransports"},

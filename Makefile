@@ -1,4 +1,4 @@
-.PHONY: test test-race lint verify accept test-generate test-integration test-deps build-argos
+.PHONY: test test-race lint verify accept test-generate test-integration test-deps install
 
 test:
 	go test ./...
@@ -6,8 +6,8 @@ test:
 test-race:
 	go test -race ./...
 
-build-argos:
-	go build -o bin/argos ./cmd/argos
+install:
+	go install ./...
 
 # Stub consistency: regenerate and diff against committed example/echo outputs.
 test-generate:

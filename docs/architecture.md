@@ -89,12 +89,11 @@ const (
 | 包 | 允许依赖的本仓库包 | 说明 |
 |---|---|---|
 | `descriptor` / `status` / `metadata` / `codec` | —— | `status` 不得依赖 protobuf/genproto |
-| `budget` | `status` | |
 | `compressor` | —— | **仅** `grpc` 可依赖 |
-| `transport` | `descriptor`、`metadata`、`budget` | 接口签名需要；**不** import `codec` |
-| `transport/{tcp,ws,udp,http1,http2}` | `transport`、`status` | 字节管道：不得 import `descriptor` / `metadata` / `budget` / `codec` / `internal/session` |
-| `transport/grpc` | `transport` + `transport/http2` + `descriptor` / `metadata` / `budget` / `status` + `internal/session` + `internal/sessionpool` + `internal/transportbind` + `internal/httpstatus` + `compressor` + genproto | 唯一可 import genproto |
-| `transport/httpunary` | `transport` + `transport/http1` + `descriptor` / `metadata` / `budget` / `status` + `internal/session` + `internal/sessionpool` + `internal/transportbind` + `internal/httpstatus` | 不得 import `compressor` / genproto |
+| `transport` | `descriptor`、`metadata` | 接口签名需要；**不** import `codec` |
+| `transport/{tcp,ws,udp,http1,http2}` | `transport`、`status` | 字节管道：不得 import `descriptor` / `metadata` / `codec` / `internal/session` |
+| `transport/grpc` | `transport` + `transport/http2` + `descriptor` / `metadata` / `status` + `internal/session` + `internal/sessionpool` + `internal/transportbind` + `internal/httpstatus` + `compressor` + genproto | 唯一可 import genproto |
+| `transport/httpunary` | `transport` + `transport/http1` + `descriptor` / `metadata` / `status` + `internal/session` + `internal/sessionpool` + `internal/transportbind` + `internal/httpstatus` | 不得 import `compressor` / genproto |
 | `stream` / `filter` / `resolver` | 见表意 | |
 | `argos`（根） | `transport`、`codec`、`filter` | Options / ServiceOptions；不 import 具体 transport 实现 |
 | `client` / `server` | 除 `internal/*` 外上述；client 另加 resolver、sessionpool | 唯一组合层 |

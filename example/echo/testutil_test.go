@@ -36,7 +36,6 @@ type hasAddr interface {
 func baseOptions() *argos.Options {
 	return &argos.Options{
 		MaxConcurrentCalls: 16,
-		MaxBufferedBytes:   16 * 16 * 1024 * 1024,
 		HandshakeTimeout:   10 * time.Second,
 		MaxInboundConnIdle: 30 * time.Second,
 		MaxInboundConnAge:  30 * time.Minute,

@@ -294,12 +294,14 @@ func (s *session) readOpen(ctx context.Context) (frame, error) {
 			ch <- result{err: err}
 			return
 		}
-		deadline := time.Now().Add(s.openTimeout)
-		if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
-			deadline = dl
+		if s.openTimeout > 0 {
+			deadline := time.Now().Add(s.openTimeout)
+			if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+				deadline = dl
+			}
+			setReadDeadline(s.carrier, deadline)
+			defer clearReadDeadline(s.carrier)
 		}
-		setReadDeadline(s.carrier, deadline)
-		defer clearReadDeadline(s.carrier)
 
 		hdr[0] = first[0]
 		if _, err := io.ReadFull(s.carrier, hdr[1:]); err != nil {

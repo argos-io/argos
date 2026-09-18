@@ -65,7 +65,6 @@ func TestRecvKeepsStreamResultWhenCancelRaces(t *testing.T) {
 			cli, err := newClientLoopback(t, sequentialLoopback(t, &dials),
 				argos.WithServiceName(testService),
 				argos.WithMaxConcurrentCalls(4),
-				argos.WithMaxBufferedBytes(4*16*1024*1024),
 				argos.WithOpenFilter(func(ctx context.Context, m descriptor.Method, next filter.OpenFunc) (stream.Stream, error) {
 					st, err := next(ctx, m)
 					if err != nil {

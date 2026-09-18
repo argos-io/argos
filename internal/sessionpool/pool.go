@@ -40,14 +40,9 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/descriptor"
+	"github.com/argos-io/argos/internal/establish"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport"
-)
-
-const (
-	defaultMaxSessionsPerEndpoint = 64
-	defaultMaxIdleSessions        = 8
-	defaultHandshakeTimeout       = 10 * time.Second
 )
 
 // Options holds instance-level pool limits.
@@ -112,21 +107,17 @@ type dialFlight struct {
 	err  error
 }
 
-// DefaultOptions is the pool-limit baseline: the single source of the numbers
-// every axis seeds its construction-time pool from. argos.Options does not carry
-// these fields — the axis is the only place they live — so this is what a bare
-// axis enforces.
+// DefaultOptions is the pool-limit baseline every axis seeds its construction-
+// time pool from when WithPool is not used. argos.Options does not carry these
+// fields — the axis is the only place they live.
 //
-// MaxCallsPerConn is left zero because it is the protocol's reuse model, which
-// only the axis knows.
+// Zero means no cap on that dimension where the pool checks > 0 before enforcing
+// (MaxSessionsPerEndpoint, SessionIdleTimeout, MaxSessionLifetime,
+// HandshakeTimeout). MaxIdleSessions defaults to 0 (keep no idle sessions);
+// set < 0 for no cap on idle queue length. MaxCallsPerConn is left zero
+// because it is the protocol's reuse model, which only the axis knows.
 func DefaultOptions() Options {
-	return Options{
-		MaxSessionsPerEndpoint: defaultMaxSessionsPerEndpoint,
-		MaxIdleSessions:        defaultMaxIdleSessions,
-		SessionIdleTimeout:     50 * time.Second,
-		MaxSessionLifetime:     30 * time.Minute,
-		HandshakeTimeout:       defaultHandshakeTimeout,
-	}
+	return Options{}
 }
 
 // Options returns the pool's effective limits. It exists so an axis can report
@@ -138,19 +129,10 @@ func (p *Pool) Options() Options {
 	return p.cfg
 }
 
-// New builds a pool. Zero/negative MaxSessionsPerEndpoint and HandshakeTimeout
-// take §6.1 defaults; MaxIdleSessions < 0 defaults to 8 (0 means no idle keep).
-// MaxCallsPerConn <= 0 other than -1 means one call per connection.
+// New builds a pool. Limits are taken as given: zero means the pool does not
+// bound that dimension (see DefaultOptions). MaxCallsPerConn <= 0 other than
+// -1 means one call per connection.
 func New(dial DialFunc, cfg Options) *Pool {
-	if cfg.MaxSessionsPerEndpoint <= 0 {
-		cfg.MaxSessionsPerEndpoint = defaultMaxSessionsPerEndpoint
-	}
-	if cfg.MaxIdleSessions < 0 {
-		cfg.MaxIdleSessions = defaultMaxIdleSessions
-	}
-	if cfg.HandshakeTimeout <= 0 {
-		cfg.HandshakeTimeout = defaultHandshakeTimeout
-	}
 	capPer := 1
 	if cfg.MaxCallsPerConn < 0 {
 		capPer = -1
@@ -192,7 +174,10 @@ func (p *Pool) OpenCall(ctx context.Context, endpoint string, m descriptor.Metho
 	max := p.cfg.MaxSessionsPerEndpoint
 	skip := make(map[transport.ClientConn]struct{})
 
-	for attempt := 0; attempt < max; attempt++ {
+	for attempt := 0; ; attempt++ {
+		if max > 0 && attempt >= max {
+			break
+		}
 		sess, err := p.acquire(ctx, endpoint, skip)
 		if err != nil {
 			return nil, nil, err
@@ -266,7 +251,8 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[transport.
 		}
 
 		b := p.bucketLocked(endpoint)
-		atCap := len(b.entries)+b.pendingDial >= p.cfg.MaxSessionsPerEndpoint
+		atCap := p.cfg.MaxSessionsPerEndpoint > 0 &&
+			len(b.entries)+b.pendingDial >= p.cfg.MaxSessionsPerEndpoint
 
 		if p.capPer < 0 {
 			if fl, waiting := p.flights[endpoint]; waiting {
@@ -291,7 +277,9 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[transport.
 						return sess, nil
 					}
 					// Session exists but not lendable (e.g. marked bad / skipped) — fall through.
-					atCap = len(p.bucketLocked(endpoint).entries)+p.bucketLocked(endpoint).pendingDial >= p.cfg.MaxSessionsPerEndpoint
+					b2 := p.bucketLocked(endpoint)
+					atCap = p.cfg.MaxSessionsPerEndpoint > 0 &&
+						len(b2.entries)+b2.pendingDial >= p.cfg.MaxSessionsPerEndpoint
 					if atCap {
 						p.mu.Unlock()
 						return nil, status.ErrSessionsExhausted
@@ -476,17 +464,27 @@ func (p *Pool) dialNew(ctx context.Context, endpoint string) (transport.ClientCo
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	hsCtx, cancel := context.WithTimeout(ctx, p.cfg.HandshakeTimeout)
-	defer cancel()
-	go func() {
-		select {
-		case <-p.stopCh:
-			cancel()
-		case <-hsCtx.Done():
-		}
-	}()
+	dialCtx := ctx
+	var cancel context.CancelFunc
+	budget := p.cfg.HandshakeTimeout
+	if d := establish.Timeout(ctx); d > 0 {
+		budget = d
+	}
+	if budget > 0 {
+		dialCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), budget)
+		defer cancel()
+		go func() {
+			select {
+			case <-p.stopCh:
+				if cancel != nil {
+					cancel()
+				}
+			case <-dialCtx.Done():
+			}
+		}()
+	}
 
-	return p.dial(hsCtx, endpoint)
+	return p.dial(dialCtx, endpoint)
 }
 
 func (p *Pool) bucketLocked(endpoint string) *bucket {
@@ -574,7 +572,7 @@ func (p *Pool) returnLocked(e *entry, now time.Time) {
 	}
 
 	b := p.bucketLocked(e.endpoint)
-	if len(b.idle) >= p.cfg.MaxIdleSessions {
+	if p.cfg.MaxIdleSessions >= 0 && len(b.idle) >= p.cfg.MaxIdleSessions {
 		p.discardLocked(e)
 		return
 	}

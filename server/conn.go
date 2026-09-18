@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
-	"github.com/argos-io/argos/budget"
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/status"
@@ -50,15 +49,24 @@ func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry
 	}
 
 	var aged atomic.Bool
-	ageTimer := time.AfterFunc(cfg.MaxInboundConnAge, func() {
-		aged.Store(true)
-		acceptCancel()
-	})
-	defer ageTimer.Stop()
+	var ageTimer *time.Timer
+	if cfg.MaxInboundConnAge > 0 {
+		ageTimer = time.AfterFunc(cfg.MaxInboundConnAge, func() {
+			aged.Store(true)
+			acceptCancel()
+		})
+		defer ageTimer.Stop()
+	}
 
-	hsCtx, hsCancel := context.WithTimeout(connCtx, cfg.HandshakeTimeout)
+	hsCtx := connCtx
+	var hsCancel context.CancelFunc
+	if cfg.HandshakeTimeout > 0 {
+		hsCtx, hsCancel = context.WithTimeout(connCtx, cfg.HandshakeTimeout)
+	}
 	err := c.Handshake(hsCtx)
-	hsCancel()
+	if hsCancel != nil {
+		hsCancel()
+	}
 	if err != nil {
 		argos.NotifyConnError(cfg, argos.ConnInfo{
 			Side:    argos.SideServer,
@@ -85,10 +93,15 @@ func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry
 		spec := transport.CallSpec{Metadata: md}
 
 		waitCtx, waitCancel := context.WithCancel(acceptCtx)
-		idleTimer := time.AfterFunc(cfg.MaxInboundConnIdle, waitCancel)
+		var idleTimer *time.Timer
+		if cfg.MaxInboundConnIdle > 0 {
+			idleTimer = time.AfterFunc(cfg.MaxInboundConnIdle, waitCancel)
+		}
 
 		call, err := c.AcceptCall(waitCtx, spec)
-		idleTimer.Stop()
+		if idleTimer != nil {
+			idleTimer.Stop()
+		}
 		waitCancel()
 
 		if err != nil {
@@ -158,7 +171,7 @@ func (s *Server) handleCall(
 ) {
 	defer func() { _ = call.Close() }()
 
-	b, release, err := s.admit.tryAdmit()
+	release, err := s.admit.tryAdmit()
 	if err != nil {
 		_ = call.Finish(err)
 		argos.NotifyCallError(lb.cfg, argos.CallInfo{
@@ -173,10 +186,6 @@ func (s *Server) handleCall(
 	defer callCancel()
 
 	callCtx = metadata.ContextWith(callCtx, md)
-	callCtx = budget.ContextWith(callCtx, b)
-	if bs, ok := call.(transport.BudgetSetter); ok {
-		bs.SetBudget(b)
-	}
 
 	methodName := call.Method()
 	entry, ok := lookup(routes, methodName)

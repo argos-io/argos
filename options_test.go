@@ -18,94 +18,23 @@ import (
 
 func TestDefaultsMatchSection61(t *testing.T) {
 	t.Parallel()
-	// Defaults, not DefaultOptions: §6.1 pins the built-in numbers, which a
-	// process-wide tune elsewhere must not be able to move.
+	// Defaults, not DefaultOptions: built-in limits are zero (no cap).
 	d := Defaults()
-
-	checks := []struct {
-		name string
-		got  any
-		want any
-	}{
-		{"MaxFrameSize", d.MaxFrameSize, int64(4 * miB)},
-		{"MaxMessageSize", d.MaxMessageSize, int64(4 * miB)},
-		{"MaxHeaderBytes", d.MaxHeaderBytes, int64(1 * miB)},
-		{"ReadAheadMessages", d.ReadAheadMessages, 1},
-		{"MaxConcurrentCalls", d.MaxConcurrentCalls, 64},
-		{"MaxBufferedBytes", d.MaxBufferedBytes, int64(1 * giB)},
-		{"HandshakeTimeout", d.HandshakeTimeout, 10 * time.Second},
-		{"ConnReadBufferSize", d.ConnReadBufferSize, int64(64 * kiB)},
-		{"MaxInboundConns", d.MaxInboundConns, 1024},
-		{"MaxInboundConnIdle", d.MaxInboundConnIdle, 50 * time.Second},
-		{"MaxInboundConnAge", d.MaxInboundConnAge, 30 * time.Minute},
-		{"HTTPReadHeaderTimeout", d.HTTPReadHeaderTimeout, 10 * time.Second},
-		{"HTTPIdleTimeout", d.HTTPIdleTimeout, 50 * time.Second},
-	}
-	for _, c := range checks {
-		if c.got != c.want {
-			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
-		}
-	}
-	pc, err := d.PerCall()
-	if err != nil {
-		t.Fatalf("PerCall: %v", err)
-	}
-	// 4MiB + (1+1)×4MiB + 4MiB = 16MiB
-	if want := int64(16 * miB); pc != want {
-		t.Errorf("PerCall = %d, want %d", pc, want)
-	}
-
-	// §6.1 also pins the session and pool numbers. They no longer live on
-	// Options — an axis fixes them when it is constructed, so the defaults moved
-	// to session.DefaultOptions / sessionpool.DefaultOptions — but they are still
-	// §6.1 numbers, and this is still the test that catches a drift in them.
-	// Without this the documented defaults would be pinned nowhere: the axis
-	// agreement test only proves an axis seeds from DefaultOptions, not that
-	// DefaultOptions holds the numbers §6.1 promises.
+	assertSameFields(t, d, Options{})
 	sess := session.DefaultOptions()
-	for _, c := range []struct {
-		name string
-		got  any
-		want any
-	}{
-		{"session.MaxFrameSize", sess.MaxFrameSize, int64(4 * miB)},
-		{"session.MaxMessageSize", sess.MaxMessageSize, int64(4 * miB)},
-		{"session.MaxMetadataSize", sess.MaxMetadataSize, int64(256 * kiB)},
-		{"session.MaxInboundMetadataSize", sess.MaxInboundMetadataSize, int64(4 * miB)},
-		{"session.ReadAheadMessages", sess.ReadAheadMessages, 1},
-		{"session.OpenTimeout", sess.OpenTimeout, 10 * time.Second},
-		{"session.MaxDrainBytes", sess.MaxDrainBytes, int64(1 * miB)},
-	} {
-		if c.got != c.want {
-			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
-		}
+	if sess != (session.Options{}) {
+		t.Fatalf("session.DefaultOptions() = %+v, want zero session.Options", sess)
 	}
-
 	pool := sessionpool.DefaultOptions()
-	for _, c := range []struct {
-		name string
-		got  any
-		want any
-	}{
-		{"sessionpool.MaxSessionsPerEndpoint", pool.MaxSessionsPerEndpoint, 64},
-		{"sessionpool.MaxIdleSessions", pool.MaxIdleSessions, 8},
-		{"sessionpool.SessionIdleTimeout", pool.SessionIdleTimeout, 50 * time.Second},
-		{"sessionpool.MaxSessionLifetime", pool.MaxSessionLifetime, 30 * time.Minute},
-		{"sessionpool.HandshakeTimeout", pool.HandshakeTimeout, 10 * time.Second},
-	} {
-		if c.got != c.want {
-			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
-		}
+	if pool != (sessionpool.Options{}) {
+		t.Fatalf("sessionpool.DefaultOptions() = %+v, want zero sessionpool.Options", pool)
 	}
 }
 
-// TestZeroFieldsFilledWithDefaults is the contract that lets a Options literal
-// name only what it changes: every field the caller left zero comes back at its
-// Defaults value, on both sides.
+// TestZeroFieldsFilledWithDefaults is the contract that unset fields stay zero.
 func TestZeroFieldsFilledWithDefaults(t *testing.T) {
 	t.Parallel()
-	want := Defaults()
-	want.MaxMessageSize = 1 << 20
+	want := Options{MaxHeaderBytes: 1 << 20}
 
 	for _, tc := range []struct {
 		side  string
@@ -120,7 +49,7 @@ func TestZeroFieldsFilledWithDefaults(t *testing.T) {
 	} {
 		t.Run(tc.side, func(t *testing.T) {
 			t.Parallel()
-			got, err := tc.build(&Options{MaxMessageSize: 1 << 20})
+			got, err := tc.build(&Options{MaxHeaderBytes: 1 << 20})
 			if err != nil {
 				t.Fatalf("%sOptions: %v", tc.side, err)
 			}
@@ -129,9 +58,7 @@ func TestZeroFieldsFilledWithDefaults(t *testing.T) {
 	}
 }
 
-// TestNegativeValuesRejected replaces the old "zero is rejected" cases: zero
-// now selects the built-in default, so only a genuinely negative value is still
-// an error, and the error must name the field.
+// TestNegativeValuesRejected: zero is valid; only negative values error.
 func TestNegativeValuesRejected(t *testing.T) {
 	t.Parallel()
 	forEachNumericField(t, func(t *testing.T, name string, set func(*Options, int64)) {
@@ -157,7 +84,7 @@ func sideOwnershipDoc(t *testing.T) *Options {
 		// client-side chain entries
 		OpenFilters: []filter.OpenFilter{noopOpenFilter()},
 		// shared limits
-		MaxFrameSize:       2 * miB,
+		MaxHeaderBytes:     2 * miB,
 		MaxConcurrentCalls: 16,
 		// server-only
 		Filters:               []filter.Filter{noopFilter()},
@@ -185,8 +112,8 @@ func TestSideOwnershipCoexistsOnOneOptions(t *testing.T) {
 		side string
 		cfg  *Options
 	}{{"client", client}, {"server", server}} {
-		if c.cfg.MaxFrameSize != 2*miB {
-			t.Errorf("%s: MaxFrameSize = %d", c.side, c.cfg.MaxFrameSize)
+		if c.cfg.MaxHeaderBytes != 2*miB {
+			t.Errorf("%s: MaxHeaderBytes = %d", c.side, c.cfg.MaxHeaderBytes)
 		}
 		if c.cfg.MaxConcurrentCalls != 16 {
 			t.Errorf("%s: MaxConcurrentCalls = %d", c.side, c.cfg.MaxConcurrentCalls)
@@ -203,47 +130,24 @@ func TestSideOwnershipCoexistsOnOneOptions(t *testing.T) {
 	}
 }
 
-func TestBudgetProductConflict(t *testing.T) {
-	t.Parallel()
-	_, err := ClientOptions(
-		WithClientOptions(&Options{}),
-		WithMaxConcurrentCalls(64),
-		WithMaxBufferedBytes(1<<20), // 1 MiB, far below 64×16MiB
-	)
-	if err == nil {
-		t.Fatal("want budget product conflict error")
-	}
-	for _, field := range []string{
-		"MaxConcurrentCalls",
-		"MaxFrameSize",
-		"MaxMessageSize",
-		"ReadAheadMessages",
-		"MaxBufferedBytes",
-	} {
-		if !strings.Contains(err.Error(), field) {
-			t.Errorf("error %q missing field %s", err, field)
-		}
-	}
-}
-
 func TestClientOptionsReturnsIndependentSnapshots(t *testing.T) {
 	t.Parallel()
-	cfg1, err := ClientOptions(WithClientOptions(&Options{}), WithMaxMessageSize(1<<20))
+	cfg1, err := ClientOptions(WithClientOptions(&Options{}), WithMaxHeaderBytes(1<<20))
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg2, err := ClientOptions(WithClientOptions(&Options{}), WithMaxMessageSize(2<<20))
+	cfg2, err := ClientOptions(WithClientOptions(&Options{}), WithMaxHeaderBytes(2<<20))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg1.MaxMessageSize != 1<<20 {
-		t.Fatalf("cfg1.MaxMessageSize = %d, want %d", cfg1.MaxMessageSize, 1<<20)
+	if cfg1.MaxHeaderBytes != 1<<20 {
+		t.Fatalf("cfg1.MaxHeaderBytes = %d, want %d", cfg1.MaxHeaderBytes, 1<<20)
 	}
-	if cfg2.MaxMessageSize != 2<<20 {
-		t.Fatalf("cfg2.MaxMessageSize = %d, want %d", cfg2.MaxMessageSize, 2<<20)
+	if cfg2.MaxHeaderBytes != 2<<20 {
+		t.Fatalf("cfg2.MaxHeaderBytes = %d, want %d", cfg2.MaxHeaderBytes, 2<<20)
 	}
-	cfg1.MaxMessageSize = 99
-	if cfg2.MaxMessageSize == 99 {
+	cfg1.MaxHeaderBytes = 99
+	if cfg2.MaxHeaderBytes == 99 {
 		t.Fatal("configs share mutable state")
 	}
 }
@@ -280,20 +184,6 @@ func TestCloneDoesNotAliasSliceOrMapFields(t *testing.T) {
 		t.Fatal("(*Options)(nil).Clone() = nil, want Defaults()")
 	}
 	assertSameFields(t, *got, Defaults())
-}
-
-func TestPerCallRejectsNilOptionsAndZeroReadAhead(t *testing.T) {
-	t.Parallel()
-	var nilCfg *Options
-	if _, err := nilCfg.PerCall(); err == nil {
-		t.Error("PerCall on nil Options: want error")
-	}
-	// A raw literal is not run through ClientOptions, so PerCall has to defend
-	// itself against the unfilled zero rather than trust fillDefaults.
-	raw := &Options{MaxFrameSize: 1 << 20, MaxMessageSize: 1 << 20}
-	if _, err := raw.PerCall(); err == nil {
-		t.Error("PerCall with ReadAheadMessages=0: want error")
-	}
 }
 
 // TestNoPackageLevelConfigureOrMutableRegistry keeps §3.1-11 honest. The one

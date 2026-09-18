@@ -65,7 +65,7 @@ Transport 实现内部握手时使用：
 - `SessionSpec{CodecName, Options}` — `Options` 为 `session.Options` 快照，数值来自轴构造期用 `WithLimits(transport.Limits{...})` 定死的限额（帧/消息/metadata 上限、`ReadAheadMessages`、`OpenTimeout`、`MaxDrainBytes` 等）；`argos.Options` 上不带这些数字
 - `CallSpec{Metadata}` — 组合层创建的 `CallMetadata`
 
-实现**不**从全局 `Options` 直接读；客户端 per-call `budget` 在 call ctx 上（见 [usage.md](usage.md)）。
+实现**不**从全局 `Options` 直接读（见 [usage.md](usage.md)）。
 
 ## 生成桩与路由
 

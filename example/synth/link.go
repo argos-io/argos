@@ -15,13 +15,6 @@ import (
 	"github.com/argos-io/argos/transport/tcp"
 )
 
-const (
-	defaultOpenTimeout   = 10 * time.Second
-	defaultMaxDrainBytes = 1 << 20
-	defaultMaxFrameSize  = 4 << 20
-	defaultMaxMessage    = 4 << 20
-)
-
 // Axis implements transport.Transport for the synthetic protocol over TCP: bytes,
 // framing, greeting handshake, sequential reuse and the connection pool are
 // all inside it.
@@ -72,7 +65,7 @@ func WithOpenTimeout(d time.Duration) Option {
 
 // WithLimits sets the session limits this axis enforces for its whole life.
 // This is the only place they are set: argos.Options does not carry them, so an
-// axis built without this option enforces the built-in defaults.
+// axis built without this option enforces no wire caps (zero limits).
 //
 // The synthetic protocol has no metadata, so the metadata fields of
 // transport.Limits are ignored here.
@@ -115,15 +108,9 @@ func WithHandshakeTimeout(d time.Duration) Option {
 // New returns a Sequential synth Axis.
 func New(opts ...Option) *Transport {
 	a := &Transport{
-		greeting:      DefaultGreeting,
-		openTimeout:   defaultOpenTimeout,
-		maxDrainBytes: defaultMaxDrainBytes,
-		maxFrame:      defaultMaxFrameSize,
-		maxMessage:    defaultMaxMessage,
-		tr:            tcp.New(),
-		// Limits live on the axis, so their defaults do too, from the shared
-		// baseline.
-		pool: sessionpool.DefaultOptions(),
+		greeting: DefaultGreeting,
+		tr:       tcp.New(),
+		pool:     sessionpool.DefaultOptions(),
 	}
 	for _, opt := range opts {
 		if opt != nil {

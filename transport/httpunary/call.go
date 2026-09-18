@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/argos-io/argos/budget"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/internal/httpstatus"
 	"github.com/argos-io/argos/internal/session"
@@ -56,23 +55,8 @@ type call struct {
 	// gets the response and the remote status.
 	sendErr error
 
-	budget budget.Budget
-
 	sending atomic.Bool
 	recving atomic.Bool
-}
-
-func (c *call) SetBudget(b budget.Budget) {
-	c.mu.Lock()
-	c.budget = b
-	c.mu.Unlock()
-}
-
-func (c *call) chargePayload(payload []byte) (func(), error) {
-	c.mu.Lock()
-	b := c.budget
-	c.mu.Unlock()
-	return budget.ChargeSlice(b, payload)
 }
 
 func (c *call) Method() string { return c.method }
@@ -203,13 +187,6 @@ func (c *call) Send(payload []byte) error {
 			fmt.Sprintf("httpunary: Send payload %d > max %d", len(data), c.maxMsg))
 	}
 	cp := append([]byte(nil), data...)
-	rel, err := c.chargePayload(cp)
-	if err != nil {
-		return err
-	}
-	if rel != nil {
-		defer rel()
-	}
 
 	c.mu.Lock()
 	if c.initiator {
@@ -370,14 +347,7 @@ func (c *call) recvServer() ([]byte, func(), error) {
 	c.mu.Lock()
 	c.reqSent = true
 	c.mu.Unlock()
-	rel, err := c.chargePayload(data)
-	if err != nil {
-		return nil, nil, err
-	}
-	if rel == nil {
-		rel = func() {}
-	}
-	return data, rel, nil
+	return data, func() {}, nil
 }
 
 func (c *call) recvClient() ([]byte, func(), error) {
@@ -434,14 +404,7 @@ func (c *call) recvClient() ([]byte, func(), error) {
 	c.respSeen = true
 	c.sawTerminal = true
 	c.mu.Unlock()
-	rel, err := c.chargePayload(data)
-	if err != nil {
-		return nil, nil, err
-	}
-	if rel == nil {
-		rel = func() {}
-	}
-	return data, rel, nil
+	return data, func() {}, nil
 }
 
 func (c *call) Close() error {

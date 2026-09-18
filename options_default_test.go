@@ -22,27 +22,27 @@ func tempDefault(t *testing.T) *Options {
 // tunes the default once at start-up and every later unconfigured constructor
 // picks it up.
 func TestDefaultOptionsIsLive(t *testing.T) {
-	const tuned = 2 * miB
-	tempDefault(t).MaxMessageSize = tuned
+	const tuned = 128
+	tempDefault(t).MaxConcurrentCalls = tuned
 
 	client, err := ClientOptions()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.MaxMessageSize != tuned {
-		t.Errorf("ClientOptions MaxMessageSize = %d, want %d", client.MaxMessageSize, tuned)
+	if client.MaxConcurrentCalls != tuned {
+		t.Errorf("ClientOptions MaxConcurrentCalls = %d, want %d", client.MaxConcurrentCalls, tuned)
 	}
 	server, err := ServerOptions()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if server.MaxMessageSize != tuned {
-		t.Errorf("ServerOptions MaxMessageSize = %d, want %d", server.MaxMessageSize, tuned)
+	if server.MaxConcurrentCalls != tuned {
+		t.Errorf("ServerOptions MaxConcurrentCalls = %d, want %d", server.MaxConcurrentCalls, tuned)
 	}
 
 	// Defaults is the built-in floor, not a view of the tuned default.
-	if got := Defaults().MaxMessageSize; got == tuned {
-		t.Errorf("Defaults moved with the process default: MaxMessageSize = %d", got)
+	if got := Defaults().MaxConcurrentCalls; got == tuned {
+		t.Errorf("Defaults moved with the process default: MaxConcurrentCalls = %d", got)
 	}
 }
 
@@ -51,28 +51,28 @@ func TestDefaultOptionsIsLive(t *testing.T) {
 // every later one.
 func TestConstructorsCopyTheProcessDefault(t *testing.T) {
 	d := tempDefault(t)
-	d.MaxMessageSize = 2 * miB
+	d.MaxConcurrentCalls = 128
 
 	cfg, err := ClientOptions()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.MaxMessageSize = 1 * miB
-	if d.MaxMessageSize != 2*miB {
-		t.Fatalf("writing the returned Options reached the process default: %d", d.MaxMessageSize)
+	cfg.MaxConcurrentCalls = 32
+	if d.MaxConcurrentCalls != 128 {
+		t.Fatalf("writing the returned Options reached the process default: %d", d.MaxConcurrentCalls)
 	}
 }
 
 // TestWithClientOptionsBeatsProcessDefault: naming a base is how a call site opts out
 // of process-wide tuning entirely.
 func TestWithClientOptionsBeatsProcessDefault(t *testing.T) {
-	tempDefault(t).MaxMessageSize = 2 * miB
+	tempDefault(t).MaxConcurrentCalls = 128
 
 	cfg, err := ClientOptions(WithClientOptions(&Options{}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := Defaults().MaxMessageSize; cfg.MaxMessageSize != want {
-		t.Errorf("MaxMessageSize = %d, want the built-in %d", cfg.MaxMessageSize, want)
+	if want := Defaults().MaxConcurrentCalls; cfg.MaxConcurrentCalls != want {
+		t.Errorf("MaxConcurrentCalls = %d, want the built-in %d", cfg.MaxConcurrentCalls, want)
 	}
 }

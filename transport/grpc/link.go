@@ -52,8 +52,9 @@ func WithCodecName(name string) TransportOption {
 }
 
 // WithLimits sets the session limits this axis enforces for its whole life.
-// This is the only place they are set: argos.Options does not carry them, so an
-// axis built without this option enforces the built-in defaults.
+// This is the only place they are set: argos.Options does not carry them. An
+// axis built without this option enforces session.DefaultOptions() (all zero:
+// no cap until a limit field is set > 0).
 func WithLimits(l transport.Limits) TransportOption {
 	return func(a *Transport) { a.spec.Options = transportbind.FromLimits(l) }
 }

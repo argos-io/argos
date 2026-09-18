@@ -132,31 +132,6 @@ func WithServerConnErrorObserver(fn func(ConnInfo, error)) ServerOption {
 	return serverOption(func(c *Options) { c.ConnErrorObserver = fn })
 }
 
-// WithMaxFrameSize sets the client on-wire frame/body limit.
-func WithMaxFrameSize(n int64) ClientOption {
-	return clientOption(func(c *Options) { c.MaxFrameSize = n })
-}
-
-// WithServerMaxFrameSize sets the server's per-call admission budget for the
-// largest single frame. It sizes the composition layer's own reservation, not
-// what the wire allows: the axis the service is bound to decides that, at
-// construction.
-func WithServerMaxFrameSize(n int64) ServerOption {
-	return serverOption(func(c *Options) { c.MaxFrameSize = n })
-}
-
-// WithMaxMessageSize sets the client's per-call admission budget for one
-// message. It sizes the composition layer's reservation, not the wire limit.
-func WithMaxMessageSize(n int64) ClientOption {
-	return clientOption(func(c *Options) { c.MaxMessageSize = n })
-}
-
-// WithServerMaxMessageSize sets the server's per-call admission budget for one
-// message. It sizes the composition layer's reservation, not the wire limit.
-func WithServerMaxMessageSize(n int64) ServerOption {
-	return serverOption(func(c *Options) { c.MaxMessageSize = n })
-}
-
 // WithMaxHeaderBytes sets the client HTTP header-block limit.
 func WithMaxHeaderBytes(n int64) ClientOption {
 	return clientOption(func(c *Options) { c.MaxHeaderBytes = n })
@@ -165,20 +140,6 @@ func WithMaxHeaderBytes(n int64) ClientOption {
 // WithServerMaxHeaderBytes sets the server HTTP header-block limit.
 func WithServerMaxHeaderBytes(n int64) ServerOption {
 	return serverOption(func(c *Options) { c.MaxHeaderBytes = n })
-}
-
-// WithReadAheadMessages sets how many complete DATA messages the client's
-// per-call admission budget reserves room for. It sizes the reservation, not
-// what the axis allows.
-func WithReadAheadMessages(n int) ClientOption {
-	return clientOption(func(c *Options) { c.ReadAheadMessages = n })
-}
-
-// WithServerReadAheadMessages sets how many complete DATA messages the
-// server's per-call admission budget reserves room for. It sizes the
-// reservation, not what the axis allows.
-func WithServerReadAheadMessages(n int) ServerOption {
-	return serverOption(func(c *Options) { c.ReadAheadMessages = n })
 }
 
 // WithMaxConcurrentCalls sets the client in-flight call limit.
@@ -191,16 +152,6 @@ func WithServerMaxConcurrentCalls(n int) ServerOption {
 	return serverOption(func(c *Options) { c.MaxConcurrentCalls = n })
 }
 
-// WithMaxBufferedBytes sets the client buffer-pool ceiling.
-func WithMaxBufferedBytes(n int64) ClientOption {
-	return clientOption(func(c *Options) { c.MaxBufferedBytes = n })
-}
-
-// WithServerMaxBufferedBytes sets the server buffer-pool ceiling.
-func WithServerMaxBufferedBytes(n int64) ServerOption {
-	return serverOption(func(c *Options) { c.MaxBufferedBytes = n })
-}
-
 // WithHandshakeTimeout sets the client TLS/WS and session handshake timeout.
 func WithHandshakeTimeout(d time.Duration) ClientOption {
 	return clientOption(func(c *Options) { c.HandshakeTimeout = d })
@@ -209,16 +160,6 @@ func WithHandshakeTimeout(d time.Duration) ClientOption {
 // WithServerHandshakeTimeout sets the server TLS/WS and session handshake timeout.
 func WithServerHandshakeTimeout(d time.Duration) ServerOption {
 	return serverOption(func(c *Options) { c.HandshakeTimeout = d })
-}
-
-// WithConnReadBufferSize sets the client per-connection cross-call read buffer limit.
-func WithConnReadBufferSize(n int64) ClientOption {
-	return clientOption(func(c *Options) { c.ConnReadBufferSize = n })
-}
-
-// WithServerConnReadBufferSize sets the server per-connection cross-call read buffer limit.
-func WithServerConnReadBufferSize(n int64) ServerOption {
-	return serverOption(func(c *Options) { c.ConnReadBufferSize = n })
 }
 
 // WithMaxInboundConns sets server in-use connections per endpoint.

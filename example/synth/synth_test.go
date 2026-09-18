@@ -25,7 +25,6 @@ import (
 func testOptions() *argos.Options {
 	return &argos.Options{
 		MaxConcurrentCalls: 16,
-		MaxBufferedBytes:   16 * 16 * 1024 * 1024,
 		HandshakeTimeout:   5 * time.Second,
 		MaxInboundConnIdle: 30 * time.Second,
 		MaxInboundConnAge:  30 * time.Minute,
@@ -47,7 +46,8 @@ func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ..
 	t.Helper()
 	cfg := testOptions()
 	srvAxis := New()
-	cliAxis := New()
+	// Default pool keeps no idle sessions (MaxIdleSessions=0); tests expect reuse.
+	cliAxis := New(WithPool(0, 8, 50*time.Second, 30*time.Minute))
 	srvTr := teststack.TransportName(t, srvAxis)
 	srv := server.New(append(append([]argos.ServerOption{argos.WithServerOptions(cfg)}, extra...),
 		argos.WithServerService(ServiceName,

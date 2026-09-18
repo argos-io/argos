@@ -10,7 +10,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/argos-io/argos/budget"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/transport"
@@ -39,24 +38,15 @@ type Options struct {
 	MaxDrainBytes int64
 }
 
-// DefaultOptions is the session-limit baseline: the single source of the numbers
-// every axis seeds its construction-time spec from. argos.Options does not carry
-// these fields — the axis is the only place they live — so this is what a bare
-// axis (one built without WithLimits) enforces.
+// DefaultOptions is the session-limit baseline every axis seeds its
+// construction-time spec from when WithLimits is not used. argos.Options does
+// not carry these fields — the axis is the only place they live.
 //
-// A limit is enforced only while it is > 0; zero means "no limit". The baseline
-// is what keeps that from being the silent default for an axis built without
-// options, which used to accept messages of any size.
+// A limit is enforced only while it is > 0; zero means "no limit" (or, for
+// OpenTimeout / MaxDrainBytes, the framing implementation's own default when
+// zero).
 func DefaultOptions() Options {
-	return Options{
-		MaxFrameSize:           4 << 20,
-		MaxMessageSize:         4 << 20,
-		MaxMetadataSize:        256 << 10,
-		MaxInboundMetadataSize: 4 << 20,
-		ReadAheadMessages:      1,
-		OpenTimeout:            10 * time.Second,
-		MaxDrainBytes:          1 << 20,
-	}
+	return Options{}
 }
 
 // SessionSpec is everything the composition layer gives Framing for one
@@ -254,14 +244,6 @@ type Call interface {
 	// Carrier hygiene: if this call closes without reading protocol terminal
 	// state (no STATUS / no io.EOF), Session.Reusable() must become false (§2.4).
 	Close() error
-}
-
-// BudgetSetter is implemented by Calls that honor per-call byte budgets. The
-// composition layer installs the budget after admission (server) or via OpenCall
-// ctx (client).
-type BudgetSetter interface {
-	Call
-	SetBudget(b budget.Budget)
 }
 
 // ServerCall extends Call with Accept. Only the server needs Accept: it parses

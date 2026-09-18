@@ -105,17 +105,17 @@ type transportPkgClass uint8
 
 const (
 	// interfaceTransport is the transport root: the interfaces and their
-	// vocabulary. descriptor / metadata / budget belong to the contract
-	// (descriptor.Method, metadata.CallMetadata, budget.Budget), so they are
+	// vocabulary. descriptor / metadata belong to the contract
+	// (descriptor.Method, metadata.CallMetadata), so they are
 	// allowed here and nowhere else in transport/ except the wire stacks.
 	interfaceTransport transportPkgClass = iota
 	// pipeTransport is a byte pipe (tcp, ws, udp, http1, http2): bytes and
-	// frames only. It has no method, no metadata and no budget to bill, so
-	// needing descriptor / metadata / budget means the pipe grew a second
+	// frames only. It has no method and no metadata, so needing descriptor /
+	// metadata means the pipe grew a second
 	// responsibility; a session is a wire stack's business, not its own.
 	pipeTransport
 	// wireStackTransport is a finished wire stack (grpc, httpunary): bytes,
-	// framing and session in one axis, so descriptor / metadata / budget are
+	// framing and session in one axis, so descriptor / metadata are
 	// its vocabulary and internal/session is legal.
 	wireStackTransport
 )

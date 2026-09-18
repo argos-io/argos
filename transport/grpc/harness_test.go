@@ -86,7 +86,6 @@ func startEchoHarness(t *testing.T, srvOpts, cliOpts []composeOpt) *echoHarness 
 
 	cfg := &argos.Options{
 		MaxConcurrentCalls: 16,
-		MaxBufferedBytes:   16 * 16 * 1024 * 1024,
 		MaxInboundConnIdle: 30 * time.Second,
 		MaxInboundConnAge:  30 * time.Minute,
 		ListenAddress:      "127.0.0.1:0",
@@ -158,7 +157,6 @@ func newInteropClient(t *testing.T, addr string, bindOpts []composeOpt, extra ..
 	t.Helper()
 	cfg := &argos.Options{
 		MaxConcurrentCalls: 64,
-		MaxBufferedBytes:   64 * 16 * 1024 * 1024,
 	}
 	ax, _, codecName, err := transportFrom(bindOpts...)
 	if err != nil {

@@ -11,15 +11,10 @@ import (
 	"github.com/argos-io/argos/transport/httpunary"
 )
 
-// TestBareAxesAreBounded guards the rule that a transport axis built with no
-// options already enforces the baseline, rather than running unbounded.
-//
-// This is not hypothetical: every axis used to start at the zero Options, and
-// zero means "no limit" to every check that reads it, so `grpc.NewTransport()`
-// silently accepted messages of any size until something pushed limits in from
-// outside. The defaults now come from one place, at construction, and this is
-// the test that says so.
-func TestBareAxesAreBounded(t *testing.T) {
+// TestBareAxesUseDefaultLimits guards the rule that a transport axis built with
+// no options reports session.DefaultOptions / sessionpool.DefaultOptions (all
+// zero: no cap until WithLimits / WithPool sets a field > 0).
+func TestBareAxesUseDefaultLimits(t *testing.T) {
 	t.Parallel()
 
 	wantSession := transportbind.ToLimits(session.DefaultOptions())
@@ -72,19 +67,12 @@ func TestBareAxesAreBounded(t *testing.T) {
 	}
 }
 
-// checkInt64 asserts each field matches the baseline. A built-in axis is
-// expected to bound every dimension, so a zero is a failure rather than "not
-// applicable" — these axes have no dimension they decline to limit.
 func checkInt64(t *testing.T, kind string, fields map[string][2]int64) {
 	t.Helper()
 	for name, v := range fields {
 		want, got := v[0], v[1]
-		if got == 0 {
-			t.Errorf("%s: bare axis leaves %s unbounded (0); want the %v baseline", kind, name, want)
-			continue
-		}
 		if want != got {
-			t.Errorf("%s: %s = %v in the baseline, %v on a bare axis", kind, name, want, got)
+			t.Errorf("%s: %s = %v on axis, want baseline %v", kind, name, got, want)
 		}
 	}
 }

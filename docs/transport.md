@@ -9,7 +9,7 @@
 
 接口真源：`transport/transport_impl.go`（`Transport` / `Call` / `ServerConn`）、`transport/transport.go`（`Pipe` / `Conn` / `Carrier`）。
 
-依赖约定：根包可 import `descriptor` / `metadata` / `budget`（`Transport` 签名需要），**不** import `codec`；字节管道实现连 `descriptor` / `metadata` / `budget` / `internal/session` 也不得 import（协议里没有 method、metadata 与 budget 可算，需要它们说明管道长了第二种职责）；完整线栈可 import `internal/session`、`internal/sessionpool`。由 `invariants_test.go` 强制。
+依赖约定：根包可 import `descriptor` / `metadata`（`Transport` 签名需要），**不** import `codec`；字节管道实现连 `descriptor` / `metadata` / `internal/session` 也不得 import；完整线栈可 import `internal/session`、`internal/sessionpool`。由 `invariants_test.go` 强制。
 
 ## `Transport`（一等 axis）
 
@@ -112,7 +112,7 @@ Transport 轴在 `New*Session` 里对 `Conn` **type assert**，失败则返回�
 - [ ] 每种 Carrier 实现的窄接口列表与 `Abort` 语义
 - [ ] 发送失败是否正确使用 `SendError`
 - [ ] HTTP：handler 生命周期与 body/leak 行为
-- [ ] 不 import `codec` / `descriptor` / `metadata` / `budget` / `internal/session`
+- [ ] 不 import `codec` / `descriptor` / `metadata` / `internal/session`
 
 `Transport`（线栈 axis）：
 

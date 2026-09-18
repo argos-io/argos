@@ -256,7 +256,6 @@ func startArgosEchoServer(t *testing.T, bindOpts []composeOpt, extra ...argos.Se
 	t.Helper()
 	cfg := &argos.Options{
 		MaxConcurrentCalls: 64,
-		MaxBufferedBytes:   64 * 16 * 1024 * 1024,
 		MaxInboundConnIdle: 30 * time.Second,
 		MaxInboundConnAge:  30 * time.Minute,
 		ListenAddress:      "127.0.0.1:0",

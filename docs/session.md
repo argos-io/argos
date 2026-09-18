@@ -4,7 +4,7 @@
 
 实现侧用 `internal/session` 的类型与接口（`session.Framing`、`ClientSession`、`ServerSession`、`Call`）。下文写 **「分帧实现」** 时指的就是轴内这段逻辑，不是用户可见的独立工厂。
 
-可依赖：`transport`, `descriptor`, `metadata`, `budget`, `status`。  
+可依赖：`transport`, `descriptor`, `metadata`, `status`。  
 **不可**依赖：`codec`（仅 `SessionSpec.CodecName` 字符串）、`compressor`（**仅** `grpc` 例外）、`client` / `server`。
 
 ## `session.Framing`（轴内，非选配维）
@@ -85,7 +85,6 @@ type ServerCall interface {
 - `Recv` 成功时 `release` 非 nil且须调用；`Close` 不回收仍被持有的 payload。
 - 发送方向结束但接收仍开放：返回 `transport.SendError` 且 `ReceiveOpen()==true`。
 - **Carrier 卫生**：未读到协议终态（STATUS / EOF）就 `Close` → `Session.Reusable()` 须变 false（Sequential 尤其重要）。
-- **budget**：可从 `context` 读 `budget.FromContext`；`grpc`、`httpunary` 等在读写路径可选 `TryAcquire`。
 
 ## 与 Pipe / Conn 的配对（断言清单）
 

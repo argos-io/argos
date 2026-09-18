@@ -23,7 +23,6 @@ func TestClientOpenUsesSharedTransport(t *testing.T) {
 	cli, err := newClientLoopback(t, freshLoopback(t, nil, nil),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
-		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
@@ -45,7 +44,7 @@ func TestClientsUseDistinctTransports(t *testing.T) {
 		transports = append(transports, ax)
 		return ax
 	}
-	cfg := &argos.Options{MaxConcurrentCalls: 4, MaxBufferedBytes: 4 * 16 * 1024 * 1024}
+	cfg := &argos.Options{MaxConcurrentCalls: 4}
 	cli1, err := newClientLoopback(t, axFor(), argos.WithClientOptions(cfg), argos.WithServiceName(testService), argos.WithTarget(testTarget))
 	if err != nil {
 		t.Fatalf("New #1: %v", err)
@@ -72,7 +71,6 @@ func TestCallStreamLeakReportsPhaseLeak(t *testing.T) {
 	cli, err := newClientLoopback(t, freshLoopback(t, nil, nil),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
-		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithClientCallErrorObserver(func(info argos.CallInfo, _ error) {
 			if info.Phase == argos.PhaseLeak {
 				phase.Store(uint32(info.Phase))
@@ -164,7 +162,6 @@ func TestClientLeavesAxisToItsOwner(t *testing.T) {
 	opts := []argos.ClientOption{
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
-		argos.WithMaxBufferedBytes(4 * 16 * 1024 * 1024),
 		argos.WithTarget(testTarget),
 	}
 	attachFakePool(inner, fakePoolOptions())

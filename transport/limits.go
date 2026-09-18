@@ -13,9 +13,9 @@ import "time"
 // these numbers — the axis is the single source, which is why passing a
 // mismatched value is not caught anywhere, it is simply not expressible.
 //
-// For the size fields zero means "no limit". An axis constructor seeds the
-// baseline from the same numbers the internal defaults use, so a bare axis
-// already enforces them rather than running unbounded.
+// For every field zero means "no limit" (or no timeout / no drain cap where
+// the axis checks > 0 before enforcing). A bare axis seeds from
+// session.DefaultOptions / sessionpool.DefaultOptions, which are all zero.
 type Limits struct {
 	MaxMessageSize         int64
 	MaxFrameSize           int64
@@ -33,8 +33,9 @@ type Limits struct {
 // They are fixed at construction for the same reason Limits are. The reuse
 // model is not here: how many calls one connection may carry is the protocol's
 // own answer and the axis sets it. An axis that does not pool reports the zero
-// value, and a zero field where it does pool means it declines to bound that
-// dimension.
+// value. MaxSessionsPerEndpoint and time budgets use zero for "no cap".
+// MaxIdleSessions defaults to 0 (keep no idle connections); set < 0 for no cap
+// on idle queue length.
 type PoolLimits struct {
 	MaxSessionsPerEndpoint int
 	MaxIdleSessions        int

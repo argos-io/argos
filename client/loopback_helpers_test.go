@@ -38,6 +38,7 @@ func attachFakePool(ax *fake.Transport, pc sessionpool.Options) {
 func fakePoolOptions() sessionpool.Options {
 	pc := sessionpool.DefaultOptions()
 	pc.MaxCallsPerConn = fake.MaxCallsPerConn(session.Sequential)
+	pc.MaxIdleSessions = 8 // loopback tests expect sequential reuse across calls
 	return pc
 }
 

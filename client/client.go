@@ -10,10 +10,10 @@ import (
 	"sync"
 
 	"github.com/argos-io/argos"
-	"github.com/argos-io/argos/budget"
 	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
+	"github.com/argos-io/argos/internal/establish"
 	"github.com/argos-io/argos/internal/transportbind"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/resolver"
@@ -28,7 +28,7 @@ type opener interface {
 }
 
 // Client owns one protocol (transport + codec) and instance-level admission
-// (MaxConcurrentCalls + MaxBufferedBytes).
+// (MaxConcurrentCalls).
 //
 // It has no Close. Everything a Close used to release belongs to the axis:
 // connections and the pool are the axis' business and the axis' constructor
@@ -41,14 +41,11 @@ type Client struct {
 	service string
 	target  string
 
-	codec   codec.Codec
-	opener  opener
-	perCall int64
+	codec  codec.Codec
+	opener opener
 
-	// Admission: concurrent call slots + instance buffer pool.
-	admitMu   sync.Mutex
-	inFlight  int
-	bufRemain int64
+	admitMu  sync.Mutex
+	inFlight int
 }
 
 // New builds a Client from options only: the Options it starts from is the one
@@ -69,11 +66,6 @@ func New(opts ...argos.ClientOption) (*Client, error) {
 		return nil, fmt.Errorf("client: missing service name; pass argos.WithServiceName")
 	}
 
-	pc, err := cfg.PerCall()
-	if err != nil {
-		return nil, err
-	}
-
 	target := sel.Target
 	op, cd, err := newOpener(cfg, service, sel)
 	if err != nil {
@@ -81,13 +73,11 @@ func New(opts ...argos.ClientOption) (*Client, error) {
 	}
 
 	return &Client{
-		cfg:       cfg,
-		service:   service,
-		target:    target,
-		codec:     cd,
-		opener:    op,
-		perCall:   pc,
-		bufRemain: cfg.MaxBufferedBytes,
+		cfg:     cfg,
+		service: service,
+		target:  target,
+		codec:   cd,
+		opener:  op,
 	}, nil
 }
 
@@ -146,9 +136,6 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 	}()
 
 	md := metadata.New(metadata.RoleInitiator, nil)
-	// Per-call budget is on the call ctx for Framing that reads it.
-	// Admission still reserves perCall bytes at the Client regardless.
-	callBudget := budget.New(c.perCall)
 
 	// The caller's ctx is the whole lifetime of this call: there is no Client
 	// Close to cancel it from behind the caller's back, so a call ends when its
@@ -156,7 +143,6 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 	callCtx, callCancel := context.WithCancel(ctx)
 
 	callCtx = metadata.ContextWith(callCtx, md)
-	callCtx = budget.ContextWith(callCtx, callBudget)
 
 	var gotCall transport.Call
 
@@ -172,7 +158,8 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 		if err != nil {
 			return nil, err
 		}
-		call, err := c.opener.OpenCall(ctx, endpoint, method, transport.CallSpec{Metadata: md})
+		openCtx := establish.WithTimeout(ctx, c.cfg.HandshakeTimeout)
+		call, err := c.opener.OpenCall(openCtx, endpoint, method, transport.CallSpec{Metadata: md})
 		if err != nil {
 			return nil, mapEstablishErr(err)
 		}
@@ -243,7 +230,7 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 		}
 		argos.NotifyCallError(st.cfg, st.info, errors.New("client: CallStream leaked without Close"))
 		// Reclaim the admission reservation. Reporting alone left one slot of
-		// MaxConcurrentCalls and perCall bytes of MaxBufferedBytes held for the
+		// MaxConcurrentCalls slot held for the
 		// life of the Client, so a leak eventually produced ErrCallsExhausted
 		// with no call in flight. The connection is deliberately not touched
 		// here: only Call.Close returns it to the axis, and nobody called it,
@@ -263,14 +250,10 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 func (c *Client) admit() error {
 	c.admitMu.Lock()
 	defer c.admitMu.Unlock()
-	if c.inFlight >= c.cfg.MaxConcurrentCalls {
-		return status.ErrCallsExhausted
-	}
-	if c.perCall > c.bufRemain {
+	if c.cfg.MaxConcurrentCalls > 0 && c.inFlight >= c.cfg.MaxConcurrentCalls {
 		return status.ErrCallsExhausted
 	}
 	c.inFlight++
-	c.bufRemain -= c.perCall
 	return nil
 }
 
@@ -280,5 +263,4 @@ func (c *Client) releaseAdmit() {
 	if c.inFlight > 0 {
 		c.inFlight--
 	}
-	c.bufRemain += c.perCall
 }

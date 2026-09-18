@@ -49,7 +49,6 @@ func startLoadRESP(t *testing.T, tune func(*argos.Options), axOpts ...Option) *l
 
 	cfg := &argos.Options{
 		MaxConcurrentCalls: 64,
-		MaxBufferedBytes:   64 * 16 * 1024 * 1024,
 		ListenAddress:      testListenAddr,
 		ConnErrorObserver: func(info argos.ConnInfo, err error) {
 			if info.Phase == argos.ConnPhaseAdmit && status.CodeOf(err) == status.ResourceExhausted {

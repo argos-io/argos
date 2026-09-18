@@ -156,7 +156,6 @@ func newTestClient(t *testing.T, opts ...argos.ClientOption) *Client {
 	base := []argos.ClientOption{
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(8),
-		argos.WithMaxBufferedBytes(8 * 16 * 1024 * 1024), // 8 × default perCall
 		argos.WithTarget(testTarget),
 	}
 	cli, err := newClientLoopback(t, sequentialLoopback(t, nil), append(base, opts...)...)
@@ -247,40 +246,12 @@ func TestNewWithoutServiceNameFails(t *testing.T) {
 	}
 }
 
-func TestNewFailsWhenConcurrentTimesPerCallExceedsBuffered(t *testing.T) {
-	t.Parallel()
-	// Force conflict via options: 128 × 16MiB >> 1GiB default buffered after
-	// raising concurrent without raising MaxBufferedBytes.
-	_, err := newClientLoopback(t, sequentialLoopback(t, nil),
-		argos.WithServiceName(testService),
-		argos.WithMaxConcurrentCalls(128),
-		argos.WithTarget(testTarget),
-	)
-	if err == nil {
-		t.Fatal("expected options validation error")
-	}
-	msg := err.Error()
-	// The cross-check is the root package's now, so the message says "argos:";
-	// New no longer keeps a copy of it.
-	if !strings.HasPrefix(msg, "argos:") {
-		t.Fatalf("error %q, want the root-package validation message", msg)
-	}
-	for _, field := range []string{
-		"MaxConcurrentCalls", "MaxFrameSize", "MaxMessageSize", "ReadAheadMessages", "MaxBufferedBytes",
-	} {
-		if !strings.Contains(msg, field) {
-			t.Fatalf("error %q missing field %q", msg, field)
-		}
-	}
-}
-
 func TestSessionReusableAfterCall(t *testing.T) {
 	t.Parallel()
 	var dials atomic.Int64
 	cli, err := newClientLoopback(t, sequentialLoopback(t, &dials),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
-		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithHandshakeTimeout(50*time.Millisecond),
 		argos.WithTarget(testTarget),
 	)
@@ -352,7 +323,6 @@ func TestCallerCancelAbortsCall(t *testing.T) {
 	cli, err := newClientLoopback(t, fixedLoopback(tr, f),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
-		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
@@ -400,7 +370,6 @@ func TestOpenFilterShortCircuitNeverDials(t *testing.T) {
 	cli, err := newClientLoopback(t, sequentialLoopback(t, &dials),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
-		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithOpenFilter(func(ctx context.Context, m descriptor.Method, next filter.OpenFunc) (stream.Stream, error) {
 			return nil, want
 		}),
@@ -431,7 +400,6 @@ func TestDialFailureMapsUnavailable(t *testing.T) {
 	cli, err := newClientLoopback(t, fixedLoopback(tr, f),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
-		argos.WithMaxBufferedBytes(2*16*1024*1024),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
@@ -465,7 +433,6 @@ func TestHandshakeTimeoutMapsDeadlineExceeded(t *testing.T) {
 	cli, err := newClientLoopback(t, fixedLoopback(tr, f),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
-		argos.WithMaxBufferedBytes(2*16*1024*1024),
 		argos.WithHandshakeTimeout(30*time.Millisecond),
 		argos.WithTarget(testTarget),
 	)
@@ -503,7 +470,6 @@ func TestHandshakeTimeoutBeforeOpenFilterNext(t *testing.T) {
 	cli, err := newClientLoopback(t, fixedLoopback(tr, f),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
-		argos.WithMaxBufferedBytes(2*16*1024*1024),
 		argos.WithHandshakeTimeout(30*time.Millisecond),
 		argos.WithOpenFilter(func(ctx context.Context, m descriptor.Method, next filter.OpenFunc) (stream.Stream, error) {
 			st, err := next(ctx, m)
@@ -544,7 +510,6 @@ func TestNarrowInterfaceAssertStaysSetupError(t *testing.T) {
 	cli, err := newClientLoopback(t, fixedLoopback(tr, f),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
-		argos.WithMaxBufferedBytes(2*16*1024*1024),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
@@ -573,7 +538,6 @@ func TestOpenRefusesDoneContext(t *testing.T) {
 	cli, err := newClientLoopback(t, sequentialLoopback(t, &dials),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(1),
-		argos.WithMaxBufferedBytes(16*1024*1024), // 1 × default perCall
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {

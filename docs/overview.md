@@ -36,7 +36,7 @@ transport.Transport OpenCall/Serve
 
 由 `invariants_test.go` 强制。要点：
 
-- `transport/*` 不得 import `codec`（协议 = axis × codec，import 它就把两者焊死）；字节管道（`tcp` / `ws` / `udp` / `http1` / `http2`）另不得 import `descriptor` / `metadata` / `budget`，完整线栈（`grpc` / `httpunary`）才可以
+- `transport/*` 不得 import `codec`（协议 = axis × codec，import 它就把两者焊死）；字节管道（`tcp` / `ws` / `udp` / `http1` / `http2`）另不得 import `descriptor` / `metadata`，完整线栈（`grpc` / `httpunary`）才可以
 - 仅 `transport/grpc` 可 import `compressor` 与 genproto
 - 不用 gRPC 的二进制不得传递依赖 `grpc`
 

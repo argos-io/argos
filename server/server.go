@@ -74,14 +74,10 @@ func New(opts ...argos.ServerOption) *Server {
 		fallback := argos.Defaults()
 		cfg = &fallback
 	}
-	perCall, cerr := cfg.PerCall()
-	if cerr != nil {
-		perCall = 0
-	}
 	return &Server{
 		cfg:    cfg,
 		cfgErr: err,
-		admit:  newAdmitGate(cfg.MaxConcurrentCalls, cfg.MaxBufferedBytes, perCall),
+		admit:  newAdmitGate(cfg.MaxConcurrentCalls),
 		routes: make(map[string]map[string]routeEntry),
 	}
 }

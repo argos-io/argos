@@ -41,7 +41,6 @@ func openFilterClientWith(t *testing.T, dials *atomic.Int64, poolMax int, f filt
 		argos.WithCodec(loopbackCodecName),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
-		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithOpenFilter(f),
 		argos.WithTarget(testTarget),
 	)

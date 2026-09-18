@@ -154,12 +154,6 @@ func echoWithRetry(ctx context.Context, cli *client.Client, m descriptor.Method)
 
 ---
 
-## 背压（budget）
-
-无需额外 API：`MaxBufferedBytes` 与 `MaxConcurrentCalls` 已在 `Open` / `handleCall` 准入时 carve `perCall`，grpc / httpunary 等在读写 payload 时扣减。超限为 `status.ErrCallsExhausted`。
-
----
-
 ## TLS（http2 / http1）
 
 ```go
