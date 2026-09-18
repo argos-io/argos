@@ -26,37 +26,37 @@ var section9Checklist = []section9Evidence{
 	{id: "§9-1a", title: "OpenStream before response headers", pkg: "./transport/http2", test: "TestOpenStreamReturnsBeforeResponseHeaders"},
 	{id: "§9-1b", title: "HTTP/1 OpenStream before response headers", pkg: "./transport/http1", test: "TestOpenStreamReturnsBeforeResponseHeaders"},
 	{id: "§9-1c", title: "gRPC interop smoke (h2c unary)", pkg: "./framing/grpc", test: "TestH2CUnaryEcho"},
-	{id: "§9-1d", title: "envelope sequential N calls one dial", pkg: "./framing/envelope", test: "TestSequentialNCallsOneDial"},
+	{id: "§9-1d", title: "sequential pool one dial per endpoint", pkg: "./internal/sessionpool", test: "TestOpenCallSequentialEmptyPoolOwnDial"},
 	{id: "§9-1e", title: "server AcceptCall loop survives handler error", pkg: "./server", test: "TestHandlerErrorDoesNotEndLoop"},
 	{id: "§9-1f", title: "Shutdown wakes idle AcceptCall", pkg: "./server", test: "TestShutdownIdleConnExitsQuickly"},
 	{id: "§9-1g", title: "OpenFilter short-circuit never dials", pkg: "./client", test: "TestOpenFilterShortCircuitNeverDials"},
-	{id: "§9-1h", title: "UDP envelope single-datagram round-trip", pkg: "./framing/envelope", test: "TestUDPTransportEnvelopeRoundTrip"},
+	{id: "§9-1h", title: "UDP transport dial serve round-trip", pkg: "./transport/udp", test: "TestDialServeRoundTrip"},
 
 	// §9-2: architecture invariants + transitive neutrality.
 	{id: "§9-2a", title: "§3 / §3.1 dependency table", pkg: ".", test: "TestInvariantDependencyTable"},
-	{id: "§9-2b", title: "envelope+tcp transitive no gRPC", pkg: ".", test: "TestInvariantTransitiveEnvelopeTCPNoGRPC"},
-	{id: "§9-2c", title: "envelope+udp transitive no genproto", pkg: ".", test: "TestInvariantTransitiveEnvelopeUDPNoGenproto"},
+	{id: "§9-2b", title: "resp+tcp transitive no gRPC", pkg: ".", test: "TestInvariantTransitiveRespTCPNoGRPC"},
+	{id: "§9-2c", title: "transport/udp transitive no genproto", pkg: ".", test: "TestInvariantTransitiveTransportUDPNoGenproto"},
 	{id: "§9-2d", title: "wholebody+http1 transitive no gRPC", pkg: ".", test: "TestInvariantTransitiveWholebodyHTTP1NoGRPC"},
 
 	// §9-3: Conn/Carrier matrix + shape rejects (thin combo gate).
 	{id: "§9-3a", title: "Conn/Carrier interface matrix (5 transports)", pkg: "./transport", test: "TestConnCarrierMatrix"},
-	{id: "§9-3b", title: "UDP/datagram rejects non-unary", pkg: "./framing/envelope", test: "TestDatagramRejectsNonUnary"},
+	{id: "§9-3b", title: "gRPC AcceptCall reject returns finishable call", pkg: "./framing/grpc", test: "TestAcceptCallRejectReturnsFinishableCall"},
 	{id: "§9-3c", title: "wholebody rejects non-unary before handler", pkg: "./framing/wholebody", test: "TestAcceptRejectsNonUnary"},
 	{id: "§9-3d", title: "narrow-interface config error path", pkg: "./client", test: "TestNarrowInterfaceAssertStaysConfigError"},
 	{id: "§9-3e", title: "server has no concrete Framing type-switch", pkg: "./server", test: "TestNoConcreteFramingTypeSwitch"},
 
-	// §9-4: envelope / carrier wire behaviour.
-	{id: "§9-4a", title: "OPEN|END distinct from empty DATA", pkg: "./framing/envelope", test: "TestOpenEndDistinctFromEmptyData"},
-	{id: "§9-4b", title: "datagram zero-message OPEN|END", pkg: "./framing/envelope", test: "TestDatagramZeroMessageOpenEnd"},
-	{id: "§9-4c", title: "UDP binding rejects oversized MaxMessageSize", pkg: "./framing/envelope", test: "TestBindingNewRejectsOversizedUDP"},
-	{id: "§9-4d", title: "frame parser fuzz", pkg: "./framing/envelope", test: "FuzzParseFrameBody", softGap: "fuzz target; run go test -fuzz=FuzzParseFrameBody separately"},
+	// §9-4: example / wire behaviour (non-gRPC framing).
+	{id: "§9-4a", title: "resp wire round-trip", pkg: "./example/resp", test: "TestWireRoundTrip"},
+	{id: "§9-4b", title: "resp HELLO once per session", pkg: "./example/resp", test: "TestHELLOOncePerSession"},
+	{id: "§9-4c", title: "resp SET/GET same connection", pkg: "./example/resp", test: "TestSetGetSameConnection"},
+	{id: "§9-4d", title: "gRPC LPM rejects oversize without alloc", pkg: "./framing/grpc", test: "TestReadLPMLimitedRejectsOversizeWithoutAlloc"},
 
 	// §9-5: state machine / lifecycle.
 	{id: "§9-5a", title: "client Close rejects Open", pkg: "./client", test: "TestCloseIdempotentAndRejectsOpen"},
 	{id: "§9-5b", title: "client Close no goroutine leak", pkg: "./client", test: "TestCloseNoGoroutineLeak"},
 	{id: "§9-5c", title: "server Shutdown drains in-flight", pkg: "./server", test: "TestShutdownDrainsInFlightCall"},
-	{id: "§9-5d", title: "carrier hygiene: early client Close not pooled", pkg: "./framing/envelope", test: "TestClientEarlyCloseNotReturnedToPool"},
-	{id: "§9-5e", title: "carrier hygiene: server drain residuals", pkg: "./framing/envelope", test: "TestServerDrainResidualsNextCall"},
+	{id: "§9-5d", title: "wholebody early rejection keeps response readable", pkg: "./framing/wholebody", test: "TestEarlyRejectionKeepsResponseReadable"},
+	{id: "§9-5e", title: "resp SendHeaders unimplemented next call works", pkg: "./example/resp", test: "TestSendHeadersUnimplementedNextCallWorks"},
 
 	// §9-6: gRPC interop formal gate.
 	{id: "§9-6a", title: "interop h2c unary echo", pkg: "./framing/grpc", test: "TestH2CUnaryEcho"},
@@ -101,7 +101,7 @@ var section9Checklist = []section9Evidence{
 	{id: "§9-11e", title: "inbound conn idle closes Accept", pkg: "./server", test: "TestInboundConnIdleClosesAccept"},
 
 	// §9-12: six-shape assemblability gate.
-	{id: "§9-12a", title: "echo shapes (grpc/envelope/wholebody)", pkg: "./example/echo", test: "TestClientEchoTransports"},
+	{id: "§9-12a", title: "echo shapes (grpc/wholebody)", pkg: "./example/echo", test: "TestClientEchoTransports"},
 	{id: "§9-12b", title: "resp×tcp SET/GET same connection", pkg: "./example/resp", test: "TestSetGetSameConnection"},
 	{id: "§9-12c", title: "synth×tcp greeting before call", pkg: "./example/synth", test: "TestGreetingReceivedBeforeCall"},
 	{id: "§9-12d", title: "composition layer no concrete protocol names", pkg: ".", test: "TestInvariantCompositionNoConcreteProtocolNames"},

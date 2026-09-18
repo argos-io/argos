@@ -8,7 +8,7 @@ Argos 是 **C/S 协议组合运行时**：分层组装 **建连（Transport）�
 
 - 连接可复用，工作单元是 **一次或一段交换**（unary、client/server/bidi 流）。
 - 交换在 API 上可对应 **method / 命令 / HTTP :path** 等（由 Framing 映射到 `descriptor.Method` 或 synthetic method）。
-- 典型：**gRPC**、**envelope**、**wholebody**、**类 Redis/Memcached 命令往返**（`example/resp`）。
+- 典型：**gRPC**、**wholebody**、**类 Redis/Memcached 命令往返**（`example/resp`）。
 
 **条件覆盖**——映射存在且分层仍诚实，但状态与 wire 不完全等于「一次 `Open` = 一次 Call」：
 
@@ -67,8 +67,8 @@ Argos 是 **C/S 协议组合运行时**：分层组装 **建连（Transport）�
 type ReuseModel uint8
 
 const (
-    OneCallPerConn ReuseModel = iota // 如 envelope×udp
-    Sequential                       // 如 envelope×tcp/ws
+    OneCallPerConn ReuseModel = iota // 如自定义 × udp
+    Sequential                       // 如 example/resp×tcp
     Concurrent                       // 如 grpc×http2
 )
 ```
@@ -95,7 +95,6 @@ const (
 | `transport` | —— | 不 import `descriptor` / `framing` |
 | `transport/{tcp,ws,udp,http1,http2}` | `transport`、`status` | |
 | `framing` | `transport`、`descriptor`、`metadata`、`budget`、`status` | 不 import `compressor` |
-| `framing/envelope` | 同 `framing` | |
 | `framing/grpc` | 同 `framing` + `compressor` + `internal/httpstatus` + genproto | 唯一可 import genproto |
 | `framing/wholebody` | 同 `framing` + `internal/httpstatus` | |
 | `stream` / `filter` / `resolver` | 见表意 | |

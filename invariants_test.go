@@ -280,24 +280,24 @@ func TestInvariantClientDepsNoProbe(t *testing.T) {
 	}
 }
 
-// TestInvariantTransitiveEnvelopeTCPNoGRPC is Task 2.7 / §3.1-15:
-// a program that only imports framing/envelope + transport/tcp must not
-// transitively depend on gRPC framing, binding, compressor, or genproto.
-func TestInvariantTransitiveEnvelopeTCPNoGRPC(t *testing.T) {
+// TestInvariantTransitiveRespTCPNoGRPC is Task 2.7 / §3.1-15:
+// example/resp + transport/tcp must not transitively depend on gRPC framing,
+// binding, compressor, or genproto.
+func TestInvariantTransitiveRespTCPNoGRPC(t *testing.T) {
 	t.Parallel()
-	assertTransitiveNoGRPC(t, "envelope+tcp", "./framing/envelope", "./transport/tcp")
+	assertTransitiveNoGRPC(t, "resp+tcp", "./example/resp", "./transport/tcp")
 }
 
-// TestInvariantTransitiveEnvelopeUDPNoGenproto is Task 4.2:
-// framing/envelope + transport/udp must not pull genproto (same gate as tcp).
-func TestInvariantTransitiveEnvelopeUDPNoGenproto(t *testing.T) {
+// TestInvariantTransitiveTransportUDPNoGenproto is Task 4.2:
+// transport/udp alone must not pull genproto (same neutrality gate as tcp stacks).
+func TestInvariantTransitiveTransportUDPNoGenproto(t *testing.T) {
 	t.Parallel()
-	assertTransitiveNoGRPC(t, "envelope+udp", "./framing/envelope", "./transport/udp")
+	assertTransitiveNoGRPC(t, "transport/udp", "./transport/udp")
 }
 
 // TestInvariantTransitiveWholebodyHTTP1NoGRPC is Task 6.3 / §9-2:
 // wholebody + http1 must not transitively depend on gRPC framing, binding,
-// compressor, or genproto (same neutrality gate as envelope+tcp).
+// compressor, or genproto (same neutrality gate as resp+tcp).
 func TestInvariantTransitiveWholebodyHTTP1NoGRPC(t *testing.T) {
 	t.Parallel()
 	assertTransitiveNoGRPC(t, "wholebody+http1", "./framing/wholebody", "./transport/http1")
@@ -505,7 +505,6 @@ func TestInvariantCompositionNoConcreteProtocolNames(t *testing.T) {
 	}
 	// Word-boundary tokens: avoid matching "Response" for "resp", etc.
 	forbidden := []*regexp.Regexp{
-		regexp.MustCompile(`(?i)\benvelope\b`),
 		regexp.MustCompile(`(?i)\bgrpc\b`),
 		regexp.MustCompile(`(?i)\bwholebody\b`),
 		regexp.MustCompile(`(?i)\bresp\b`),

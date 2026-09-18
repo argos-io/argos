@@ -281,7 +281,7 @@ func (c *Conn) Addr() net.Addr { return c.nc.LocalAddr() }
 func (c *Conn) Read(p []byte) (int, error) { return c.nc.Read(p) }
 
 // SetReadDeadline forwards to the underlying net.Conn so framings that arm
-// OpenTimeout (envelope) can bound half-open reads on tcp carriers.
+// OpenTimeout (sequential framing) can bound half-open reads on tcp carriers.
 func (c *Conn) SetReadDeadline(t time.Time) error { return c.nc.SetReadDeadline(t) }
 
 // SetDeadline forwards to the underlying net.Conn.

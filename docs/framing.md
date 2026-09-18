@@ -1,6 +1,6 @@
 # Framing 接入
 
-包：`github.com/argos-io/argos/framing`（接口）+ 子包 `envelope` / `grpc` / `wholebody` 或自建 `framing/yourproto`。
+包：`github.com/argos-io/argos/framing`（接口）+ 子包 `grpc` / `wholebody` 或自建 `framing/yourproto`（参考 `example/resp`、`example/synth`）。
 
 可依赖：`transport`, `descriptor`, `metadata`, `budget`, `status`。  
 **不可**依赖：`codec`（仅 `SessionSpec.CodecName` 字符串）、`compressor`（**仅** `framing/grpc` 例外）、`client` / `server`。
@@ -17,8 +17,8 @@ type Framing interface {
 
 | `ReuseModel` | 含义 | 示例 |
 |--------------|------|------|
-| `OneCallPerConn` | 一条连接一次调用后关闭 | envelope × udp |
-| `Sequential` | 可复用，同时最多 1 个 in-flight | envelope × tcp/ws |
+| `OneCallPerConn` | 一条连接一次调用后关闭 | 自定义 × udp |
+| `Sequential` | 可复用，同时最多 1 个 in-flight | example/resp × tcp |
 | `Concurrent` | 多路并发调用 | grpc × http2, wholebody × http1 |
 
 `New*Session`：
@@ -55,7 +55,7 @@ Close() error     // 关 Session + Conn
 
 1. **残余 drain**：上一 call 未读尽的帧须在解析下一 OPEN 前有限丢弃（`MaxDrainBytes`）。
 2. **OpenTimeout**：首字节前只受 accept ctx；首字节后启动 Open 解析超时。
-3. **Reject 可写回**：wrap `framing.ErrCallRejected` + `status.Error`；参考 envelope 空 method、wholebody/grpc 非法 path。
+3. **Reject 可写回**：wrap `framing.ErrCallRejected` + `status.Error`；参考 wholebody/grpc 非法 path、example/resp 非法命令。
 
 ## `Call` / `ServerCall`
 
@@ -79,7 +79,7 @@ type ServerCall interface {
 - `Recv` 成功时 `release` 非 nil且须调用；`Close` 不回收仍被持有的 payload。
 - 发送方向结束但接收仍开放：返回 `transport.SendError` 且 `ReceiveOpen()==true`。
 - **Carrier 卫生**：未读到协议终态（STATUS / EOF）就 `Close` → `Session.Reusable()` 须变 false（Sequential 尤其重要）。
-- **budget**：可从 `context` 读 `budget.FromContext`（当前 **envelope** 使用）；其他实现可选。
+- **budget**：可从 `context` 读 `budget.FromContext`；`framing/grpc`、`framing/wholebody` 等在读写路径可选 `TryAcquire`。
 
 ## 与 Transport 的配对（断言清单）
 
@@ -87,10 +87,9 @@ type ServerCall interface {
 
 | Framing | 客户端 Conn | 服务端 Conn / Carrier | 常用 Carrier 接口 |
 |---------|-------------|------------------------|-------------------|
-| envelope + tcp/ws | `CarrierConn` → `ByteStreamCarrier` 或 `MessageCarrier` | 同左 | + `SendCloser` |
-| envelope + udp | `CarrierConn` → `DatagramCarrier` | 同左 | |
 | grpc | `StreamConn` | 每 stream：`ByteStreamCarrier`, `ResponseWriter` 等 | 头/trailers |
 | wholebody | `StreamConn` | 每请求 `CarrierConn`：`ByteStreamCarrier`, `UnaryResponseWriter`, `RequestHeaderReader` | unary only |
+| example/resp | `CarrierConn` → `ByteStreamCarrier` | 同左 | + `SendCloser` |
 
 不匹配组合在 `New*Session` 报错即可，无需组合层特判。
 
@@ -101,11 +100,11 @@ type ServerCall interface {
 - [ ] `AcceptCall` 三类错误语义 + reject 时非 nil `ServerCall`
 - [ ] Sequential：`MaxDrainBytes`、OpenTimeout、idle/peer close → `Reusable`
 - [ ] `Call.Close` 同步 join + 未读终态 → 不复用
-- [ ] `SendError` / `ErrSendClosed` 与 grpc/envelope 测试对齐
+- [ ] `SendError` / `ErrSendClosed` 与 grpc/wholebody 测试对齐
 - [ ] 包依赖不违反 [architecture.md](architecture.md#分层与依赖)
 - [ ] 测试：`internal/fake` 或真实 transport 环回
 
 ## 参考与反例
 
-- **内置分帧（RPC / HTTP unary 等）**：`framing/envelope`、`framing/grpc`、`framing/wholebody`
+- **内置分帧**：`framing/grpc`、`framing/wholebody`
 - **连接级状态 / 非 gRPC 命令式 C/S**：`example/resp`、`example/synth`（仍实现同一套 `Framing` 接口，但可自定义握手与 `Accept` 语义；证明组合层无需为具体协议特判）

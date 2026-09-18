@@ -21,7 +21,7 @@
 ```
 descriptor/  status/  metadata/  budget/
 transport/  transport/{tcp,ws,udp,http1,http2}/
-framing/  framing/{envelope,grpc,wholebody}/
+framing/  framing/{grpc,wholebody}/
 codec/  codec/{protobuf,json}/
 compressor/  compressor/{gzip,grpccodec}/
 stream/  filter/

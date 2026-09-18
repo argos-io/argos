@@ -601,7 +601,6 @@ func TestNoConcreteFramingTypeSwitch(t *testing.T) {
 				for _, expr := range cc.List {
 					name := exprString(expr)
 					if strings.Contains(name, "fake.") ||
-						strings.Contains(name, "envelope.") ||
 						strings.Contains(name, "grpc.") ||
 						strings.Contains(name, "tcp.") ||
 						strings.Contains(name, "http2.") {

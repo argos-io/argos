@@ -245,9 +245,8 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 	}()
 
 	md := metadata.New(metadata.RoleInitiator, nil)
-	// Per-call budget is on the call ctx for Framing that reads it (envelope
-	// today). wholebody/grpc admission still reserves perCall bytes at the
-	// Client, but those stacks do not TryAcquire from ctx yet.
+	// Per-call budget is on the call ctx for Framing that reads it.
+	// Admission still reserves perCall bytes at the Client regardless.
 	callBudget := budget.New(c.perCall)
 
 	callCtx, callCancel := context.WithCancel(ctx)

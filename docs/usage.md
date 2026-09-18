@@ -20,7 +20,7 @@ server: Transport.Serve → Conn → NewServerSession
 ```
 
 - 会话池维护**在途调用引用计数**；`Sequential` / `OneCallPerConn` 承载力为 1，`Concurrent` 无上限（忙则 `ErrSessionBusy`）。空闲受 `MaxIdleSessions` / `SessionIdleTimeout` / `MaxSessionLifetime` 约束。
-- **`MaxBufferedBytes`**：`perCall = MaxBufferedBytes / MaxConcurrentCalls` 放入调用 ctx 的 `budget.Budget`；`framing/envelope`、`framing/grpc`、`framing/wholebody` 在读写路径 `TryAcquire`。服务端在 `admit` 后通过 `framing.BudgetSetter` 晚绑定到 Call。
+- **`MaxBufferedBytes`**：`perCall = MaxBufferedBytes / MaxConcurrentCalls` 放入调用 ctx 的 `budget.Budget`；`framing/grpc`、`framing/wholebody` 等在读写路径 `TryAcquire`。服务端在 `admit` 后通过 `framing.BudgetSetter` 晚绑定到 Call。
 - **生命周期**：只有 `Transport` 在工厂接口上声明 `Close()`；资源在 `Conn` / `Session` / `Call`。`Framing` / `Codec` 工厂不得持有需释放的资源。
 
 ## 调用收尾约定

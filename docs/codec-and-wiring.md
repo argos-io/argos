@@ -18,7 +18,7 @@ type Codec interface {
 | `Unmarshal` | 不得 retain `b` 的子切片；要持久化须拷贝 |
 | 可选 `Named` | `CodecName() string`，用于与 `SessionSpec.CodecName` 对齐 |
 
-内置 `protobuf` / `json` 面向 `proto.Message`。wholebody 默认 JSON + protojson；grpc/envelope 默认 protobuf。类型与 codec 不匹配在**首次调用**失败（见 [codegen.md](codegen.md)）。
+内置 `protobuf` / `json` 面向 `proto.Message`。wholebody 默认 JSON + protojson；grpc 默认 protobuf。类型与 codec 不匹配在**首次调用**失败（见 [codegen.md](codegen.md)）。
 
 自定义消息模型（非 proto）须自带 `Codec` 并在 `ServiceCodec` 工厂中返回。
 
@@ -68,7 +68,7 @@ client.New(
 - `SessionSpec{CodecName, Config}` — `Config` 为 `framing.Config` 快照（`MaxMessageSize`、`MaxFrameSize`、metadata 限额、`OpenTimeout`、`MaxDrainBytes` 等）
 - `CallSpec{Metadata}` — 组合层创建的 `CallMetadata`；入站 metadata 必须写入此 handle
 
-Framing **不**从全局 `Config` 读；客户端 per-call `budget` 在 call ctx 上（当前 mainly envelope 使用，见 [usage.md](usage.md)）。
+Framing **不**从全局 `Config` 读；客户端 per-call `budget` 在 call ctx 上（见 [usage.md](usage.md)）。
 
 ## 生成桩与路由
 

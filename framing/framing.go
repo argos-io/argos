@@ -64,10 +64,10 @@ type ReuseModel uint8
 
 const (
 	// OneCallPerConn: one connection carries one call, then closes
-	// (e.g. envelope × udp).
+	// (e.g. custom framing × udp).
 	OneCallPerConn ReuseModel = iota
 	// Sequential: connection is reusable, but only one in-flight call at a
-	// time (e.g. envelope × {tcp, ws}, resp).
+	// time (e.g. example/resp × tcp).
 	Sequential
 	// Concurrent: one connection carries many concurrent calls
 	// (e.g. grpc × http2, wholebody × http1).
@@ -89,7 +89,7 @@ type Framing interface {
 	Reuse() ReuseModel
 	// NewClientSession completes connection-level handshake and auth (MySQL
 	// greeting+auth, Redis HELLO/AUTH, protocol-initiated TLS upgrade). For
-	// protocols without handshake (envelope, grpc, wholebody) it only asserts
+	// protocols without handshake (grpc, wholebody) it only asserts
 	// narrow interfaces and performs no I/O.
 	// On success the Session owns Conn; on failure the composition layer closes Conn.
 	NewClientSession(ctx context.Context, c transport.Conn, spec SessionSpec) (ClientSession, error)
@@ -191,12 +191,12 @@ type Call interface {
 	// descriptor.Method.FullName. Server discovers it from OPEN / request
 	// target; client takes it from descriptor.Method.
 	Method() string
-	// Deadline returns the inbound deadline (envelope OPEN or grpc-timeout).
+	// Deadline returns the inbound deadline (e.g. grpc-timeout).
 	// The composition layer derives the call ctx from it; Call does not
 	// produce context.
 	Deadline() (time.Time, bool)
 	// SendHeaders is responder-only; it submits current initial metadata
-	// (empty headers allowed). wholebody/http1, envelope/udp, and the
+	// (empty headers allowed). wholebody/http1 and the
 	// initiator return a stable status.Unimplemented error.
 	SendHeaders() error
 	// Recv returns payload and a non-nil idempotent release on success;
