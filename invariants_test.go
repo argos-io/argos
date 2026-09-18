@@ -741,7 +741,7 @@ func TestZeroCoreAPIChangesEvidence(t *testing.T) {
 			t.Fatalf("missing 7.2b evidence file %s: %v", rel, err)
 		}
 		body := string(data)
-		for _, need := range []string{"Zero core API", "transport/", "protocol/", "client/", "server/"} {
+		for _, need := range []string{"Zero core API", "transport/", "internal/session", "client/", "server/"} {
 			if !strings.Contains(body, need) {
 				t.Errorf("%s: missing required evidence phrase %q", rel, need)
 			}

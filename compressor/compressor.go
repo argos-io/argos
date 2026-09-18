@@ -1,6 +1,6 @@
 // Package compressor defines message compression algorithms for gRPC session.
 //
-// Only framing/grpc and binding/grpc may import this package. Algorithms are
+// Only transport/grpc may import this package. Algorithms are
 // injected via binding/grpc Options; there is no process-level registry.
 package compressor
 

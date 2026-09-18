@@ -1,14 +1,14 @@
 # gRPC 生态可选包（Health / Reflection / Retry）
 
-业务仍走 **http2 + grpc + protobuf** Transport × Codec（legacy 三工厂过渡）；Health、Reflection 是**额外 Register 的标准 gRPC 服务**，与 `echo.v1.EchoService` 等业务服务共用同一监听面（相同 `ServiceListenAddress` + 相同Transport × Codec（legacy 三工厂过渡）工厂时，`server.Run` 只开一条 listener，按 method 路由）。
+业务仍走 **`transport/grpc` + protobuf**（Transport × Codec）；Health、Reflection 是**额外 Register 的标准 gRPC 服务**，与 `echo.v1.EchoService` 等业务服务共用同一监听面（相同 `ServiceListenAddress` 且相同 Transport 注册名时，`server.Run` 只开一条 listener，按 method 路由）。
 
 包路径（按需 import，不进入根包 `argos`）：
 
 | 包 | 作用 |
 |---|---|
-| `transport/transport/grpc/health` | `grpc.health.v1.Health`（Check / List / Watch） |
-| `transport/transport/grpc/reflection` | `grpc.reflection.v1.ServerReflection`（v1，对齐 grpc-go `RegisterV1`） |
-| `transport/transport/grpc/retry` | 客户端 `Attempts` 包装 Open（非内置重试策略） |
+| `transport/grpc/health` | `grpc.health.v1.Health`（Check / List / Watch） |
+| `transport/grpc/reflection` | `grpc.reflection.v1.ServerReflection`（v1，对齐 grpc-go `RegisterV1`） |
+| `transport/grpc/retry` | 客户端 `Attempts` 包装 Open（非内置重试策略） |
 
 Filter / OpenFilter 见 [usage.md](usage.md) 运行时路径；观测、鉴权仍用 `WithFilter` / `WithOpenFilter`。
 
@@ -25,10 +25,10 @@ import (
 
 	"github.com/argos-io/argos"
 	echov1 "github.com/argos-io/argos/example/echo"
-	"github.com/argos-io/argos/transport/transport/grpc/health"
-	"github.com/argos-io/argos/transport/transport/grpc/reflection"
+	"github.com/argos-io/argos/transport/grpc/health"
+	"github.com/argos-io/argos/transport/grpc/reflection"
 	"github.com/argos-io/argos/server"
-	healthpb "google.golang.org/transport/grpc/health/grpc_health_v1"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/protobuf/reflect/protoregistry"
 )
 
@@ -116,7 +116,7 @@ import (
 	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/transport/transport/grpc/retry"
+	"github.com/argos-io/argos/transport/grpc/retry"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/stream"
 )
@@ -182,6 +182,6 @@ http1 同样提供 `transport/http1.WithServerTLS` / `WithClientTLS`；客户端
 | 用例 | 位置 |
 |------|------|
 | Echo + Health + Reflection 同服 | `example/echo/grpc_ecosystem_test.go` |
-| Health ↔ grpc-go client | `transport/transport/grpc/health/health_test.go` |
-| Reflection ListServices | `transport/transport/grpc/reflection/reflection_test.go` |
-| Retry Attempts | `transport/transport/grpc/retry/retry_test.go` |
+| Health ↔ grpc-go client | `transport/grpc/health/health_test.go` |
+| Reflection ListServices | `transport/grpc/reflection/reflection_test.go` |
+| Retry Attempts | `transport/grpc/retry/retry_test.go` |

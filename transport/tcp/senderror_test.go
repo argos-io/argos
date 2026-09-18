@@ -11,7 +11,7 @@ import (
 
 // A TCP write failure does not imply the peer stopped sending: the response may
 // still sit in the receive buffer. Send must therefore be classifiable as a
-// transport.SendError whose receive direction is open, so framing/stream can
+// transport.SendError whose receive direction is open, so stream can
 // report the send direction finished (stream.ErrSendClosed) instead of tearing
 // the exchange down and losing the remote status.
 func TestWriteFailureOnLiveConnKeepsReceiveOpen(t *testing.T) {

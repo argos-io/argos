@@ -20,8 +20,8 @@ import (
 // Framing does not read global configuration. Fields apply to every call on
 // the session; they are not per-call overrides.
 //
-// Only protocol-agnostic limits belong here. Compression is a framing/grpc
-// construction concern for gRPC framing (§3.1-10); Options
+// Only protocol-agnostic limits belong here. Compression is a transport/grpc
+// construction concern (§3.1-10); Options
 // must not grow compression fields.
 type Options struct {
 	MaxMessageSize  int64

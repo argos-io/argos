@@ -1,21 +1,21 @@
 # 内置组合与 Carrier 能力矩阵
 
-用于选型与自检：**Framing 在 `New*Session` 里 assert 的能力必须与实际 Transport 一致**。
+用于选型与自检：每个 **Transport 轴**在 `New*Session` 里对 `Conn` 的窄接口断言必须与其底层 pipe 一致。
 
 ## 已验证组合（里程碑资产）
 
-| Transport | Framing | Codec | `Reuse()` | 证明点 |
-|-----------|---------|-------|-----------|--------|
-| http2 | grpc | protobuf | Concurrent | 多路复用、H2 头/trailers、gRPC 压缩 |
-| http1 | httpunary | json | Concurrent | 整 body 一次提交、仅 unary |
-| tcp | resp（example） | — | Sequential | 连接级 HELLO/AUTH、无 metadata |
-| tcp | synth（example） | — | Sequential | 服务端先发 greeting 等合成行为 |
+| 注册名（Transport × Codec） | 实现内 pipe | `Reuse()` | 证明点 |
+|-----------------------------|-------------|-----------|--------|
+| `grpc` × `protobuf` | http2 + gRPC 分帧 | Concurrent | 多路复用、H2 头/trailers、gRPC 压缩 |
+| `httpunary` × `json` | http1 + 整包 unary | Concurrent | 整 body 一次提交、仅 unary |
+| `resp`（example） | tcp + RESP2 | Sequential | 连接级 HELLO/AUTH、无 metadata |
+| `synth`（example） | tcp + 合成协议 | Sequential | 服务端先发 greeting 等合成行为 |
 
-产品选型：**Transport 实例 × Codec**（如 `transport/grpc` + protobuf、`transport/httpunary` + json）。echo 入口：`example/echo/binding.go`（`GRPCTransport`、`HTTPUnaryRPCTransport`）。
+产品选型：**`ServiceBindListen(addr, transportName, codecName)`** 与 client 的 `WithTransport` / `WithCodec`（如 `grpc` + `protobuf`、`httpunary` + `json`）。echo 见 [`example/echo/main.go`](../example/echo/main.go)。
 
-上表按实现内部分解为 pipe + framing，便于对照 `Reuse()` 与 Carrier；对外配置不再要求三工厂。
+上表「pipe」列仅便于对照 `Reuse()` 与 Carrier；对外只配 Transport 名与 Codec 名。
 
-## Conn × Framing 角色
+## Conn 角色（按 pipe）
 
 | | 客户端 `Conn` | 服务端 |
 |--|---------------|--------|
@@ -39,7 +39,7 @@
 
 ## 形态（Shape）支持
 
-| Framing | Unary | 客户端流 | 服务端流 | 双向流 |
+| Transport | Unary | 客户端流 | 服务端流 | 双向流 |
 |---------|-------|----------|----------|--------|
 | grpc | ✓ | ✓ | ✓ | ✓ |
 | httpunary | ✓ | ✗（Accept 拒绝） | ✗ | ✗ |
@@ -47,7 +47,7 @@
 
 ## 不打算支持的组合
 
-- 任意 Framing 配不匹配的 Conn（如 httpunary 配无 `StreamConn`/`UnaryResponseWriter` 路径）→ 应在 `New*Session` 失败。
+- Transport 轴与底层 `Conn` 能力不匹配（如 httpunary 配无 `StreamConn`/`UnaryResponseWriter` 路径）→ 应在 `New*Session` 失败。
 - udp 上多路复用、非 gRPC 的通用 H2 应用协议 → 见 README 非目标。
 
 新增组合时：在本表加一行，并补充 `New*Session` 断言测试或 echo 集成用例。

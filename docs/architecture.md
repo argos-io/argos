@@ -1,29 +1,29 @@
 # 架构与目标
 
-Argos 是 **C/S 协议组合运行时**：分层组装 **建连（Transport）→ 握手与交换边界（Framing）→ 载荷编解码（Codec）**，由 `client` / `server` 提供统一的 Dial、池化、准入、路由与 Filter。**RPC（含 gRPC）是重要且完整验证的子集**，不是唯一适用形态；命令式、连接级握手、无 metadata 通道的协议同属设计区（见 `example/resp`、`example/synth`）。
+Argos 是 **C/S 协议组合运行时**：对外选型为 **Transport × Codec**；**Transport 轴**（`transport.Transport`）内含字节管道、握手、分帧与会话池，产出 **Conn → Session → Call**，再由 **Codec** 编解码载荷。`client` / `server` 提供统一的 Dial、池化、准入、路由与 Filter。**RPC（含 gRPC）是重要且完整验证的子集**，不是唯一适用形态；命令式、连接级握手、无 metadata 通道的协议同属设计区（见 `example/resp`、`example/synth`）。
 
 ## 协议覆盖范围
 
 **核心设计区**——组合层（会话池、`Open` / `AcceptCall`、两级路由、Filter）价值最大：
 
 - 连接可复用，工作单元是 **一次或一段交换**（unary、client/server/bidi 流）。
-- 交换在 API 上可对应 **method / 命令 / HTTP :path** 等（由 Framing 映射到 `descriptor.Method` 或 synthetic method）。
+- 交换在 API 上可对应 **method / 命令 / HTTP :path** 等（由 Transport 轴内分帧映射到 `descriptor.Method` 或 synthetic method）。
 - 典型：**gRPC**、**httpunary**、**类 Redis/Memcached 命令往返**（`example/resp`）。
 
 **条件覆盖**——映射存在且分层仍诚实，但状态与 wire 不完全等于「一次 `Open` = 一次 Call」：
 
 - **连接级状态**（事务、SUBSCRIBE 独占、prepared stmt）：落在 `Session`（`Reusable()`、exclusive）或 **长期 Call**；组合层 **无** DB Session 式亲和 API（见 [usage.md](usage.md) 调用收尾）。
-- **同连接 pipeline（无多路复用标号）**：须在 **Framing 内队列**，不应暴露为多个并发 Call 抢同一 Sequential `Carrier`。
-- **以无消息边界的字节管道为主的 payload**（大 HTTP body、COPY/LOAD）：Transport 的 `ByteStreamCarrier` 可流式 I/O；**现成 `Call` 以 `[]byte` 消息为主**，httpunary/grpc 内置路径不主张为第一公民；需扩展 Framing 语义或 Session 内状态机。
+- **同连接 pipeline（无多路复用标号）**：须在 **轴内 Session 队列**，不应暴露为多个并发 Call 抢同一 Sequential `Carrier`。
+- **以无消息边界的字节管道为主的 payload**（大 HTTP body、COPY/LOAD）：`Pipe` 侧的 `ByteStreamCarrier` 可流式 I/O；**现成 `Call` 以 `[]byte` 消息为主**，httpunary/grpc 内置路径不主张为第一公民；需扩展轴内分帧语义或 Session 状态机。
 
 **非目标**（与「能不能映射」无关，是产品边界）：见下节。
 
 ## 目标
 
 1. **流式和一问一答用同一套 API**——unary 当作单元素流，内核不另开 unary 专用路径。
-2. **协议 = Transport × Framing × Codec**；不兼容组合在建连或开承载后明确失败，不静默降级。
+2. **协议 = Transport × Codec**（分帧在 Transport 实现内，不是第三选配维）；不兼容组合在建连或开承载后明确失败，不静默降级。
 3. **连接是一等事实**：`Transport` → `Conn` → `Session` → `Call`；握手、复用、连接级状态有明确落点。
-4. **可组装性可测**：内置与 `example/*` 中的组合只靠Transport × Codec（legacy 三工厂过渡）装配，`client` / `server` 不为具体协议特判。已验证组合见 [compatibility-matrix.md](compatibility-matrix.md)。
+4. **可组装性可测**：内置与 `example/*` 中的组合只靠 **Transport 名 × Codec 名** 装配，`client` / `server` 不为具体协议特判。已验证组合见 [compatibility-matrix.md](compatibility-matrix.md)。
 5. **原生 gRPC**：与 grpc-go 在 h2c / TLS·ALPN 下互通（形态、状态码、metadata、详情、deadline、压缩）。
 6. **服务名是一等概念**：服务端按名登记，客户端按名打开调用。
 
@@ -36,20 +36,19 @@ Argos 是 **C/S 协议组合运行时**：分层组装 **建连（Transport）�
 
 ## 概念模型
 
-传输与分帧各有连接级与调用级：
+对外 **Transport × Codec**。`transport.Transport` 轴内再分 **Pipe（字节面）** 与 **Session（分帧面）**：
 
-| | 连接级 | 调用级 |
+| 轴内子层 | 连接级 | 调用级 |
 |---|---|---|
-| **transport** | `Conn` | `Carrier` |
-| **framing** | `Session` | `Call` |
+| **Pipe** | `Conn` | `Carrier` |
+| **Session / 分帧** | `Session` | `Call` |
 
 | 概念 | 职责 | 不做什么 |
 |---|---|---|
-| **Transport** | 监听/拨号、TLS/ALPN、产出 `Conn` | 不产出 Carrier；不解析 method；不决定复用 |
+| **Transport**（`transport.Transport`） | 产品面：拨号/监听、握手、分帧、池化、`OpenCall` / `Serve` | 不做载荷序列化（Codec）；组合层不拆成第三工厂 |
 | **Conn** | 一条连接的生命周期与能力（窄接口） | 不认调用；不解析协议字节 |
 | **Carrier** | 一次交换的承载面 | 不拥有连接（只能 `Abort` 本次） |
-| **Framing** | 握手、复用模型、消息边界、状态落点 | 不建连；不做序列化 |
-| **Session** | 某 `Conn` 上的协议实例：握手 + 切分调用 | 不路由业务方法；不生产调用 ctx |
+| **Session** | 某 `Conn` 上的协议实例：握手、复用、切分调用（实现面为 `session.Framing` + `*Session`） | 不路由业务方法；不生产调用 ctx |
 | **Call** | 一次交换的分帧实例（RPC 调用、Redis 命令、HTTP unary 等均映射于此） | 只搬字节；不关闭 Conn |
 | **Codec** | 字节 ↔ 消息 | 不做 I/O |
 | **Stream** | `Call` × `Codec` 的解码流 | unary = 单元素流 |
@@ -61,7 +60,7 @@ Argos 是 **C/S 协议组合运行时**：分层组装 **建连（Transport）�
 
 - **Transport × Codec**——`ServiceOptions` 存已注册的 transport / codec **名称**（`codec.Register` / `transport.Register`）；`ServiceTransport` + `ServiceCodec` 与 client `WithTransport` + `WithCodec` 引用这些名称，装配时 `New(name)` 实例化。
 - **Compressor 不是核心概念**——仅 gRPC 路径（`grpc`）。
-- **复用不是第四维**——`Framing.Reuse()` 声明承载力；借还由客户端会话池执行。
+- **复用不是第三选配维**——轴内 `session.Framing.Reuse()` 声明承载力；借还由轴上的客户端会话池执行。
 
 ```go
 type ReuseModel uint8

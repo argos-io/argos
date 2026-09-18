@@ -24,7 +24,7 @@ make test-generate   # stub --check vs example/echo
 | `none` | 只生成 stub |
 | 其他（如 `flatbuffers`） | IR 须含 `message_files`；`emit-ir` 插件一次输出 |
 
-**Codec**：内置 `codec/protobuf`、`codec/json` 要求 `proto.Message`。binding 默认见 [codec-and-wiring.md](codec-and-wiring.md)。非 protobuf 须自定义 `WithCodec`；错配在**首次调用**失败。
+**Codec**：内置 `codec/protobuf`、`codec/json` 要求 `proto.Message`。Transport × Codec 注册名与 echo 默认见 [codec-and-wiring.md](codec-and-wiring.md)。非 protobuf 须自定义 `WithCodec`；错配在**首次调用**失败。
 
 **插件 IR**：`{plugin} emit-ir -- files...` → JSON（可含 `message_model`、`message_files`）。
 

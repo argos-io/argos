@@ -2,11 +2,11 @@
 
 ## Zero core API change
 
-Implementing this synthetic Framing gate required **no** changes to public
+Implementing this synthetic transport-axis gate required **no** changes to public
 interfaces in:
 
-- `transport/` (root interfaces)
-- `protocol/` (root interfaces)
+- `transport/` (root `Transport` / `Pipe` interfaces)
+- `internal/session` (`Framing` / `Session` / `Call`; not a separate product axis)
 - `client/`
 - `server/`
 

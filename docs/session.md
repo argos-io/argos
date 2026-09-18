@@ -1,11 +1,13 @@
-# Framing 接入
+# Session 与 Call（Transport 轴内）
 
-Legacy 分帧接口在 `internal/session`；一等 Transport 实现在 `transport/grpc`、`transport/httpunary` 或 `example/resp`、`example/synth`。
+对外只选配 **Transport × Codec**。握手、复用、消息边界、池化都在 **`transport.Transport` 实现**里完成（`transport/grpc`、`transport/httpunary`、`example/resp`、`example/synth` 等）；组合层只 `Dial` / `Serve`，**不**再选第三维。
+
+实现侧用 `internal/session` 的类型与接口（`session.Framing`、`ClientSession`、`ServerSession`、`Call`）。下文写 **「分帧实现」** 时指的就是轴内这段逻辑，不是用户可见的独立工厂。
 
 可依赖：`transport`, `descriptor`, `metadata`, `budget`, `status`。  
 **不可**依赖：`codec`（仅 `SessionSpec.CodecName` 字符串）、`compressor`（**仅** `grpc` 例外）、`client` / `server`。
 
-## `Framing` 工厂
+## `session.Framing`（轴内，非选配维）
 
 ```go
 type Framing interface {
@@ -14,6 +16,8 @@ type Framing interface {
     NewServerSession(ctx, Conn, SessionSpec) (ServerSession, error)
 }
 ```
+
+完整 Transport 轴通常内嵌一个 `Framing` 实例，在 `OpenCall` / `Serve` 路径上调用 `New*Session`。
 
 | `ReuseModel` | 含义 | 示例 |
 |--------------|------|------|
@@ -42,7 +46,7 @@ Close() error     // 关 Session + Conn
 
 ## `ServerSession` 与 `AcceptCall`
 
-组合层对每条连接**只跑一个** `AcceptCall` 循环；Framing 不得再开第二个 accept 循环。
+组合层对每条连接**只跑一个** `AcceptCall` 循环；分帧实现不得再开第二个 accept 循环。
 
 | 返回 | 含义 |
 |------|------|
@@ -57,7 +61,7 @@ Close() error     // 关 Session + Conn
 2. **OpenTimeout**：首字节前只受 accept ctx；首字节后启动 Open 解析超时。
 3. **Reject 可写回**：wrap `transport.ErrCallRejected` + `status.Error`（会话层自己的哨兵是 `session.ErrCallRejected`，由轴包成前者）；参考 httpunary/grpc 非法 path、example/resp 非法命令。
 
-`MaxDrainBytes` 与 `OpenTimeout` 都由轴在构造期定死（`WithLimits(transport.Limits{...})` 的对应字段），Framing 从 `SessionSpec.Options` 读到的就是这份快照；`argos.Options` 上没有这两个字段，不用去组合层找。
+`MaxDrainBytes` 与 `OpenTimeout` 都由轴在构造期定死（`WithLimits(transport.Limits{...})` 的对应字段），分帧实现从 `SessionSpec.Options` 读到的就是这份快照；`argos.Options` 上没有这两个字段，不用去组合层找。
 
 ## `Call` / `ServerCall`
 
@@ -83,19 +87,19 @@ type ServerCall interface {
 - **Carrier 卫生**：未读到协议终态（STATUS / EOF）就 `Close` → `Session.Reusable()` 须变 false（Sequential 尤其重要）。
 - **budget**：可从 `context` 读 `budget.FromContext`；`grpc`、`httpunary` 等在读写路径可选 `TryAcquire`。
 
-## 与 Transport 的配对（断言清单）
+## 与 Pipe / Conn 的配对（断言清单）
 
-实现 `NewClientSession` / `NewServerSession` 时，在代码里明确 assert：
+在轴内实现 `NewClientSession` / `NewServerSession` 时，在代码里明确 assert：
 
-| Framing | 客户端 Conn | 服务端 Conn / Carrier | 常用 Carrier 接口 |
-|---------|-------------|------------------------|-------------------|
-| grpc | `StreamConn` | 每 stream：`ByteStreamCarrier`, `ResponseWriter` 等 | 头/trailers |
-| httpunary | `StreamConn` | 每请求 `CarrierConn`：`ByteStreamCarrier`, `UnaryResponseWriter`, `RequestHeaderReader` | unary only |
-| example/resp | `CarrierConn` → `ByteStreamCarrier` | 同左 | + `SendCloser` |
+| Transport 注册名 | 客户端 Conn | 服务端 Conn / Carrier | 常用 Carrier 接口 |
+|------------------|-------------|------------------------|-------------------|
+| `grpc` | `StreamConn` | 每 stream：`ByteStreamCarrier`, `ResponseWriter` 等 | 头/trailers |
+| `httpunary` | `StreamConn` | 每请求 `CarrierConn`：`ByteStreamCarrier`, `UnaryResponseWriter`, `RequestHeaderReader` | unary only |
+| `resp` / `synth`（example） | `CarrierConn` → `ByteStreamCarrier` | 同左 | + `SendCloser` |
 
 不匹配组合在 `New*Session` 报错即可，无需组合层特判。
 
-## 新 Framing 检查单
+## 新 Transport 轴分帧检查单
 
 - [ ] `Reuse()` 恒定；与真实并发行为一致
 - [ ] `New*Session` 断言与握手文档化
@@ -119,5 +123,5 @@ HTTP/1 unary 整包分帧（服务端需 `UnaryResponseWriter`，里程碑矩阵
 
 ## 参考与反例
 
-- **内置分帧**：`grpc`、`httpunary`
-- **连接级状态 / 非 gRPC 命令式 C/S**：`example/resp`、`example/synth`（仍实现同一套 `Framing` 接口，但可自定义握手与 `Accept` 语义；证明组合层无需为具体协议特判）
+- **内置轴**：`grpc`、`httpunary`
+- **连接级状态 / 非 gRPC 命令式 C/S**：`example/resp`、`example/synth`（轴内仍用 `session.Framing`，可自定义握手与 `Accept` 语义；证明组合层无需为具体协议特判）

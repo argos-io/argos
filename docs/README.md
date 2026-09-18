@@ -10,7 +10,7 @@
 | [codegen.md](codegen.md) | 使用 proto | stub 生成、message model |
 | [overview.md](overview.md) | 扩展组合 | Transport × Codec 挂接摘要、扩展验收 |
 | [transport.md](transport.md) | 新传输 | `Transport` / `Conn` / `Carrier` |
-| [framing.md](framing.md) | 新分帧 | `Framing` / `Session` / `Call` |
+| [session.md](session.md) | Transport 轴内 | `Session` / `Call` 与 `session.Framing`（非选配维） |
 | [codec-and-wiring.md](codec-and-wiring.md) | 编码与装配 | `Codec`、`Register`、`ServiceOptions` |
 | [compatibility-matrix.md](compatibility-matrix.md) | 选型 | 内置组合与 Carrier 能力 |
 

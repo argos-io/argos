@@ -1,8 +1,8 @@
 // Package httpstatus provides the single bidirectional map between HTTP
 // status codes and status.Code.
 //
-// Outbound (ToHTTP) is used by framing/httpunary. Inbound (FromHTTP) is the
-// fallback when framing/grpc receives an HTTP response without grpc-status.
+// Outbound (ToHTTP) is used by transport/httpunary. Inbound (FromHTTP) is the
+// fallback when transport/grpc receives an HTTP response without grpc-status.
 //
 // ToHTTP follows google.rpc.Code HTTP mappings and grpc-gateway's
 // HTTPStatusFromCode. FromHTTP reverses those unique mappings; where several

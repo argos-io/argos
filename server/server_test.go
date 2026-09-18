@@ -583,7 +583,7 @@ func TestNoConcreteFramingTypeSwitch(t *testing.T) {
 						strings.Contains(name, "grpc.") ||
 						strings.Contains(name, "tcp.") ||
 						strings.Contains(name, "http2.") {
-						t.Fatalf("%s: concrete framing/transport type-switch involving %s", s, name)
+						t.Fatalf("%s: concrete transport-axis type-switch involving %s", s, name)
 					}
 				}
 			}

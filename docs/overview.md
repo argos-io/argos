@@ -1,13 +1,13 @@
 # 扩展模型概览
 
-你要加新传输、新分帧或换 codec 时，先弄清 Transport × Codec 各管哪一段。目标协议不限于 gRPC：**凡能落在「连接 + Session 握手 + Call 交换（可选消息流）」上的 C/S 线协议** 都走同一套 `client` / `server` 组合层；覆盖边界见 [architecture.md](architecture.md#协议覆盖范围)。
+你要加新 **Transport 轴**（须在轴内实现 `session.Framing` 与 `OpenCall`/`Serve`）或换 **Codec** 时，先弄清 Transport × Codec 各管哪一段。目标协议不限于 gRPC：**凡能落在「连接 + Session 握手 + Call 交换（可选消息流）」上的 C/S 线协议** 都走同一套 `client` / `server` 组合层；覆盖边界见 [architecture.md](architecture.md#协议覆盖范围)。
 
 ## Transport × Codec 各自回答什么
 
 | 层 | 问题 | 典型产出 |
 |----|------|----------|
 | **Transport** | 怎么建连、一条连接上 I/O 长什么样 | `Conn`；按次交换用 `Carrier` |
-| **Framing**（在 Transport 实现内） | 握手、复用几条调用、帧/状态写在哪 | `Session` → `Call` |
+| **Session / 分帧**（轴内，非选配） | 握手、复用几条调用、帧/状态写在哪 | `Session` → `Call`（`session.Framing`） |
 | **Codec** | 业务消息 ↔ 字节 | 纯函数，无 I/O |
 
 协议 = **已注册的** Transport 名 × Codec 名。`client` / `server` 不会为某个具体实现写 `switch`；配错了在装配或 `New*Session` 等处**直接报错**，不会悄悄换协议。
@@ -15,8 +15,8 @@
 ## 连接是一等事实
 
 ```
-Transport.Dial/Serve → Conn
-  → Framing.New*Session → Session
+transport.Transport OpenCall/Serve
+  →（轴内）New*Session → Session
     → OpenCall / AcceptCall → Call
       → stream.Wrap(Call, Codec) → Stream
 ```

@@ -37,7 +37,7 @@ type Transport interface {
 
 由此推出一条容易误判的语义：`Server` 停止（`Run` 的 ctx 结束，或 `Shutdown(ctx)` 返回）**只表示不再接受新调用**，不表示在途调用已结束。`Run` 只等各 listen surface 的 `Serve` 返回，而连接处理器跑在 transport 自己的协程上，server 从不 join 它们——所以组合层不调 `Pipe.Shutdown`，**排空连接是轴的所有者的事**：需要等连接结束就自己调轴（或其 `Pipe`）的 `Shutdown(ctx)`。
 
-`Call` / `ServerCall` / `AcceptCall` 的义务（`ErrCallRejected` 须返回可 `Finish` 的 `ServerCall`、残余 drain、首字节后才起 OpenTimeout）见 [framing.md](framing.md)。
+`Call` / `ServerCall` / `AcceptCall` 的义务（`ErrCallRejected` 须返回可 `Finish` 的 `ServerCall`、残余 drain、首字节后才起 OpenTimeout）见 [session.md](session.md)（Transport 轴内分帧，非第三选配维）。
 
 ## `Pipe`（字节面）
 
@@ -61,14 +61,14 @@ type Pipe interface {
 
 ## Conn 形态（二选一或兼有）
 
-Framing 在 `New*Session` 里 **type assert**，失败则返回配置错误，由 axis 关掉这条 `Conn`（组合层看不到 `Conn`：连接是 axis 内部的事）。
+Transport 轴在 `New*Session` 里对 `Conn` **type assert**，失败则返回轴装配错误，由 axis 关掉这条 `Conn`（组合层看不到 `Conn`：连接是 axis 内部的事）。
 
 | 接口 | 语义 | 典型实现 |
 |------|------|----------|
 | **`CarrierConn`** | 一条连接同一时刻承载**一次**交换；`Carrier()` 即该连接上的 Carrier | `tcp`, `ws`, `udp`；服务端 `http1` 每请求一个 `Conn` |
 | **`StreamConn`** | 连接是端点句柄；每次调用 `OpenStream(ctx, RequestPreface)` 得独立 **Carrier** | `http2`；客户端 `http1` |
 
-`RequestPreface` 由 **Framing** 填写（`:path`、headers 等）；`Pipe` 不透明转发。
+`RequestPreface` 由 **轴内分帧**（`OpenCall` / `AcceptCall` 路径）填写（`:path`、headers 等）；`Pipe` 不透明转发。
 
 ## Carrier 窄接口（按能力组合）
 
@@ -86,13 +86,13 @@ Framing 在 `New*Session` 里 **type assert**，失败则返回配置错误，�
 | `ResponseWriter` | 服务端 H2：`WriteHeaders` + `Finish`（可仅 trailers） |
 | `UnaryResponseWriter` | 服务端 H1：一次 `WriteResponse(status, headers, body)` |
 
-同一 concrete 类型可实现多个窄接口；Framing 只 assert 自己需要的那几个。
+同一 concrete 类型可实现多个窄接口；轴内分帧只 assert 自己需要的那几个。
 
 ## 发送失败：`SendError`
 
 发送路径失败时返回 `transport.WrapSendError(err, receiveOpen)`：
 
-- `ReceiveOpen() == true`：对端仍可能返回响应（如 HTTP 200 + gRPC status）；Framing 映射为 `stream.ErrSendClosed`，**Recv 继续**。
+- `ReceiveOpen() == true`：对端仍可能返回响应（如 HTTP 200 + gRPC status）；轴内 `Call` 映射为 `stream.ErrSendClosed`，**Recv 继续**。
 - `ReceiveOpen() == false`：本次交换接收方向也结束（如 UDP 发不出去、连接已死）。
 
 参考：`transport/udp/senderror_test.go`、`transport/grpc/senderror_test.go`。

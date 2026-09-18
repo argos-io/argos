@@ -37,7 +37,7 @@ func (c *serverConn) Close() error {
 // serverCarrier is the server-side byte-stream + UnaryResponseWriter carrier.
 //
 // Write buffers response body bytes without calling WriteHeader — that is the
-// whole point of UnaryResponseWriter: framing/httpunary can "Send" into the
+// whole point of UnaryResponseWriter: transport/httpunary can "Send" into the
 // buffer, then Finish via WriteResponse with either success or error status.
 type serverCarrier struct {
 	w http.ResponseWriter
@@ -99,7 +99,7 @@ func (c *serverCarrier) Write(p []byte) (int, error) {
 }
 
 // WriteResponse commits status, headers, and body in one shot. The body
-// argument is the final response body (framing/httpunary passes it at Finish);
+// argument is the final response body (transport/httpunary passes it at Finish);
 // any prior Write buffer is discarded so a handler "Send" then error path can
 // replace a buffered success body with an error body.
 //

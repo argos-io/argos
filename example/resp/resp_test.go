@@ -20,7 +20,7 @@ import (
 )
 
 // Task 7.2b: these tests document that example/resp required zero changes to
-// public interfaces in transport/, framing/ (root), client/, or server/.
+// public interfaces in transport/ (root), client/, or server/.
 // Only example/resp was added.
 
 const (

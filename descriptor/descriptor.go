@@ -24,7 +24,7 @@ func (s Shape) valid() bool {
 
 // Method describes a single RPC method.
 // FullName uses the protobuf full name (dot-separated), NOT the gRPC path form.
-// Wire representation is left to each Framing (e.g. framing/grpc builds "/svc/method").
+// Wire representation is left to each transport axis (e.g. transport/grpc builds "/svc/method").
 type Method struct {
 	fullName string
 	service  string

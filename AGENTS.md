@@ -47,8 +47,8 @@ Makefile · .github/workflows/ci.yml · invariants_test.go
 |------|------|----------|
 | **Transport 契约**（OpenCall / Serve / CallConcurrency / CodecName / 生命周期） | [`docs/transport.md`](docs/transport.md) | `transport/transport_impl.go` |
 | 新 `Pipe`（字节面）或新线栈 axis 实现 | [`docs/transport.md`](docs/transport.md) | `transport/{tcp,ws,udp,http1,http2}`, `transport/grpc/link.go`, `example/resp/link.go` |
-| Call / AcceptCall 分帧语义 | [`docs/framing.md`](docs/framing.md) | `internal/session`, `transport/grpc/framing.go` |
-| Codec + 挂接 | [`docs/codec-and-wiring.md`](docs/codec-and-wiring.md) | `service.go`, `example/echo/binding.go` |
+| Call / AcceptCall 分帧语义（轴内） | [`docs/session.md`](docs/session.md) | `internal/session`, `transport/grpc/framing.go` |
+| Codec + 挂接 | [`docs/codec-and-wiring.md`](docs/codec-and-wiring.md) | `service.go`, `example/echo/main.go` |
 | 选型已有组合 | [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md) | 各 `transport/*/link.go` 与 example |
 
 **硬性约定（摘要）**
