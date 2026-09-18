@@ -8,6 +8,10 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+func init() {
+	codec.Register("protobuf", func() (codec.Codec, error) { return New(), nil })
+}
+
 type codecImpl struct{}
 
 // New returns a Codec that uses binary protobuf.

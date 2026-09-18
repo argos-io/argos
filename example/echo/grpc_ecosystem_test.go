@@ -6,9 +6,10 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
-	"github.com/argos-io/argos/framing/grpc/health"
-	"github.com/argos-io/argos/framing/grpc/reflection"
+	"github.com/argos-io/argos/internal/teststack"
 	"github.com/argos-io/argos/server"
+	"github.com/argos-io/argos/transport/grpc/health"
+	"github.com/argos-io/argos/transport/grpc/reflection"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -21,29 +22,21 @@ import (
 func TestGRPCEcosystemOnEchoServer(t *testing.T) {
 	const echoSvc = "echo.v1.EchoService"
 
-	cfg := baseConfig()
-	trFn, frFn, cdFn := GRPCAxes()
-
-	var addrTr hasAddr
-	bound := make(chan struct{})
-	axes := serverAxes(t, trFn, frFn, cdFn, &addrTr, bound)
-
+	cfg := baseOptions()
+	ax, err := GRPCTransport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ax.Close() })
+	trName := teststack.TransportName(t, ax)
+	stack := []argos.ServiceOption{argos.ServiceTransport(trName), argos.ServiceCodec(GRPCCodecName)}
 	srv := server.New(
-		argos.WithConfig(cfg),
-		argos.WithService(echoSvc,
-			axes,
-			argos.ServiceListenAddress(testListenAddr),
-		),
-		argos.WithService(health.ServiceName,
-			axes,
-			argos.ServiceListenAddress(testListenAddr),
-		),
-		argos.WithService(reflection.ServiceV1,
-			axes,
-			argos.ServiceListenAddress(testListenAddr),
-		),
+		argos.WithServerOptions(cfg),
+		argos.WithServerService(echoSvc, append(stack, argos.ServiceListenAddress(testListenAddr))...),
+		argos.WithServerService(health.ServiceName, append(stack, argos.ServiceListenAddress(testListenAddr))...),
+		argos.WithServerService(reflection.ServiceV1, append(stack, argos.ServiceListenAddress(testListenAddr))...),
 	)
-	if err := RegisterEchoService(srv, NewEchoImpl()); err != nil {
+	if err := srv.Register(EchoServiceDesc, EchoServiceHandlers(NewEchoImpl())); err != nil {
 		t.Fatal(err)
 	}
 	hs := health.NewServer()
@@ -62,14 +55,12 @@ func TestGRPCEcosystemOnEchoServer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	go func() { _ = srv.Run(context.Background()) }()
-	select {
-	case <-bound:
-	case <-time.After(3 * time.Second):
-		t.Fatal("server not ready")
-	}
-	addr := waitAddr(t, addrTr)
-	t.Cleanup(func() { _ = srv.Close() })
+	// A Server stops when Run's ctx is canceled — there is no Server.Close —
+	// so the test cancels the ctx it handed to Run.
+	runCtx, stopServer := context.WithCancel(context.Background())
+	go func() { _ = srv.Run(runCtx) }()
+	addr := waitAddr(t, ax)
+	t.Cleanup(stopServer)
 
 	cc, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -112,18 +103,14 @@ func TestGRPCEcosystemOnEchoServer(t *testing.T) {
 	}
 
 	ec, err := NewEchoServiceClient(
-		argos.WithConfig(cfg),
-		argos.JoinClient(
-			argos.WithTransport(trFn),
-			argos.WithFraming(frFn),
-			argos.WithCodec(cdFn),
-		),
+		argos.WithClientOptions(cfg),
+		argos.WithTransport(trName),
+		argos.WithCodec(GRPCCodecName),
 		argos.WithTarget("ip://"+addr),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = ec.Close() })
 	out, err := ec.Echo(ctx, &EchoRequest{Msg: "eco"})
 	if err != nil {
 		t.Fatal(err)

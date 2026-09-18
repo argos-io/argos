@@ -32,16 +32,14 @@ func TestHeaderWaitsAfterNonStatusRecvError(t *testing.T) {
 		}
 		return &recvFailStream{Stream: st, recvErr: recvErr}, nil
 	})
-	cli, err := New(
+	cli, err := newClientLoopback(t, sequentialLoopback(t, nil),
 		argos.WithServiceName(testService),
 		argos.WithTarget(testTarget),
-		sequentialLoopback(t, nil),
 		argos.WithOpenFilter(wrapRecv),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer cli.Close()
 
 	cs, err := cli.Open(context.Background(), testMethod(t))
 	if err != nil {
@@ -87,15 +85,13 @@ func TestHeaderWaitsAfterNonStatusRecvError(t *testing.T) {
 
 func TestHeaderAfterCloseReturnsErrCallClosed(t *testing.T) {
 	t.Parallel()
-	cli, err := New(
+	cli, err := newClientLoopback(t, sequentialLoopback(t, nil),
 		argos.WithServiceName(testService),
 		argos.WithTarget(testTarget),
-		sequentialLoopback(t, nil),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer cli.Close()
 
 	cs, err := cli.Open(context.Background(), testMethod(t))
 	if err != nil {

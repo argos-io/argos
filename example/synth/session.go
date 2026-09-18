@@ -8,16 +8,14 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/descriptor"
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport"
 )
 
 type session struct {
-	framing *Framing
+	axis    *Transport
 	conn    transport.Conn
 	carrier transport.ByteStreamCarrier
-	cfg     framing.Config
 	client  bool
 	state   *ConnState
 
@@ -36,34 +34,24 @@ type session struct {
 	exclusive  bool
 	ioError    bool
 	inCall     bool
-	spentClean bool // prior call ended without terminal → not reusable
+	spentClean bool
 }
 
-func newSession(f *Framing, conn transport.Conn, car transport.ByteStreamCarrier, cfg framing.Config, client bool, st *ConnState) *session {
+func newSession(a *Transport, conn transport.Conn, car transport.ByteStreamCarrier, client bool, st *ConnState) *session {
+	if st == nil {
+		st = &ConnState{}
+	}
 	s := &session{
-		framing:       f,
+		axis:          a,
 		conn:          conn,
 		carrier:       car,
-		cfg:           cfg,
 		client:        client,
 		state:         st,
-		openTimeout:   f.openTimeout,
-		maxDrainBytes: f.maxDrainBytes,
-		maxFrame:      defaultMaxFrameSize,
-		maxMessage:    defaultMaxMessage,
+		openTimeout:   a.openTimeout,
+		maxDrainBytes: a.maxDrainBytes,
+		maxFrame:      a.maxFrame,
+		maxMessage:    a.maxMessage,
 		reusable:      true,
-	}
-	if cfg.OpenTimeout > 0 {
-		s.openTimeout = cfg.OpenTimeout
-	}
-	if cfg.MaxDrainBytes > 0 {
-		s.maxDrainBytes = cfg.MaxDrainBytes
-	}
-	if cfg.MaxFrameSize > 0 {
-		s.maxFrame = cfg.MaxFrameSize
-	}
-	if cfg.MaxMessageSize > 0 {
-		s.maxMessage = cfg.MaxMessageSize
 	}
 	st.setOnExclusive(func() {
 		s.mu.Lock()
@@ -104,12 +92,59 @@ func (s *session) closeSession() error {
 	return s.conn.Close()
 }
 
-type clientSession struct{ *session }
+// ---------------------------------------------------------------------------
+// Handshake
+// ---------------------------------------------------------------------------
 
-func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec framing.CallSpec) (framing.Call, error) {
+func (s *session) clientHandshake(ctx context.Context) error {
+	closeOnCancel := func() { _ = s.conn.Close() }
+	var greeting string
+	if err := readAll(ctx, s.carrier, closeOnCancel, func(r io.Reader) error {
+		g, e := readGreeting(r)
+		greeting = g
+		return e
+	}); err != nil {
+		return fmt.Errorf("synth: read greeting: %w", err)
+	}
+	if err := writeAll(ctx, s.carrier, closeOnCancel, writeAck); err != nil {
+		return fmt.Errorf("synth: write ack: %w", err)
+	}
+	s.state.setGreeting(greeting)
+	return nil
+}
+
+func (s *session) serverHandshake(ctx context.Context) error {
+	greeting := s.axis.greeting
+	if greeting == "" {
+		greeting = DefaultGreeting
+	}
+	s.state.setGreeting(greeting)
+
+	closeOnCancel := func() { _ = s.conn.Close() }
+	if err := writeAll(ctx, s.carrier, closeOnCancel, func(w io.Writer) error {
+		return writeGreeting(w, greeting)
+	}); err != nil {
+		return fmt.Errorf("synth: write greeting: %w", err)
+	}
+	if err := readAll(ctx, s.carrier, closeOnCancel, readAck); err != nil {
+		return fmt.Errorf("synth: read ack: %w", err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Client connection
+// ---------------------------------------------------------------------------
+
+type clientConn struct{ *session }
+
+func (s *clientConn) OpenCall(ctx context.Context, m descriptor.Method, spec transport.CallSpec) (transport.Call, error) {
 	_ = spec
 	if ctx == nil {
 		return nil, status.Error(status.InvalidArgument, "synth: nil context")
+	}
+	if m.IsZero() {
+		return nil, status.Error(status.InvalidArgument, "synth: zero Method")
 	}
 	s.mu.Lock()
 	if s.closed {
@@ -118,11 +153,11 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 	}
 	if s.inCall {
 		s.mu.Unlock()
-		return nil, framing.ErrSessionBusy
+		return nil, transport.ErrConnBusy
 	}
 	if !s.reusable || s.ioError || s.exclusive {
 		s.mu.Unlock()
-		return nil, framing.ErrSessionBusy
+		return nil, status.Error(status.Unavailable, "synth: session not reusable")
 	}
 	s.inCall = true
 	s.mu.Unlock()
@@ -143,8 +178,6 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 	c.ctx, c.cancel = context.WithCancel(ctx)
 
 	flags := byte(0)
-	// Unary / client-streaming still send OPEN then DATA; FlagOpenEnd only for
-	// explicit zero-message — callers use HalfClose after Send as usual.
 	s.writeMu.Lock()
 	err := writeFrame(s.carrier, frame{typ: typeOpen, method: m.FullName(), flags: flags})
 	s.writeMu.Unlock()
@@ -157,13 +190,43 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, spec 
 	return c, nil
 }
 
-func (s *clientSession) Reusable() bool { return s.session.Reusable() }
-func (s *clientSession) Close() error   { return s.closeSession() }
+func (s *clientConn) Close() error { return s.closeSession() }
 
-type serverSession struct{ *session }
+// ---------------------------------------------------------------------------
+// Server connection
+// ---------------------------------------------------------------------------
 
-func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (framing.ServerCall, error) {
+type serverConn struct {
+	axis *Transport
+	conn transport.Conn
+	*session
+}
+
+func (s *serverConn) Handshake(ctx context.Context) error {
+	car, err := assertByteCarrier(s.conn)
+	if err != nil {
+		return err
+	}
+	st, _ := ctx.Value(ctxKey{}).(*ConnState)
+	if st == nil {
+		st = &ConnState{}
+	}
+	sess := newSession(s.axis, s.conn, car, false, st)
+	if err := sess.serverHandshake(ctx); err != nil {
+		_ = sess.closeSession()
+		return err
+	}
+	sess.handoffGoid = goroutineID()
+	installHandoff(sess.handoffGoid, st)
+	s.session = sess
+	return nil
+}
+
+func (s *serverConn) AcceptCall(ctx context.Context, spec transport.CallSpec) (transport.ServerCall, error) {
 	_ = spec
+	if s.session == nil {
+		return nil, fmt.Errorf("synth: AcceptCall before Handshake")
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -171,7 +234,7 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 	}
 	if s.inCall {
 		s.mu.Unlock()
-		return nil, framing.ErrSessionBusy
+		return nil, transport.ErrConnBusy
 	}
 	s.mu.Unlock()
 
@@ -202,14 +265,19 @@ func (s *serverSession) AcceptCall(ctx context.Context, spec framing.CallSpec) (
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	if f.flags&flagOpenEnd != 0 {
 		c.peerHalfClosed = true
-		close(c.done) // no recvLoop; Recv sees EOF via done
+		close(c.done)
 		return c, nil
 	}
 	go c.recvLoop()
 	return c, nil
 }
 
-func (s *serverSession) Close() error { return s.closeSession() }
+func (s *serverConn) Close() error {
+	if s.session == nil {
+		return s.conn.Close()
+	}
+	return s.closeSession()
+}
 
 func (s *session) readOpen(ctx context.Context) (frame, error) {
 	type result struct {
@@ -218,11 +286,8 @@ func (s *session) readOpen(ctx context.Context) (frame, error) {
 	}
 	ch := make(chan result, 1)
 
-	// Wait for first byte under accept ctx only (no OpenTimeout yet).
 	go func() {
 		var hdr [4]byte
-		// Peek-style: read length prefix, then body — OpenTimeout starts after
-		// first byte of the length prefix arrives.
 		first := make([]byte, 1)
 		setReadDeadline(s.carrier, time.Time{})
 		if _, err := io.ReadFull(s.carrier, first); err != nil {

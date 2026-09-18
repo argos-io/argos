@@ -24,7 +24,8 @@ func TestHalfOpenConnectionIsClosedByReadHeaderTimeout(t *testing.T) {
 		defer close(served)
 		_ = tr.Serve(ctx, func(context.Context, transport.Conn) {},
 			transport.WithListenAddress("127.0.0.1:0"),
-			transport.WithHTTPTimeouts(200*time.Millisecond, 200*time.Millisecond))
+			transport.WithHTTPReadHeaderTimeout(200*time.Millisecond),
+			transport.WithHTTPIdleTimeout(200*time.Millisecond))
 	}()
 
 	addr := waitListenerAddr(t, tr)

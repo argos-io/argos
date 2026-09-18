@@ -25,7 +25,7 @@ var section9Checklist = []section9Evidence{
 	// §9-1: milestone-0 probes → formal suites (probe/ deleted in 1.17).
 	{id: "§9-1a", title: "OpenStream before response headers", pkg: "./transport/http2", test: "TestOpenStreamReturnsBeforeResponseHeaders"},
 	{id: "§9-1b", title: "HTTP/1 OpenStream before response headers", pkg: "./transport/http1", test: "TestOpenStreamReturnsBeforeResponseHeaders"},
-	{id: "§9-1c", title: "gRPC interop smoke (h2c unary)", pkg: "./framing/grpc", test: "TestH2CUnaryEcho"},
+	{id: "§9-1c", title: "gRPC interop smoke (h2c unary)", pkg: "./transport/grpc", test: "TestH2CUnaryEcho"},
 	{id: "§9-1d", title: "sequential pool one dial per endpoint", pkg: "./internal/sessionpool", test: "TestOpenCallSequentialEmptyPoolOwnDial"},
 	{id: "§9-1e", title: "server AcceptCall loop survives handler error", pkg: "./server", test: "TestHandlerErrorDoesNotEndLoop"},
 	{id: "§9-1f", title: "Shutdown wakes idle AcceptCall", pkg: "./server", test: "TestShutdownIdleConnExitsQuickly"},
@@ -40,35 +40,43 @@ var section9Checklist = []section9Evidence{
 
 	// §9-3: Conn/Carrier matrix + shape rejects (thin combo gate).
 	{id: "§9-3a", title: "Conn/Carrier interface matrix (5 transports)", pkg: "./transport", test: "TestConnCarrierMatrix"},
-	{id: "§9-3b", title: "gRPC AcceptCall reject returns finishable call", pkg: "./framing/grpc", test: "TestAcceptCallRejectReturnsFinishableCall"},
-	{id: "§9-3c", title: "httpunary rejects non-unary before handler", pkg: "./framing/httpunary", test: "TestAcceptRejectsNonUnary"},
-	{id: "§9-3d", title: "narrow-interface config error path", pkg: "./client", test: "TestNarrowInterfaceAssertStaysConfigError"},
+	{id: "§9-3b", title: "gRPC AcceptCall reject returns finishable call", pkg: "./transport/grpc", test: "TestAcceptCallRejectReturnsFinishableCall"},
+	{id: "§9-3c", title: "httpunary rejects non-unary before handler", pkg: "./transport/httpunary", test: "TestAcceptRejectsNonUnary"},
+	{id: "§9-3d", title: "narrow-interface setup error path", pkg: "./client", test: "TestNarrowInterfaceAssertStaysSetupError"},
 	{id: "§9-3e", title: "server has no concrete Framing type-switch", pkg: "./server", test: "TestNoConcreteFramingTypeSwitch"},
 
 	// §9-4: example / wire behaviour (non-gRPC framing).
 	{id: "§9-4a", title: "resp wire round-trip", pkg: "./example/resp", test: "TestWireRoundTrip"},
 	{id: "§9-4b", title: "resp HELLO once per session", pkg: "./example/resp", test: "TestHELLOOncePerSession"},
 	{id: "§9-4c", title: "resp SET/GET same connection", pkg: "./example/resp", test: "TestSetGetSameConnection"},
-	{id: "§9-4d", title: "gRPC LPM rejects oversize without alloc", pkg: "./framing/grpc", test: "TestReadLPMLimitedRejectsOversizeWithoutAlloc"},
+	{id: "§9-4d", title: "gRPC LPM rejects oversize without alloc", pkg: "./transport/grpc", test: "TestReadLPMLimitedRejectsOversizeWithoutAlloc"},
 
 	// §9-5: state machine / lifecycle.
-	{id: "§9-5a", title: "client Close rejects Open", pkg: "./client", test: "TestCloseIdempotentAndRejectsOpen"},
-	{id: "§9-5b", title: "client Close no goroutine leak", pkg: "./client", test: "TestCloseNoGoroutineLeak"},
-	{id: "§9-5c", title: "server Shutdown drains in-flight", pkg: "./server", test: "TestShutdownDrainsInFlightCall"},
-	{id: "§9-5d", title: "httpunary early rejection keeps response readable", pkg: "./framing/httpunary", test: "TestEarlyRejectionKeepsResponseReadable"},
+	// A Client has no Close (it owns nothing releasable) and a Server has no
+	// Close (it stops when Run's ctx is canceled), so the entries here point at
+	// what those lifecycles became: the ctx that ends a call, the goroutines
+	// call churn leaves behind, and the axis ownership the composition layer
+	// must not take over.
+	{id: "§9-5a", title: "client Open refuses a done ctx", pkg: "./client", test: "TestOpenRefusesDoneContext"},
+	{id: "§9-5b", title: "client call churn leaves no goroutines", pkg: "./client", test: "TestClosedCallsLeaveNoGoroutines"},
+	{id: "§9-5c", title: "server stop leaves the axis usable", pkg: "./server", test: "TestStopLeavesAxisUsable"},
+	{id: "§9-5d", title: "httpunary early rejection keeps response readable", pkg: "./transport/httpunary", test: "TestEarlyRejectionKeepsResponseReadable"},
 	{id: "§9-5e", title: "resp SendHeaders unimplemented next call works", pkg: "./example/resp", test: "TestSendHeadersUnimplementedNextCallWorks"},
+	{id: "§9-5f", title: "client leaves a shared axis to its owner", pkg: "./client", test: "TestClientLeavesAxisToItsOwner"},
+	{id: "§9-5g", title: "server stop does not kill an in-flight handler", pkg: "./server", test: "TestAcceptCancelDoesNotKillInFlight"},
+	{id: "§9-5j", title: "aborted server start leaves axes open", pkg: "./server", test: "TestStartFailureLeavesAxesOpen"},
 
 	// §9-6: gRPC interop formal gate.
-	{id: "§9-6a", title: "interop h2c unary echo", pkg: "./framing/grpc", test: "TestH2CUnaryEcho"},
-	{id: "§9-6b", title: "interop TLS/ALPN unary echo", pkg: "./framing/grpc", test: "TestTLSALPNUnaryEcho"},
-	{id: "§9-6c", title: "interop metadata binary + trailers", pkg: "./framing/grpc", test: "TestInteropMetadata_BinaryAndTrailers"},
-	{id: "§9-6d", title: "interop trailers-only", pkg: "./framing/grpc", test: "TestInteropTrailersOnly"},
-	{id: "§9-6e", title: "interop 4-shape × h2c/TLS", pkg: "./framing/grpc", test: "TestInteropOK_Shapes"},
-	{id: "§9-6f", title: "interop 17 codes × h2c/TLS unary", pkg: "./framing/grpc", test: "TestInteropStatusCodes_Unary"},
-	{id: "§9-6g", title: "interop zero-message client-stream × TLS", pkg: "./framing/grpc", test: "TestInteropZeroMessageClientStream"},
-	{id: "§9-6h", title: "interop half-close timing × TLS", pkg: "./framing/grpc", test: "TestInteropHalfCloseTiming"},
-	{id: "§9-6i", title: "gRPC MaxMessageSize boundary", pkg: "./framing/grpc", test: "TestMaxMessageSizeBoundary"},
-	{id: "§9-6j", title: "gRPC compression bomb MaxMessageSize", pkg: "./framing/grpc", test: "TestCompressionBombMaxMessageSize", softGap: "custom Compressor↔grpc-go adapter and details conflict/corrupt remain framing-level only; not re-duplicated as full interop cells"},
+	{id: "§9-6a", title: "interop h2c unary echo", pkg: "./transport/grpc", test: "TestH2CUnaryEcho"},
+	{id: "§9-6b", title: "interop TLS/ALPN unary echo", pkg: "./transport/grpc", test: "TestTLSALPNUnaryEcho"},
+	{id: "§9-6c", title: "interop metadata binary + trailers", pkg: "./transport/grpc", test: "TestInteropMetadata_BinaryAndTrailers"},
+	{id: "§9-6d", title: "interop trailers-only", pkg: "./transport/grpc", test: "TestInteropTrailersOnly"},
+	{id: "§9-6e", title: "interop 4-shape × h2c/TLS", pkg: "./transport/grpc", test: "TestInteropOK_Shapes"},
+	{id: "§9-6f", title: "interop 17 codes × h2c/TLS unary", pkg: "./transport/grpc", test: "TestInteropStatusCodes_Unary"},
+	{id: "§9-6g", title: "interop zero-message client-stream × TLS", pkg: "./transport/grpc", test: "TestInteropZeroMessageClientStream"},
+	{id: "§9-6h", title: "interop half-close timing × TLS", pkg: "./transport/grpc", test: "TestInteropHalfCloseTiming"},
+	{id: "§9-6i", title: "gRPC MaxMessageSize boundary", pkg: "./transport/grpc", test: "TestMaxMessageSizeBoundary"},
+	{id: "§9-6j", title: "gRPC compression bomb MaxMessageSize", pkg: "./transport/grpc", test: "TestCompressionBombMaxMessageSize", softGap: "custom Compressor↔grpc-go adapter and details conflict/corrupt remain framing-level only; not re-duplicated as full interop cells"},
 
 	// §9-7: Filter / OpenFilter / CallMetadata.
 	{id: "§9-7a", title: "OpenFilter short-circuit", pkg: "./filter", test: "TestOpenFilterShortCircuit"},
@@ -78,8 +86,8 @@ var section9Checklist = []section9Evidence{
 	{id: "§9-7e", title: "metadata concurrent race", pkg: "./metadata", test: "TestConcurrentAddAndGettersRace"},
 
 	// §9-8: HTTP/1 commit / SendHeaders unimplemented.
-	{id: "§9-8a", title: "Send then Finish commits error not 200", pkg: "./framing/httpunary", test: "TestFinishAfterSendCommitsErrorNot200"},
-	{id: "§9-8b", title: "SendHeaders Unimplemented no HTTP 200", pkg: "./framing/httpunary", test: "TestSendHeadersUnimplementedNoCommit"},
+	{id: "§9-8a", title: "Send then Finish commits error not 200", pkg: "./transport/httpunary", test: "TestFinishAfterSendCommitsErrorNot200"},
+	{id: "§9-8b", title: "SendHeaders Unimplemented no HTTP 200", pkg: "./transport/httpunary", test: "TestSendHeadersUnimplementedNoCommit"},
 	{id: "§9-8c", title: "http1 WriteResponse after buffered send can be error", pkg: "./transport/http1", test: "TestWriteResponseAfterBufferedSendCanBeError"},
 	{id: "§9-8d", title: "UDP SendHeaders unsupported (datagram)", pkg: "./metadata", test: "TestSendHeadersReturnsUnimplementedNoFreeze"},
 

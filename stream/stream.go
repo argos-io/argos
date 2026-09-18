@@ -7,7 +7,6 @@ import (
 	"reflect"
 
 	"github.com/argos-io/argos/codec"
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/transport"
 )
 
@@ -45,7 +44,7 @@ func (sendClosedError) Error() string { return "stream: send closed" }
 func (sendClosedError) Is(target error) bool { return target == io.EOF }
 
 type wrappedStream struct {
-	call  framing.Call
+	call  transport.Call
 	codec codec.Codec
 }
 
@@ -58,7 +57,7 @@ func (s *wrappedStream) Recv(v any) error {
 	}
 	payload, release, err := s.call.Recv()
 	if err != nil {
-		// Recv never maps to ErrSendClosed; pass framing/transport errors through.
+		// Recv never maps to ErrSendClosed; pass axis errors through.
 		return err
 	}
 	defer release()
@@ -86,7 +85,7 @@ func (s *wrappedStream) HalfClose() error {
 	return mapSendErr(s.call.HalfClose())
 }
 
-// Close terminates the underlying framed call. It satisfies Closer.
+// Close terminates the underlying call. It satisfies Closer.
 func (s *wrappedStream) Close() error {
 	if isNil(s.call) {
 		return errors.New("stream: nil call")
@@ -118,7 +117,7 @@ func isNil(value any) bool {
 	}
 }
 
-// Wrap turns a framing.Call and Codec into a Stream.
-func Wrap(c framing.Call, cd codec.Codec) Stream {
+// Wrap turns a Call and Codec into a Stream.
+func Wrap(c transport.Call, cd codec.Codec) Stream {
 	return &wrappedStream{call: c, codec: cd}
 }

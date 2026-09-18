@@ -1,8 +1,9 @@
-package sessionpool
+package sessionpool_test
 
 import (
 	"context"
 	"errors"
+	"github.com/argos-io/argos/internal/sessionpool"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -10,8 +11,8 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/descriptor"
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/internal/fake"
+	"github.com/argos-io/argos/internal/session"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport"
 )
@@ -40,8 +41,8 @@ func TestSequentialReuseKeepsConnUntilPoolClose(t *testing.T) {
 		return cli, nil
 	}
 
-	f := fake.NewFraming(framing.Sequential)
-	p := New(f, dial, Config{
+	f := fake.NewFraming(session.Sequential)
+	p := newPool(f, dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: 8,
 		MaxIdleSessions:        8,
 	})
@@ -81,7 +82,7 @@ func TestConcurrentSingleflightOneDial(t *testing.T) {
 	var dials atomic.Int64
 	hold := make(chan struct{})
 
-	f := fake.NewFraming(framing.Concurrent)
+	f := fake.NewFraming(session.Concurrent)
 	f.Handshake = func(ctx context.Context, c transport.Conn) error {
 		select {
 		case <-hold:
@@ -106,7 +107,7 @@ func TestConcurrentSingleflightOneDial(t *testing.T) {
 		return cli, nil
 	}
 
-	p := New(f, dial, Config{
+	p := newPool(f, dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: 64,
 		MaxIdleSessions:        8,
 		HandshakeTimeout:       5 * time.Second,
@@ -116,7 +117,7 @@ func TestConcurrentSingleflightOneDial(t *testing.T) {
 	const n = 8
 	var wg sync.WaitGroup
 	wg.Add(n)
-	sessions := make([]framing.ClientSession, n)
+	sessions := make([]transport.ClientConn, n)
 	errs := make([]error, n)
 	started := make(chan struct{})
 	var startOnce sync.Once
@@ -137,7 +138,7 @@ func TestConcurrentSingleflightOneDial(t *testing.T) {
 	if got := dials.Load(); got != 1 {
 		t.Fatalf("dial count = %d, want 1", got)
 	}
-	var first framing.ClientSession
+	var first transport.ClientConn
 	for i := 0; i < n; i++ {
 		if errs[i] != nil {
 			t.Fatalf("Acquire #%d: %v", i, errs[i])
@@ -160,7 +161,7 @@ func TestConcurrentCloseDuringDial(t *testing.T) {
 	t.Parallel()
 	hold := make(chan struct{})
 
-	f := fake.NewFraming(framing.Concurrent)
+	f := fake.NewFraming(session.Concurrent)
 	f.Handshake = func(ctx context.Context, c transport.Conn) error {
 		select {
 		case <-hold:
@@ -185,7 +186,7 @@ func TestConcurrentCloseDuringDial(t *testing.T) {
 		return cli, nil
 	}
 
-	p := New(f, dial, Config{
+	p := newPool(f, dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: 64,
 		MaxIdleSessions:        8,
 		HandshakeTimeout:       5 * time.Second,
@@ -218,7 +219,7 @@ func TestSequentialConcurrentAcquireDistinct(t *testing.T) {
 	var dials atomic.Int64
 	hold := make(chan struct{})
 
-	f := fake.NewFraming(framing.Sequential)
+	f := fake.NewFraming(session.Sequential)
 	f.Handshake = func(ctx context.Context, c transport.Conn) error {
 		select {
 		case <-hold:
@@ -246,7 +247,7 @@ func TestSequentialConcurrentAcquireDistinct(t *testing.T) {
 		return cli, nil
 	}
 
-	p := New(f, dial, Config{
+	p := newPool(f, dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: 16,
 		MaxIdleSessions:        16,
 		HandshakeTimeout:       5 * time.Second,
@@ -256,7 +257,7 @@ func TestSequentialConcurrentAcquireDistinct(t *testing.T) {
 	const n = 8
 	var wg sync.WaitGroup
 	wg.Add(n)
-	sessions := make([]framing.ClientSession, n)
+	sessions := make([]transport.ClientConn, n)
 	started := make(chan struct{})
 	var startOnce sync.Once
 
@@ -280,7 +281,7 @@ func TestSequentialConcurrentAcquireDistinct(t *testing.T) {
 	if got := dials.Load(); got != int64(n) {
 		t.Fatalf("dial count = %d, want %d", got, n)
 	}
-	seen := make(map[framing.ClientSession]struct{})
+	seen := make(map[transport.ClientConn]struct{})
 	for i, s := range sessions {
 		if s == nil {
 			t.Fatalf("nil session #%d", i)
@@ -306,8 +307,8 @@ func TestCapExhaustedNonBlocking(t *testing.T) {
 		servers = append(servers, srv)
 		return cli, nil
 	}
-	f := fake.NewFraming(framing.Sequential)
-	p := New(f, dial, Config{
+	f := fake.NewFraming(session.Sequential)
+	p := newPool(f, dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: 1,
 		MaxIdleSessions:        1,
 	})
@@ -350,8 +351,8 @@ func TestNotReusableOnReleaseClosedNotRelent(t *testing.T) {
 		return cli, nil
 	}
 
-	f := fake.NewFraming(framing.Sequential)
-	p := New(f, dial, Config{
+	f := fake.NewFraming(session.Sequential)
+	p := newPool(f, dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: 8,
 		MaxIdleSessions:        8,
 	})
@@ -362,11 +363,7 @@ func TestNotReusableOnReleaseClosedNotRelent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fs, ok := s1.(*fake.ClientSession)
-	if !ok {
-		t.Fatalf("session type %T", s1)
-	}
-	fs.MarkBad()
+	fakeSession(t, s1).MarkBad()
 	p.Release(s1)
 
 	mu.Lock()
@@ -403,8 +400,8 @@ func TestReusableRaceWithMarkBad(t *testing.T) {
 		_ = srv
 		return cli, nil
 	}
-	f := fake.NewFraming(framing.Sequential)
-	p := New(f, dial, Config{
+	f := fake.NewFraming(session.Sequential)
+	p := newPool(f, dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: 64,
 		MaxIdleSessions:        64,
 	})
@@ -415,7 +412,7 @@ func TestReusableRaceWithMarkBad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fs := s.(*fake.ClientSession)
+	fs := fakeSession(t, s)
 	p.Release(s)
 
 	var wg sync.WaitGroup
@@ -432,7 +429,7 @@ func TestReusableRaceWithMarkBad(t *testing.T) {
 					}
 					return
 				}
-				if cs, ok := sess.(*fake.ClientSession); ok && j%7 == 0 {
+				if cs, ok := fakeSessionOK(sess); ok && j%7 == 0 {
 					cs.MarkBad()
 				}
 				_ = sess.Reusable()
@@ -464,8 +461,8 @@ func TestIdleFullClosesOnReturn(t *testing.T) {
 		_ = srv
 		return cli, nil
 	}
-	f := fake.NewFraming(framing.Sequential)
-	p := New(f, dial, Config{
+	f := fake.NewFraming(session.Sequential)
+	p := newPool(f, dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: 4,
 		MaxIdleSessions:        0, // no idle keep
 	})
@@ -500,8 +497,8 @@ func TestMaxSessionLifetimeClosesWhenIdle(t *testing.T) {
 		_ = srv
 		return cli, nil
 	}
-	f := fake.NewFraming(framing.Sequential)
-	p := New(f, dial, Config{
+	f := fake.NewFraming(session.Sequential)
+	p := newPool(f, dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: 4,
 		MaxIdleSessions:        4,
 		MaxSessionLifetime:     30 * time.Millisecond,
@@ -550,8 +547,8 @@ func TestConcurrentKeepAliveUntilLastRelease(t *testing.T) {
 		return &countingConn{Conn: cli, n: &closes}, nil
 	}
 
-	f := fake.NewFraming(framing.Concurrent)
-	p := New(f, dial, Config{
+	f := fake.NewFraming(session.Concurrent)
+	p := newPool(f, dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: 4,
 		MaxIdleSessions:        4,
 	})
@@ -569,7 +566,7 @@ func TestConcurrentKeepAliveUntilLastRelease(t *testing.T) {
 	if s1 != s2 {
 		t.Fatal("Concurrent should share session")
 	}
-	s1.(*fake.ClientSession).MarkBad()
+	fakeSession(t, s1).MarkBad()
 	p.Release(s1)
 	if closes.Load() != 0 {
 		t.Fatalf("closed early with refcount>0: %d", closes.Load())
@@ -603,25 +600,25 @@ func TestOpenCallBusyThenSucceeds(t *testing.T) {
 		return cli, nil
 	}
 
-	f := fake.NewFraming(framing.Sequential)
+	f := fake.NewFraming(session.Sequential)
 	f.OpenCallHook = func(callSeq int) error {
 		if attempts.Add(1) <= busyFirst {
-			return framing.ErrSessionBusy
+			return session.ErrSessionBusy
 		}
 		return nil
 	}
 
-	p := New(f, dial, Config{
+	p := newPool(f, dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: 8,
 		MaxIdleSessions:        8,
 	})
 	defer p.Close()
 
-	call, sess, err := p.OpenCall(context.Background(), "ep", testMethod(t), framing.CallSpec{})
+	call, sess, err := p.OpenCall(context.Background(), "ep", testMethod(t), transport.CallSpec{})
 	if err != nil {
 		t.Fatalf("OpenCall: %v", err)
 	}
-	if errors.Is(err, framing.ErrSessionBusy) {
+	if errors.Is(err, session.ErrSessionBusy) {
 		t.Fatal("ErrSessionBusy leaked")
 	}
 	if call == nil || sess == nil {
@@ -649,22 +646,22 @@ func TestOpenCallAlwaysBusyExhausted(t *testing.T) {
 	}
 
 	const max = 3
-	f := fake.NewFraming(framing.Sequential)
+	f := fake.NewFraming(session.Sequential)
 	f.OpenCallHook = func(callSeq int) error {
-		return framing.ErrSessionBusy
+		return session.ErrSessionBusy
 	}
 
-	p := New(f, dial, Config{
+	p := newPool(f, dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: max,
 		MaxIdleSessions:        max,
 	})
 	defer p.Close()
 
-	call, sess, err := p.OpenCall(context.Background(), "ep", testMethod(t), framing.CallSpec{})
+	call, sess, err := p.OpenCall(context.Background(), "ep", testMethod(t), transport.CallSpec{})
 	if call != nil || sess != nil {
 		t.Fatalf("want nil call/sess on exhaust, got call=%v sess=%v", call, sess)
 	}
-	if errors.Is(err, framing.ErrSessionBusy) {
+	if errors.Is(err, session.ErrSessionBusy) {
 		t.Fatalf("ErrSessionBusy leaked: %v", err)
 	}
 	if !errors.Is(err, status.ErrSessionsExhausted) {
@@ -681,7 +678,7 @@ func TestOpenCallConcurrentEmptyPoolSingleflight(t *testing.T) {
 	hold := make(chan struct{})
 	stopErr := errors.New("opencall stop after dial")
 
-	f := fake.NewFraming(framing.Concurrent)
+	f := fake.NewFraming(session.Concurrent)
 	// Fail in hook before OpenStream/write so this asserts dial singleflight only.
 	f.OpenCallHook = func(callSeq int) error { return stopErr }
 	f.Handshake = func(ctx context.Context, c transport.Conn) error {
@@ -708,7 +705,7 @@ func TestOpenCallConcurrentEmptyPoolSingleflight(t *testing.T) {
 		return cli, nil
 	}
 
-	p := New(f, dial, Config{
+	p := newPool(f, dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: 64,
 		MaxIdleSessions:        8,
 		HandshakeTimeout:       5 * time.Second,
@@ -728,7 +725,7 @@ func TestOpenCallConcurrentEmptyPoolSingleflight(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			startOnce.Do(func() { close(started) })
-			_, _, errs[i] = p.OpenCall(context.Background(), "ep", m, framing.CallSpec{})
+			_, _, errs[i] = p.OpenCall(context.Background(), "ep", m, transport.CallSpec{})
 		}()
 	}
 	<-started
@@ -743,7 +740,7 @@ func TestOpenCallConcurrentEmptyPoolSingleflight(t *testing.T) {
 		if !errors.Is(errs[i], stopErr) {
 			t.Fatalf("OpenCall #%d: %v, want stopErr", i, errs[i])
 		}
-		if errors.Is(errs[i], framing.ErrSessionBusy) {
+		if errors.Is(errs[i], session.ErrSessionBusy) {
 			t.Fatal("ErrSessionBusy leaked")
 		}
 	}
@@ -755,7 +752,7 @@ func TestOpenCallSequentialEmptyPoolOwnDial(t *testing.T) {
 	hold := make(chan struct{})
 	stopErr := errors.New("opencall stop after dial")
 
-	f := fake.NewFraming(framing.Sequential)
+	f := fake.NewFraming(session.Sequential)
 	f.OpenCallHook = func(callSeq int) error { return stopErr }
 	f.Handshake = func(ctx context.Context, c transport.Conn) error {
 		select {
@@ -784,7 +781,7 @@ func TestOpenCallSequentialEmptyPoolOwnDial(t *testing.T) {
 		return cli, nil
 	}
 
-	p := New(f, dial, Config{
+	p := newPool(f, dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: 16,
 		MaxIdleSessions:        16,
 		HandshakeTimeout:       5 * time.Second,
@@ -804,7 +801,7 @@ func TestOpenCallSequentialEmptyPoolOwnDial(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			startOnce.Do(func() { close(started) })
-			_, _, errs[i] = p.OpenCall(context.Background(), "ep", m, framing.CallSpec{})
+			_, _, errs[i] = p.OpenCall(context.Background(), "ep", m, transport.CallSpec{})
 		}()
 	}
 	<-started
@@ -819,7 +816,7 @@ func TestOpenCallSequentialEmptyPoolOwnDial(t *testing.T) {
 		if !errors.Is(errs[i], stopErr) {
 			t.Fatalf("OpenCall #%d: %v, want stopErr", i, errs[i])
 		}
-		if errors.Is(errs[i], framing.ErrSessionBusy) {
+		if errors.Is(errs[i], session.ErrSessionBusy) {
 			t.Fatal("ErrSessionBusy leaked")
 		}
 	}

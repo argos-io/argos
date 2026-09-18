@@ -17,7 +17,7 @@ import (
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/descriptor"
-	"github.com/argos-io/argos/framing"
+	"github.com/argos-io/argos/internal/session"
 )
 
 const modulePath = "github.com/argos-io/argos"
@@ -42,7 +42,11 @@ func productionImports(t *testing.T, patterns ...string) map[string][]string {
 		}
 		pkg, imports, ok := strings.Cut(line, "\t")
 		if !ok {
-			t.Fatalf("unexpected go list line: %q", line)
+			// A package with no production imports prints no separator; it
+			// still belongs in the map, or the transport classification gate
+			// could not report it by name.
+			result[line] = nil
+			continue
 		}
 		var list []string
 		for _, imp := range strings.Split(imports, ",") {
@@ -93,6 +97,100 @@ func repoPackages(t *testing.T) map[string][]string {
 	return productionImports(t, "./...")
 }
 
+// transportPkgClass is how a package under transport/ is classified for the
+// dependency gate. Classification is explicit and total: a package is its own
+// entry or its nearest classified ancestor's, and anything unclassified fails
+// the test rather than falling into a default bucket.
+type transportPkgClass uint8
+
+const (
+	// interfaceTransport is the transport root: the interfaces and their
+	// vocabulary. descriptor / metadata / budget belong to the contract
+	// (descriptor.Method, metadata.CallMetadata, budget.Budget), so they are
+	// allowed here and nowhere else in transport/ except the wire stacks.
+	interfaceTransport transportPkgClass = iota
+	// pipeTransport is a byte pipe (tcp, ws, udp, http1, http2): bytes and
+	// frames only. It has no method, no metadata and no budget to bill, so
+	// needing descriptor / metadata / budget means the pipe grew a second
+	// responsibility; a session is a wire stack's business, not its own.
+	pipeTransport
+	// wireStackTransport is a finished wire stack (grpc, httpunary): bytes,
+	// framing and session in one axis, so descriptor / metadata / budget are
+	// its vocabulary and internal/session is legal.
+	wireStackTransport
+)
+
+// interfaceTransportPkg is the transport root package. It is not an axis, so it
+// is classified on its own and deliberately does not act as an ancestor: were
+// it in the table below, every unclassified axis would inherit its class and
+// the "must be classified" gate could never fire.
+const interfaceTransportPkg = modulePath + "/transport"
+
+// classifiedTransportPkgs names every axis under transport/. A subpackage
+// (transport/grpc/health) inherits its nearest classified ancestor.
+var classifiedTransportPkgs = map[string]transportPkgClass{
+	modulePath + "/transport/tcp":       pipeTransport,
+	modulePath + "/transport/ws":        pipeTransport,
+	modulePath + "/transport/udp":       pipeTransport,
+	modulePath + "/transport/http1":     pipeTransport,
+	modulePath + "/transport/http2":     pipeTransport,
+	modulePath + "/transport/grpc":      wireStackTransport,
+	modulePath + "/transport/httpunary": wireStackTransport,
+}
+
+// transportForbiddenImports is the dependency gate per class. codec is
+// forbidden in all of them: an axis is Axis × Codec, and importing codec is
+// what would collapse the two into one.
+var transportForbiddenImports = map[transportPkgClass][]string{
+	interfaceTransport: {
+		modulePath + "/codec",
+		modulePath + "/internal/session",
+		"google.golang.org/grpc",
+		"google.golang.org/genproto",
+	},
+	pipeTransport: {
+		modulePath + "/descriptor",
+		modulePath + "/metadata",
+		modulePath + "/budget",
+		modulePath + "/codec",
+		modulePath + "/internal/session",
+		"google.golang.org/grpc",
+		"google.golang.org/genproto",
+	},
+	wireStackTransport: {
+		modulePath + "/codec",
+	},
+}
+
+// classifyTransportPkg returns the class of a package under transport/:
+// interfaceTransport for the root, otherwise the nearest classified axis
+// ancestor. ok is false for every other package — an axis nobody classified
+// included — and for packages outside transport/, which the caller skips.
+func classifyTransportPkg(importPath string) (transportPkgClass, bool) {
+	if importPath == interfaceTransportPkg {
+		return interfaceTransport, true
+	}
+	for p := importPath; strings.HasPrefix(p, modulePath+"/transport/"); p = p[:strings.LastIndex(p, "/")] {
+		if c, ok := classifiedTransportPkgs[p]; ok {
+			return c, true
+		}
+	}
+	return 0, false
+}
+
+func (c transportPkgClass) String() string {
+	switch c {
+	case interfaceTransport:
+		return "interfaceTransport"
+	case pipeTransport:
+		return "pipeTransport"
+	case wireStackTransport:
+		return "wireStackTransport"
+	default:
+		return fmt.Sprintf("transportPkgClass(%d)", uint8(c))
+	}
+}
+
 func isCorePackage(importPath string) bool {
 	if !strings.HasPrefix(importPath, modulePath) {
 		return false
@@ -124,29 +222,52 @@ func TestInvariantDependencyTable(t *testing.T) {
 	t.Parallel()
 	pkgs := repoPackages(t)
 
-	t.Run("transport_no_descriptor_framing_codec_grpc", func(t *testing.T) {
+	// The axis owns bytes and frames. Which vocabulary it may use depends on
+	// what it is: a byte pipe moves bytes, a wire stack also carries sessions
+	// and so deals in descriptors, metadata and budgets. codec stays forbidden
+	// everywhere: a protocol is Axis × Codec, and this import is what would
+	// collapse the two into one.
+	t.Run("transport_packages_classified", func(t *testing.T) {
 		t.Parallel()
-		for pkg, imports := range pkgs {
-			if pkg != modulePath+"/transport" && !strings.HasPrefix(pkg, modulePath+"/transport/") {
+		// A new axis must be named in classifiedTransportPkgs. Falling back to
+		// a default bucket would let it inherit the wrong contract silently —
+		// and the wrong contract here is a weaker dependency gate.
+		for pkg := range pkgs {
+			if pkg == interfaceTransportPkg || !strings.HasPrefix(pkg, modulePath+"/transport/") {
 				continue
 			}
-			for _, forbid := range []string{
-				modulePath + "/descriptor",
-				modulePath + "/framing",
-				modulePath + "/codec",
-				"google.golang.org/grpc",
-				"google.golang.org/genproto",
-			} {
+			if _, ok := classifyTransportPkg(pkg); !ok {
+				t.Errorf("transport package %s is unclassified; add it to classifiedTransportPkgs "+
+					"as a byte pipe (pipeTransport) or a full wire stack (wireStackTransport)", pkg)
+			}
+		}
+		// The table must not rot either: a named axis that no longer exists
+		// means the gate is checking a package nobody ships.
+		for pkg := range classifiedTransportPkgs {
+			if _, ok := pkgs[pkg]; !ok {
+				t.Errorf("classifiedTransportPkgs names %s, which no longer exists; drop the entry", pkg)
+			}
+		}
+	})
+
+	t.Run("transport_no_session_codec_grpc", func(t *testing.T) {
+		t.Parallel()
+		for pkg, imports := range pkgs {
+			class, ok := classifyTransportPkg(pkg)
+			if !ok {
+				continue // not a transport package; transport_packages_classified reports the rest
+			}
+			for _, forbid := range transportForbiddenImports[class] {
 				if hasImport(imports, forbid) {
-					t.Errorf("%s imports %q; §3.1-2 forbids it", pkg, forbid)
+					t.Errorf("%s imports %q; §3.1-2 forbids it for class %s", pkg, forbid, class)
 				}
 			}
 		}
 	})
 
-	t.Run("framing_no_stream_client_server_compressor", func(t *testing.T) {
+	t.Run("session_no_stream_client_server_compressor", func(t *testing.T) {
 		t.Parallel()
-		imports := pkgs[modulePath+"/framing"]
+		imports := pkgs[modulePath+"/internal/session"]
 		for _, forbid := range []string{
 			modulePath + "/stream",
 			modulePath + "/client",
@@ -154,7 +275,7 @@ func TestInvariantDependencyTable(t *testing.T) {
 			modulePath + "/compressor",
 		} {
 			if hasExactImport(imports, forbid) || hasImport(imports, forbid+"/") {
-				t.Errorf("framing imports %q; forbidden", forbid)
+				t.Errorf("internal/session imports %q; forbidden", forbid)
 			}
 		}
 	})
@@ -173,7 +294,7 @@ func TestInvariantDependencyTable(t *testing.T) {
 		}
 	})
 
-	t.Run("codec_no_transport_framing", func(t *testing.T) {
+	t.Run("codec_no_transport_session", func(t *testing.T) {
 		t.Parallel()
 		for pkg, imports := range pkgs {
 			if pkg != modulePath+"/codec" && !strings.HasPrefix(pkg, modulePath+"/codec/") {
@@ -181,7 +302,7 @@ func TestInvariantDependencyTable(t *testing.T) {
 			}
 			for _, forbid := range []string{
 				modulePath + "/transport",
-				modulePath + "/framing",
+				modulePath + "/internal/session",
 			} {
 				if hasExactImport(imports, forbid) || hasImport(imports, forbid+"/") {
 					t.Errorf("%s imports %q; §3.1-2 forbids it", pkg, forbid)
@@ -190,17 +311,40 @@ func TestInvariantDependencyTable(t *testing.T) {
 		}
 	})
 
-	t.Run("only_client_imports_sessionpool", func(t *testing.T) {
+	// Pooling is a client-side concern and under the current architecture it
+	// lives inside the axes: a byte pipe has nothing to pool above one
+	// connection, so the full wire stacks (grpc, httpunary) and the examples'
+	// own stacks hold the helper, client owns instance-level admission and
+	// leaves the pool to the axis it is handed, internal/transportbind maps
+	// pool settings onto the public type, and internal/fake is an axis test
+	// double. The server never pools — it accepts.
+	t.Run("only_links_import_sessionpool", func(t *testing.T) {
 		t.Parallel()
 		const pool = modulePath + "/internal/sessionpool"
-		var importers []string
-		for pkg, imports := range pkgs {
-			if hasExactImport(imports, pool) {
-				importers = append(importers, pkg)
+		allowed := map[string]bool{
+			modulePath + "/example/resp":           true,
+			modulePath + "/example/synth":          true,
+			modulePath + "/internal/fake":          true, // in-process axis test double
+			modulePath + "/internal/transportbind": true, // maps pool settings onto the public type
+			modulePath + "/transport/httpunary":    true,
+			modulePath + "/transport/grpc":         true,
+		}
+		imports := make(map[string]bool, len(allowed))
+		for pkg, pkgImports := range pkgs {
+			if !hasExactImport(pkgImports, pool) {
+				continue
+			}
+			imports[pkg] = true
+			if !allowed[pkg] {
+				t.Errorf("%s imports internal/sessionpool; only a client-side axis may pool (§3.1-16)", pkg)
 			}
 		}
-		if len(importers) != 1 || importers[0] != modulePath+"/client" {
-			t.Errorf("sessionpool importers = %v; want only %s/client (§3.1-16)", importers, modulePath)
+		// An allow-list entry that stopped importing the helper is a stale
+		// exception: drop it, so the list keeps naming who really pools.
+		for pkg := range allowed {
+			if !imports[pkg] {
+				t.Errorf("%s no longer imports internal/sessionpool; drop it from the allow-list", pkg)
+			}
 		}
 		if hasExactImport(pkgs[modulePath+"/server"], pool) {
 			t.Error("server must not import internal/sessionpool")
@@ -300,7 +444,7 @@ func TestInvariantTransitiveTransportUDPNoGenproto(t *testing.T) {
 // compressor, or genproto (same neutrality gate as resp+tcp).
 func TestInvariantTransitiveHTTPUnaryHTTP1NoGRPC(t *testing.T) {
 	t.Parallel()
-	assertTransitiveNoGRPC(t, "httpunary+http1", "./framing/httpunary", "./transport/http1")
+	assertTransitiveNoGRPC(t, "httpunary+http1", "./transport/httpunary", "./transport/http1")
 }
 
 func assertTransitiveNoGRPC(t *testing.T, label string, patterns ...string) {
@@ -315,7 +459,7 @@ func assertTransitiveNoGRPC(t *testing.T, label string, patterns ...string) {
 		t.Fatalf("go list -deps %s: %v\n%s", label, err, stderr.String())
 	}
 	forbidden := []string{
-		modulePath + "/framing/grpc",
+		modulePath + "/transport/grpc",
 		modulePath + "/compressor",
 		"google.golang.org/genproto",
 	}
@@ -332,14 +476,14 @@ func assertTransitiveNoGRPC(t *testing.T, label string, patterns ...string) {
 	}
 }
 
-func TestInvariantFramingConfigNoCompression(t *testing.T) {
+func TestInvariantFramingOptionsNoCompression(t *testing.T) {
 	t.Parallel()
 	compressField := regexp.MustCompile(`(?i)compress`)
-	typ := reflect.TypeOf(framing.Config{})
+	typ := reflect.TypeOf(session.Options{})
 	for i := 0; i < typ.NumField(); i++ {
 		name := typ.Field(i).Name
 		if compressField.MatchString(name) {
-			t.Fatalf("Config field %q matches (?i)compress; §3.1-10 forbids compression in framing.Config", name)
+			t.Fatalf("Options field %q matches (?i)compress; §3.1-10 forbids compression in session.Options", name)
 		}
 	}
 }
@@ -597,7 +741,7 @@ func TestZeroCoreAPIChangesEvidence(t *testing.T) {
 			t.Fatalf("missing 7.2b evidence file %s: %v", rel, err)
 		}
 		body := string(data)
-		for _, need := range []string{"Zero core API", "transport/", "framing/", "client/", "server/"} {
+		for _, need := range []string{"Zero core API", "transport/", "protocol/", "client/", "server/"} {
 			if !strings.Contains(body, need) {
 				t.Errorf("%s: missing required evidence phrase %q", rel, need)
 			}

@@ -4,19 +4,17 @@ import (
 	"fmt"
 
 	"github.com/argos-io/argos/codec"
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/transport"
 )
 
-// ServiceConfig holds per-service settings: Transport, Framing and Codec
-// factories, client target, and server listen address(es). Populate via
-// WithService; Clients select an entry with WithServiceName, and server.Run
-// materialises listeners for every registered service that has a complete entry
-// here.
-type ServiceConfig struct {
-	Transport     TransportFunc
-	Framing       FramingFunc
-	Codec         CodecFunc
+// ServiceOptions holds per-service settings: registered Transport and Codec
+// names, client target, and server listen address(es). Populate via
+// WithClientService / WithServerService; Clients select an entry with
+// WithServiceName, and server.Run materialises listeners for every registered
+// service that has a complete entry here.
+type ServiceOptions struct {
+	Transport     string // registered transport name
+	Codec         string // registered codec name
 	Target        string // client dial target (e.g. ip://host:port)
 	ListenAddress string // server bind when Listeners is empty
 
@@ -24,84 +22,70 @@ type ServiceConfig struct {
 }
 
 type serviceListen struct {
-	address string
-	axes    ServiceConfig // transport / framing / codec for this surface
+	address   string
+	transport string
+	codec     string
 }
 
-// ServiceOption configures one ServiceConfig entry during WithService.
+// ServiceOption configures one ServiceOptions entry during WithClientService / WithServerService.
 type ServiceOption interface {
-	applyService(*ServiceConfig)
+	applyService(*ServiceOptions)
 }
 
-type serviceOptionFunc func(*ServiceConfig)
+type serviceOptionFunc func(*ServiceOptions)
 
-func (f serviceOptionFunc) applyService(sc *ServiceConfig) { f(sc) }
+func (f serviceOptionFunc) applyService(sc *ServiceOptions) { f(sc) }
 
-// JoinService applies several service options in order (typical preset).
-func JoinService(opts ...ServiceOption) ServiceOption {
-	return serviceOptionFunc(func(sc *ServiceConfig) {
-		for _, o := range opts {
-			if o != nil {
-				o.applyService(sc)
-			}
-		}
-	})
+// ServiceTransport sets the registered transport name for a service entry.
+func ServiceTransport(name string) ServiceOption {
+	return serviceOptionFunc(func(sc *ServiceOptions) { sc.Transport = name })
 }
 
-// ServiceTransport sets the transport factory for a service entry.
-func ServiceTransport(fn TransportFunc) ServiceOption {
-	return serviceOptionFunc(func(sc *ServiceConfig) { sc.Transport = fn })
-}
-
-// ServiceFraming sets the framing factory for a service entry.
-func ServiceFraming(fn FramingFunc) ServiceOption {
-	return serviceOptionFunc(func(sc *ServiceConfig) { sc.Framing = fn })
-}
-
-// ServiceCodec sets the codec factory for a service entry.
-func ServiceCodec(fn CodecFunc) ServiceOption {
-	return serviceOptionFunc(func(sc *ServiceConfig) { sc.Codec = fn })
+// ServiceCodec sets the registered codec name for a service entry.
+func ServiceCodec(name string) ServiceOption {
+	return serviceOptionFunc(func(sc *ServiceOptions) { sc.Codec = name })
 }
 
 // ServiceTarget sets the client dial target (e.g. ip://127.0.0.1:7001).
 func ServiceTarget(target string) ServiceOption {
-	return serviceOptionFunc(func(sc *ServiceConfig) { sc.Target = target })
+	return serviceOptionFunc(func(sc *ServiceOptions) { sc.Target = target })
 }
 
 // ServiceListenAddress sets the server bind address when the service exposes a
-// single listen surface (Listeners empty). Empty falls back to Config.ListenAddress.
+// single listen surface (Listeners empty). Empty falls back to Options.ListenAddress.
 func ServiceListenAddress(addr string) ServiceOption {
-	return serviceOptionFunc(func(sc *ServiceConfig) { sc.ListenAddress = addr })
+	return serviceOptionFunc(func(sc *ServiceOptions) { sc.ListenAddress = addr })
 }
 
-// ServiceListener adds a server listen surface for this service (address +
-// per-listener transport / framing / codec options). Use multiple listeners to
-// expose the same registered impl on several transports.
-func ServiceListener(address string, opts ...ServiceOption) ServiceOption {
-	return serviceOptionFunc(func(sc *ServiceConfig) {
-		var l serviceListen
-		l.address = address
-		for _, o := range opts {
-			if o != nil {
-				o.applyService(&l.axes)
-			}
-		}
-		sc.listeners = append(sc.listeners, l)
+// ServiceBindListen adds one listen surface: address and registered transport
+// and codec names.
+//
+// Each resolved transport serves one surface. Use several ServiceBindListen
+// options under WithServerService to expose the same registered impl on
+// several transports or ports.
+func ServiceBindListen(address, transportName, codecName string) ServiceOption {
+	return serviceOptionFunc(func(sc *ServiceOptions) {
+		sc.listeners = append(sc.listeners, serviceListen{
+			address:   address,
+			transport: transportName,
+			codec:     codecName,
+		})
 	})
 }
 
-// ServiceListenPlan is one server listen surface derived from ServiceConfig.
+// ServiceListenPlan is one server listen surface derived from ServiceOptions.
 type ServiceListenPlan struct {
 	Address string
-	Axes    ServiceConfig
+	Stack   ServiceOptions
 }
 
 // ServerListenPlans returns listen surfaces for this service (server-side).
-func (sc ServiceConfig) ServerListenPlans(fallbackListen string) ([]ServiceListenPlan, error) {
+func (sc ServiceOptions) ServerListenPlans(fallbackListen string) ([]ServiceListenPlan, error) {
 	if len(sc.listeners) > 0 {
 		out := make([]ServiceListenPlan, 0, len(sc.listeners))
 		for _, l := range sc.listeners {
-			if err := l.axes.checkComplete(); err != nil {
+			stack := ServiceOptions{Transport: l.transport, Codec: l.codec}
+			if err := stack.checkComplete(); err != nil {
 				return nil, fmt.Errorf("listener %q: %w", l.address, err)
 			}
 			addr := l.address
@@ -109,9 +93,9 @@ func (sc ServiceConfig) ServerListenPlans(fallbackListen string) ([]ServiceListe
 				addr = fallbackListen
 			}
 			if addr == "" {
-				return nil, fmt.Errorf("listener missing address (set ServiceListenAddress or Config.ListenAddress)")
+				return nil, fmt.Errorf("listener missing address (set ServiceListenAddress or Options.ListenAddress)")
 			}
-			out = append(out, ServiceListenPlan{Address: addr, Axes: l.axes})
+			out = append(out, ServiceListenPlan{Address: addr, Stack: stack})
 		}
 		return out, nil
 	}
@@ -123,56 +107,35 @@ func (sc ServiceConfig) ServerListenPlans(fallbackListen string) ([]ServiceListe
 		addr = fallbackListen
 	}
 	if addr == "" {
-		return nil, fmt.Errorf("missing listen address (ServiceListenAddress or Config.ListenAddress)")
+		return nil, fmt.Errorf("missing listen address (ServiceListenAddress or Options.ListenAddress)")
 	}
-	return []ServiceListenPlan{{Address: addr, Axes: sc}}, nil
+	return []ServiceListenPlan{{Address: addr, Stack: sc}}, nil
 }
 
-func (sc ServiceConfig) checkComplete() error {
-	if sc.Transport == nil || sc.Framing == nil || sc.Codec == nil {
-		return fmt.Errorf("argos: incomplete service axes (Transport, Framing, Codec required)")
+func (sc ServiceOptions) checkComplete() error {
+	if sc.Transport == "" || sc.Codec == "" {
+		return fmt.Errorf("argos: incomplete service stack (Transport + Codec)")
 	}
 	return nil
 }
 
-// Assemble builds fresh Transport, Framing and Codec instances. Factories must
-// not Dial or Serve.
-func (sc ServiceConfig) Assemble() (transport.Transport, framing.Framing, codec.Codec, error) {
+// AssembleTransport builds this entry's Transport from its registered name.
+func (sc ServiceOptions) AssembleTransport() (transport.Transport, error) {
 	if err := sc.checkComplete(); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	tr, err := sc.Transport()
-	if err != nil {
-		closeTransport(tr)
-		return nil, nil, nil, err
-	}
-	fr, err := sc.Framing()
-	if err != nil {
-		closeTransport(tr)
-		return nil, nil, nil, err
-	}
-	cd, err := sc.Codec()
-	if err != nil {
-		closeTransport(tr)
-		return nil, nil, nil, err
-	}
-	if tr == nil || fr == nil || cd == nil {
-		closeTransport(tr)
-		return nil, nil, nil, fmt.Errorf("argos: axis factory returned nil component")
-	}
-	return tr, fr, cd, nil
+	return transport.New(sc.Transport)
 }
 
-// closeTransport releases a Transport a failed Assemble built. Assemble returns
-// no component alongside an error, so one it built and does not return would be
-// unreachable; Framing and Codec hold nothing to release (README §4.1).
-func closeTransport(tr transport.Transport) {
-	if tr != nil {
-		_ = tr.Close()
+// AssembleCodec builds this entry's Codec from its registered name.
+func (sc ServiceOptions) AssembleCodec() (codec.Codec, error) {
+	if err := sc.checkComplete(); err != nil {
+		return nil, err
 	}
+	return codec.New(sc.Codec)
 }
 
-func cloneServiceConfig(sc ServiceConfig) ServiceConfig {
+func cloneServiceOptions(sc ServiceOptions) ServiceOptions {
 	out := sc
 	if len(sc.listeners) > 0 {
 		out.listeners = append([]serviceListen(nil), sc.listeners...)
@@ -180,7 +143,7 @@ func cloneServiceConfig(sc ServiceConfig) ServiceConfig {
 	return out
 }
 
-// ServiceListenKey identifies a deduplicated listen surface (address + axes).
-func ServiceListenKey(addr string, sc ServiceConfig) string {
-	return fmt.Sprintf("%s|%p|%p|%p", addr, sc.Transport, sc.Framing, sc.Codec)
+// ServiceListenKey identifies a listen surface for deduplication.
+func ServiceListenKey(addr string, sc ServiceOptions) string {
+	return addr + "|" + sc.Transport + "|" + sc.Codec
 }

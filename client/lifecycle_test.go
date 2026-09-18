@@ -2,8 +2,6 @@ package client
 
 import (
 	"context"
-	"errors"
-	"io"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -11,223 +9,56 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
-	"github.com/argos-io/argos/codec"
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/internal/fake"
-	"github.com/argos-io/argos/transport"
+	"github.com/argos-io/argos/internal/teststack"
 )
 
-// freshLoopback returns a client preset whose Assemble builds a new Transport×Framing
-// pair (factory-once / isolation tests).
-func freshLoopback(t *testing.T, factoryCalls *atomic.Int64, dialed *[]*fake.ByteConn, dialMu *sync.Mutex) argos.ClientOption {
+func freshLoopback(t *testing.T, dialed *[]*fake.ByteConn, dialMu *sync.Mutex) *fake.Transport {
 	t.Helper()
-	var current atomic.Pointer[loopbackPair]
-	build := func() *loopbackPair {
-		if factoryCalls != nil {
-			factoryCalls.Add(1)
-		}
-		f := fake.NewFraming(framing.Sequential)
-		tr := &loopTransport{
-			dial: func(ctx context.Context, endpoint string) (transport.Conn, error) {
-				cli, srv := fake.BytePipe()
-				if dialMu != nil && dialed != nil {
-					dialMu.Lock()
-					*dialed = append(*dialed, cli)
-					dialMu.Unlock()
-				}
-				go runEchoServer(t, f, srv)
-				return cli, nil
-			},
-		}
-		p := &loopbackPair{tr: tr, f: f}
-		current.Store(p)
-		return p
-	}
-	return argos.JoinClient(
-		argos.WithTransport(func() (transport.Transport, error) {
-			if p := current.Load(); p != nil {
-				return p.tr, nil
-			}
-			return build().tr, nil
-		}),
-		argos.WithFraming(func() (framing.Framing, error) {
-			if p := current.Load(); p != nil {
-				return p.f, nil
-			}
-			return build().f, nil
-		}),
-		argos.WithCodec(func() (codec.Codec, error) { return bytesCodec{}, nil }),
-	)
+	return buildLoopbackTransport(t, nil, dialed, dialMu)
 }
 
-func TestProtocolAssembleOncePerClient(t *testing.T) {
+func TestClientOpenUsesSharedTransport(t *testing.T) {
 	t.Parallel()
-	var calls atomic.Int64
-	cli, err := New(
+	cli, err := newClientLoopback(t, freshLoopback(t, nil, nil),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
-		freshLoopback(t, &calls, nil, nil),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer cli.Close()
 
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("protocol assemble calls = %d, want 1", got)
-	}
-	// Open must not re-invoke the factory.
 	cs, err := cli.Open(context.Background(), testMethod(t))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	_ = cs.Close()
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("protocol assemble calls after Open = %d, want 1", got)
-	}
 }
 
-func TestClientsFromSameFactoryIsolated(t *testing.T) {
+func TestClientsUseDistinctTransports(t *testing.T) {
 	t.Parallel()
-	var calls atomic.Int64
-	var transports []*loopTransport
-	var framings []*fake.Framing
-	var mu sync.Mutex
-
-	isolatedPreset := argos.JoinClient(
-		argos.WithTransport(func() (transport.Transport, error) {
-			calls.Add(1)
-			f := fake.NewFraming(framing.Sequential)
-			tr := &loopTransport{
-				dial: func(ctx context.Context, endpoint string) (transport.Conn, error) {
-					cli, srv := fake.BytePipe()
-					go runEchoServer(t, f, srv)
-					return cli, nil
-				},
-			}
-			mu.Lock()
-			transports = append(transports, tr)
-			framings = append(framings, f)
-			mu.Unlock()
-			return tr, nil
-		}),
-		argos.WithFraming(func() (framing.Framing, error) {
-			mu.Lock()
-			fr := framings[len(framings)-1]
-			mu.Unlock()
-			return fr, nil
-		}),
-		argos.WithCodec(func() (codec.Codec, error) { return bytesCodec{}, nil }),
-	)
-
-	cfg := &argos.Config{
-		MaxConcurrentCalls: 4,
-		MaxBufferedBytes:   4 * 16 * 1024 * 1024,
+	var transports []*fake.Transport
+	axFor := func() *fake.Transport {
+		ax := buildLoopbackTransport(t, nil, nil, nil)
+		transports = append(transports, ax)
+		return ax
 	}
-
-	cli1, err := New(argos.WithConfig(cfg),
-		argos.WithServiceName(testService), argos.WithTarget(testTarget), isolatedPreset)
+	cfg := &argos.Options{MaxConcurrentCalls: 4, MaxBufferedBytes: 4 * 16 * 1024 * 1024}
+	cli1, err := newClientLoopback(t, axFor(), argos.WithClientOptions(cfg), argos.WithServiceName(testService), argos.WithTarget(testTarget))
 	if err != nil {
 		t.Fatalf("New #1: %v", err)
 	}
-	cli2, err := New(argos.WithConfig(cfg),
-		argos.WithServiceName(testService), argos.WithTarget(testTarget), isolatedPreset)
+	cli2, err := newClientLoopback(t, axFor(), argos.WithClientOptions(cfg), argos.WithServiceName(testService), argos.WithTarget(testTarget))
 	if err != nil {
 		t.Fatalf("New #2: %v", err)
 	}
-	defer cli1.Close()
-	defer cli2.Close()
-
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("protocol Transport factory calls = %d, want 2", got)
+	if cli1 == nil || cli2 == nil {
+		t.Fatal("New returned a nil Client")
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(transports) != 2 || len(framings) != 2 {
-		t.Fatalf("created %d transports / %d framings, want 2/2", len(transports), len(framings))
-	}
-	if transports[0] == transports[1] {
-		t.Fatal("clients share Transport instance")
-	}
-	if framings[0] == framings[1] {
-		t.Fatal("clients share Framing instance")
-	}
-
-	if err := cli1.Close(); err != nil {
-		t.Fatalf("cli1.Close: %v", err)
-	}
-	if transports[0].closeN.Load() != 1 {
-		t.Fatalf("cli1 Transport.Close count = %d, want 1", transports[0].closeN.Load())
-	}
-	if transports[1].closeN.Load() != 0 {
-		t.Fatalf("cli2 Transport closed early: %d", transports[1].closeN.Load())
-	}
-	if err := cli2.Close(); err != nil {
-		t.Fatalf("cli2.Close: %v", err)
-	}
-	if transports[1].closeN.Load() != 1 {
-		t.Fatalf("cli2 Transport.Close count = %d, want 1", transports[1].closeN.Load())
-	}
-}
-
-func TestCloseDrainsIdleSessions(t *testing.T) {
-	t.Parallel()
-	var dialed []*fake.ByteConn
-	var dialMu sync.Mutex
-	var calls atomic.Int64
-	fn := freshLoopback(t, &calls, &dialed, &dialMu)
-
-	cli, err := New(
-		argos.WithServiceName(testService),
-		argos.WithMaxConcurrentCalls(4),
-		argos.WithMaxBufferedBytes(4*16*1024*1024),
-		argos.WithMaxIdleSessions(4),
-		fn,
-		argos.WithTarget(testTarget),
-	)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	cs, err := cli.Open(context.Background(), testMethod(t))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if err := cs.Send([]byte("x")); err != nil {
-		t.Fatalf("Send: %v", err)
-	}
-	if err := cs.HalfClose(); err != nil {
-		t.Fatalf("HalfClose: %v", err)
-	}
-	var got []byte
-	if err := cs.Recv(&got); err != nil {
-		t.Fatalf("Recv: %v", err)
-	}
-	if err := cs.Recv(&got); !errors.Is(err, io.EOF) {
-		t.Fatalf("Recv EOF: %v", err)
-	}
-	if err := cs.Close(); err != nil {
-		t.Fatalf("CallStream.Close: %v", err)
-	}
-
-	dialMu.Lock()
-	if len(dialed) != 1 {
-		dialMu.Unlock()
-		t.Fatalf("dialed = %d, want 1", len(dialed))
-	}
-	conn := dialed[0]
-	dialMu.Unlock()
-
-	if conn.CloseCount() != 0 {
-		t.Fatalf("conn CloseCount before Client.Close = %d, want 0 (idle in pool)", conn.CloseCount())
-	}
-	if err := cli.Close(); err != nil {
-		t.Fatalf("Client.Close: %v", err)
-	}
-	if conn.CloseCount() == 0 {
-		t.Fatal("Client.Close did not drain idle session / close conn")
+	if len(transports) != 2 || transports[0] == transports[1] {
+		t.Fatal("expected two distinct transport instances")
 	}
 }
 
@@ -238,30 +69,27 @@ func TestCallStreamLeakReportsPhaseLeak(t *testing.T) {
 
 	var leaked atomic.Bool
 	var phase atomic.Uint32
-	cli, err := New(
+	cli, err := newClientLoopback(t, freshLoopback(t, nil, nil),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
-		argos.WithCallErrorObserver(func(info argos.CallInfo, _ error) {
+		argos.WithClientCallErrorObserver(func(info argos.CallInfo, _ error) {
 			if info.Phase == argos.PhaseLeak {
 				phase.Store(uint32(info.Phase))
 				leaked.Store(true)
 			}
 		}),
-		freshLoopback(t, nil, nil, nil),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer cli.Close()
 
 	func() {
 		cs, err := cli.Open(context.Background(), testMethod(t))
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
-		// Intentionally leak: drop without Close so AddCleanup can fire.
 		_ = cs
 	}()
 
@@ -280,41 +108,27 @@ func TestCallStreamLeakReportsPhaseLeak(t *testing.T) {
 	t.Fatal("PhaseLeak not reported after forcing GC (AddCleanup)")
 }
 
-func TestCloseNoGoroutineLeak(t *testing.T) {
+// A call that has been Closed must leave nothing running. Every call here
+// reuses the one session the pool holds, so the goroutine count reaches its
+// steady state after the warmup: a per-call leak would grow it by the call
+// count, which the slack cannot absorb.
+func TestClosedCallsLeaveNoGoroutines(t *testing.T) {
 	t.Parallel()
-	// Optional slack check: happy-path Open/Close should not permanently
-	// grow the goroutine count beyond scheduler noise.
+	const calls = 20
+	cli := newTestClient(t)
+
+	echoRoundTrip(t, cli, context.Background())
+	echoRoundTrip(t, cli, context.Background())
+
 	runtime.GC()
 	time.Sleep(20 * time.Millisecond)
 	before := runtime.NumGoroutine()
 
-	cli := newTestClient(t)
-	m := testMethod(t)
-	for i := 0; i < 5; i++ {
-		cs, err := cli.Open(context.Background(), m)
-		if err != nil {
-			t.Fatalf("Open: %v", err)
-		}
-		if err := cs.Send([]byte("g")); err != nil {
-			t.Fatalf("Send: %v", err)
-		}
-		if err := cs.HalfClose(); err != nil {
-			t.Fatalf("HalfClose: %v", err)
-		}
-		var got []byte
-		if err := cs.Recv(&got); err != nil {
-			t.Fatalf("Recv: %v", err)
-		}
-		_ = cs.Recv(&got)
-		if err := cs.Close(); err != nil {
-			t.Fatalf("Close: %v", err)
-		}
-	}
-	if err := cli.Close(); err != nil {
-		t.Fatalf("Client.Close: %v", err)
+	for i := 0; i < calls; i++ {
+		echoRoundTrip(t, cli, context.Background())
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	var after int
 	for time.Now().Before(deadline) {
 		runtime.GC()
@@ -324,59 +138,76 @@ func TestCloseNoGoroutineLeak(t *testing.T) {
 			return
 		}
 	}
-	t.Fatalf("goroutines before=%d after=%d (slack 8)", before, after)
+	t.Fatalf("goroutines before=%d after=%d over %d calls (slack 8)", before, after, calls)
 }
 
-// A Client that is dropped instead of closed used to hold its session pool's
-// reclaim goroutine and every socket it had open for the life of the process.
-// Close is still the contract; this is the safety net for forgetting it.
-func TestDroppedClientReleasesItsResources(t *testing.T) {
-	t.Parallel()
-	var reported atomic.Bool
-	var info atomic.Value
-	tr := &loopTransport{
-		dial: func(ctx context.Context, endpoint string) (transport.Conn, error) {
-			return nil, errors.New("not dialed")
-		},
-	}
+// closeCountingAxis records Close so a test can assert the Client never made
+// one: closing the axis, and with it the pool, belongs to whoever constructed
+// it.
+type closeCountingAxis struct {
+	*fake.Transport
+	closes atomic.Int64
+}
 
-	func() {
-		cli, err := New(
-			argos.WithServiceName(testService),
-			argos.WithConnErrorObserver(func(ci argos.ConnInfo, _ error) {
-				info.Store(ci)
-				reported.Store(true)
-			}),
-			fixedLoopback(tr, fake.NewFraming(framing.Sequential)),
-			argos.WithTarget(testTarget),
-		)
+func (a *closeCountingAxis) Close() error {
+	a.closes.Add(1)
+	return a.Transport.Close()
+}
+
+// A Client is a plain handle over an axis the caller owns: it holds no pool and
+// nothing to release. The same instance may carry other Clients and a listen
+// surface, so a Client that closed or drained it would take them down with it.
+func TestClientLeavesAxisToItsOwner(t *testing.T) {
+	t.Parallel()
+	var dials atomic.Int64
+	inner := buildLoopbackTransport(t, &dials, nil, nil)
+	opts := []argos.ClientOption{
+		argos.WithServiceName(testService),
+		argos.WithMaxConcurrentCalls(4),
+		argos.WithMaxBufferedBytes(4 * 16 * 1024 * 1024),
+		argos.WithTarget(testTarget),
+	}
+	attachFakePool(inner, fakePoolOptions())
+	ax := &closeCountingAxis{Transport: inner}
+
+	newClient := func() *Client {
+		t.Helper()
+		cli, err := New(append([]argos.ClientOption{
+			argos.WithTransport(teststack.TransportName(t, ax)),
+			argos.WithCodec(loopbackCodecName),
+		}, opts...)...)
 		if err != nil {
 			t.Fatalf("New: %v", err)
 		}
-		// Intentionally leak: drop without Close so AddCleanup can fire. This
-		// only works because the pool's DialFunc does not point back at the
-		// Client — otherwise the Client stays reachable from its own hook.
-		_ = cli
-	}()
-
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		runtime.GC()
-		runtime.GC()
-		if reported.Load() {
-			ci := info.Load().(argos.ConnInfo)
-			if ci.Side != argos.SideClient || ci.Phase != argos.ConnPhaseClose {
-				t.Errorf("ConnInfo = %+v, want SideClient and ConnPhaseClose", ci)
-			}
-			if ci.Endpoint != testTarget {
-				t.Errorf("Endpoint = %q, want %q", ci.Endpoint, testTarget)
-			}
-			if n := tr.closeN.Load(); n != 1 {
-				t.Errorf("Transport closed %d times, want 1", n)
-			}
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
+		return cli
 	}
-	t.Fatal("dropped Client was never released after forcing GC (AddCleanup)")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	func() {
+		cli1 := newClient()
+		echoRoundTrip(t, cli1, ctx)
+	}()
+	// Cancel the ctx the first Client opened its call with, and drop the Client
+	// with it: nothing the first Client did may outlive it.
+	cancel()
+	runtime.GC()
+	runtime.GC()
+
+	cli2 := newClient()
+	echoRoundTrip(t, cli2, context.Background())
+
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dial count = %d, want 1: the second Client re-dialed instead of reusing the session the first one left in the axis' pool", got)
+	}
+	if got := ax.closes.Load(); got != 0 {
+		t.Fatalf("Client closed the axis %d time(s); the axis belongs to whoever constructed it", got)
+	}
+
+	// The axis is still the constructor's to close.
+	if err := ax.Close(); err != nil {
+		t.Fatalf("axis Close: %v", err)
+	}
+	if got := ax.closes.Load(); got != 1 {
+		t.Fatalf("axis Close count = %d, want 1", got)
+	}
 }

@@ -28,7 +28,7 @@ const MaxDatagramSize = 65507
 
 // Compile-time interface checks.
 var (
-	_ transport.Transport       = (*Transport)(nil)
+	_ transport.Pipe            = (*Transport)(nil)
 	_ transport.Conn            = (*Conn)(nil)
 	_ transport.CarrierConn     = (*Conn)(nil)
 	_ transport.DatagramCarrier = (*Conn)(nil)
@@ -53,7 +53,7 @@ type Transport struct {
 }
 
 // New returns a UDP Transport.
-func New() transport.Transport {
+func New() transport.Pipe {
 	return &Transport{
 		conns:  make(map[*Conn]struct{}),
 		assocs: make(map[string]*Conn),

@@ -23,7 +23,7 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ transport.Transport      = (*Transport)(nil)
+	_ transport.Pipe           = (*Transport)(nil)
 	_ transport.Conn           = (*Conn)(nil)
 	_ transport.CarrierConn    = (*Conn)(nil)
 	_ transport.MessageCarrier = (*Conn)(nil)
@@ -78,7 +78,7 @@ type Transport struct {
 }
 
 // New returns a WebSocket Transport.
-func New(opts ...Option) transport.Transport {
+func New(opts ...Option) transport.Pipe {
 	var o options
 	for _, opt := range opts {
 		if opt != nil {

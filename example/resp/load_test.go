@@ -14,10 +14,9 @@ import (
 
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/client"
-	"github.com/argos-io/argos/framing"
+	"github.com/argos-io/argos/internal/teststack"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/status"
-	"github.com/argos-io/argos/transport"
 
 	_ "github.com/argos-io/argos/resolver/ip"
 )
@@ -30,27 +29,27 @@ type loadEnv struct {
 	serveDone    chan error
 }
 
-// startLoadRESP brings up a RESP server and a client that share one Config.
-// tune writes the limits under test into that Config; it replaces the option
+// startLoadRESP brings up a RESP server and a client that share one Options.
+// tune writes the limits under test into those Options; it replaces the option
 // list this helper used to splice into both constructors, which no longer
 // type-checks now that session limits are client-only and inbound-connection
-// limits are server-only.
-func startLoadRESP(t *testing.T, tune func(*argos.Config)) *loadEnv {
+// limits are server-only. axOpts reach the two axes instead: the pool belongs
+// to the axis, so a test that measures pool behaviour names its numbers there
+// and the Options has nothing to say about them.
+func startLoadRESP(t *testing.T, tune func(*argos.Options), axOpts ...Option) *loadEnv {
 	t.Helper()
 
 	store := NewStore()
-	var clientFr *Framing
-	var dials atomic.Int64
 	var admitRejects atomic.Int64
-	var addrTr hasAddr
-	bound := make(chan struct{})
 
-	baseT, baseF, baseC := BindingAxes()
+	srvAxis := New(axOpts...)
+	cliAxis := New(axOpts...)
+	srvTr := teststack.TransportName(t, srvAxis)
+	cliTr := teststack.TransportName(t, cliAxis)
 
-	cfg := &argos.Config{
+	cfg := &argos.Options{
 		MaxConcurrentCalls: 64,
 		MaxBufferedBytes:   64 * 16 * 1024 * 1024,
-		HandshakeTimeout:   5 * time.Second,
 		ListenAddress:      testListenAddr,
 		ConnErrorObserver: func(info argos.ConnInfo, err error) {
 			if info.Phase == argos.ConnPhaseAdmit && status.CodeOf(err) == status.ResourceExhausted {
@@ -62,68 +61,36 @@ func startLoadRESP(t *testing.T, tune func(*argos.Config)) *loadEnv {
 		tune(cfg)
 	}
 
-	srv := server.New(argos.WithConfig(cfg), argos.WithService(svcName,
-		argos.JoinService(
-			argos.ServiceTransport(func() (transport.Transport, error) {
-				tr, err := baseT()
-				if err != nil {
-					return nil, err
-				}
-				if a, ok := tr.(hasAddr); ok {
-					addrTr = a
-					select {
-					case <-bound:
-					default:
-						close(bound)
-					}
-				}
-				return tr, nil
-			}),
-			argos.ServiceFraming(baseF),
-			argos.ServiceCodec(baseC),
-		),
+	srv := server.New(argos.WithServerOptions(cfg), argos.WithServerService(svcName,
+		argos.ServiceTransport(srvTr), argos.ServiceCodec("raw"),
 		argos.ServiceListenAddress(testListenAddr),
 	))
 	if err := Register(srv, store); err != nil {
 		t.Fatal(err)
 	}
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- srv.Run(context.Background()) }()
-	select {
-	case <-bound:
-	case <-time.After(3 * time.Second):
-		t.Fatal("server protocol not assembled")
-	}
-	addr := waitAddr(t, addrTr)
-	t.Cleanup(func() { _ = srv.Close() })
+	// The ctx given to Run is the server's only stop signal: canceling it is
+	// how this helper stops the server at cleanup.
+	runCtx, stopServer := context.WithCancel(context.Background())
+	go func() { serveDone <- srv.Run(runCtx) }()
+	addr := waitAddr(t, srvAxis)
+	t.Cleanup(stopServer)
 
 	cli, err := client.New(
-		argos.WithConfig(cfg),
+		argos.WithClientOptions(cfg),
 		argos.WithServiceName(svcName),
-		argos.JoinClient(
-			argos.WithTransport(func() (transport.Transport, error) {
-				tr, err := baseT()
-				if err != nil {
-					return nil, err
-				}
-				return &dialCounter{Transport: tr, dials: &dials}, nil
-			}),
-			argos.WithFraming(func() (framing.Framing, error) {
-				fr := New()
-				clientFr = fr
-				return fr, nil
-			}),
-			argos.WithCodec(baseC),
-		),
+		argos.WithTransport(cliTr), argos.WithCodec("raw"),
 		argos.WithTarget("ip://"+addr),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = cli.Close() })
+	// The Client has no Close: the axis it opens calls through belongs to this
+	// helper, which constructed it.
+	t.Cleanup(func() { _ = cliAxis.Close() })
 
 	return &loadEnv{
-		h:            &harness{cli: cli, fr: clientFr, store: store, dials: &dials},
+		h:            &harness{cli: cli, ax: cliAxis, store: store},
 		srv:          srv,
 		addr:         addr,
 		admitRejects: &admitRejects,
@@ -260,25 +227,17 @@ func TestBurstIdleBurstMaxIdleSessions(t *testing.T) {
 	for _, maxIdle := range []int{0, 8, 64} {
 		maxIdle := maxIdle
 		t.Run(fmt.Sprintf("idle=%d", maxIdle), func(t *testing.T) {
-			// A zero field means "use the built-in default" now, so the cells
-			// that ask for no retention and no expiry spell it argos.Disabled.
-			idle := maxIdle
-			if idle == 0 {
-				idle = argos.Disabled
-			}
-			env := startLoadRESP(t, func(c *argos.Config) {
-				c.MaxIdleSessions = idle
-				c.MaxSessionsPerEndpoint = maxSess
+			// A zero on the axis is literal: it keeps no idle session, which is
+			// what this cell means by idle=0.
+			env := startLoadRESP(t, func(c *argos.Options) {
 				c.MaxConcurrentCalls = maxSess
-				c.SessionIdleTimeout = argos.Disabled
-				c.MaxSessionLifetime = argos.Disabled
 				c.MaxInboundConns = 256
 				c.MaxInboundConnIdle = 2 * time.Minute
-			})
+			}, WithPool(maxSess, maxIdle, 0, 0))
 			h := env.h
 
 			wave1 := holdWave(t, h, burst)
-			d1, he1 := h.dials.Load(), h.fr.ClientHellos()
+			d1, he1 := h.ax.Dials(), h.ax.ClientHellos()
 			if d1 < int64(burst) || he1 < int64(burst) {
 				t.Fatalf("wave1 under-opened: dials=%d HELLO=%d want >=%d", d1, he1, burst)
 			}
@@ -286,7 +245,7 @@ func TestBurstIdleBurstMaxIdleSessions(t *testing.T) {
 			time.Sleep(idleFor)
 
 			wave2 := holdWave(t, h, burst)
-			d2, he2 := h.dials.Load(), h.fr.ClientHellos()
+			d2, he2 := h.ax.Dials(), h.ax.ClientHellos()
 			dd, dh := d2-d1, he2-he1
 
 			rows = append(rows, row{
@@ -321,21 +280,17 @@ func TestBurstIdleBurstMaxIdleSessions(t *testing.T) {
 	}
 
 	t.Run("idle=8_small_followup", func(t *testing.T) {
-		env := startLoadRESP(t, func(c *argos.Config) {
-			c.MaxIdleSessions = 8
-			c.MaxSessionsPerEndpoint = maxSess
+		env := startLoadRESP(t, func(c *argos.Options) {
 			c.MaxConcurrentCalls = maxSess
-			c.SessionIdleTimeout = argos.Disabled
-			c.MaxSessionLifetime = argos.Disabled
 			c.MaxInboundConns = 256
 			c.MaxInboundConnIdle = 2 * time.Minute
-		})
+		}, WithPool(maxSess, 8, 0, 0))
 		h := env.h
 		_ = holdWave(t, h, burst)
-		d1, he1 := h.dials.Load(), h.fr.ClientHellos()
+		d1, he1 := h.ax.Dials(), h.ax.ClientHellos()
 		time.Sleep(idleFor)
 		_ = holdWave(t, h, 8)
-		dd, dh := h.dials.Load()-d1, h.fr.ClientHellos()-he1
+		dd, dh := h.ax.Dials()-d1, h.ax.ClientHellos()-he1
 		if dh > 1 {
 			t.Fatalf("idle=8 after large burst: small follow-up of 8 should reuse, ΔHELLO=%d", dh)
 		}
@@ -356,16 +311,11 @@ func TestBurstIdleBurstMaxIdleSessions(t *testing.T) {
 // SessionIdleTimeout and the next call pays a new HELLO.
 func TestSessionIdleTimeoutReclaim(t *testing.T) {
 	const idleTO = 200 * time.Millisecond
-	env := startLoadRESP(t, func(c *argos.Config) {
-		c.MaxIdleSessions = 4
-		c.MaxSessionsPerEndpoint = 8
-		c.SessionIdleTimeout = idleTO
-		c.MaxSessionLifetime = argos.Disabled
-	})
+	env := startLoadRESP(t, nil, WithPool(8, 4, idleTO, 0))
 	h := env.h
 
 	onePING(t, h)
-	d1, he1 := h.dials.Load(), h.fr.ClientHellos()
+	d1, he1 := h.ax.Dials(), h.ax.ClientHellos()
 	if he1 < 1 {
 		t.Fatal("expected at least one HELLO")
 	}
@@ -374,7 +324,7 @@ func TestSessionIdleTimeoutReclaim(t *testing.T) {
 	time.Sleep(idleTO + 2500*time.Millisecond)
 
 	onePING(t, h)
-	dd, dh := h.dials.Load()-d1, h.fr.ClientHellos()-he1
+	dd, dh := h.ax.Dials()-d1, h.ax.ClientHellos()-he1
 	if dh < 1 || dd < 1 {
 		t.Fatalf("after SessionIdleTimeout reclaim want new dial+HELLO, Δdials=%d ΔHELLO=%d", dd, dh)
 	}
@@ -385,12 +335,7 @@ func TestSessionIdleTimeoutReclaim(t *testing.T) {
 // killing an in-flight call; the next Open dials again.
 func TestMaxSessionLifetimeNonReusable(t *testing.T) {
 	const life = 150 * time.Millisecond
-	env := startLoadRESP(t, func(c *argos.Config) {
-		c.MaxIdleSessions = 4
-		c.MaxSessionsPerEndpoint = 8
-		c.SessionIdleTimeout = argos.Disabled
-		c.MaxSessionLifetime = life
-	})
+	env := startLoadRESP(t, nil, WithPool(8, 4, 0, life))
 	h := env.h
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -414,10 +359,10 @@ func TestMaxSessionLifetimeNonReusable(t *testing.T) {
 		t.Fatalf("in-flight call must survive MaxSessionLifetime: %v", err)
 	}
 	_ = st.Close()
-	d1, he1 := h.dials.Load(), h.fr.ClientHellos()
+	d1, he1 := h.ax.Dials(), h.ax.ClientHellos()
 
 	onePING(t, h)
-	dd, dh := h.dials.Load()-d1, h.fr.ClientHellos()-he1
+	dd, dh := h.ax.Dials()-d1, h.ax.ClientHellos()-he1
 	if dh < 1 || dd < 1 {
 		t.Fatalf("after lifetime expiry want new dial+HELLO, Δdials=%d ΔHELLO=%d", dd, dh)
 	}
@@ -429,13 +374,11 @@ func TestMaxSessionLifetimeNonReusable(t *testing.T) {
 // Serve continues (a free slot after close is usable again).
 func TestMaxInboundConnsRejectsBeyondLimit(t *testing.T) {
 	const limit = 2
-	env := startLoadRESP(t, func(c *argos.Config) {
+	env := startLoadRESP(t, func(c *argos.Options) {
 		c.MaxInboundConns = limit
 		c.MaxInboundConnIdle = 30 * time.Second
 		c.MaxInboundConnAge = 30 * time.Minute
-		c.MaxIdleSessions = argos.Disabled
-		c.MaxSessionsPerEndpoint = 8
-	})
+	}, WithPool(8, 0, 0, 0))
 
 	// Hold `limit` inbound connections open (handshake done, idle on AcceptCall).
 	holders := make([]net.Conn, 0, limit)
@@ -445,8 +388,10 @@ func TestMaxInboundConnsRejectsBeyondLimit(t *testing.T) {
 		}
 	})
 
-	// Close the harness client so its pooled sessions do not consume slots.
-	_ = env.h.cli.Close()
+	// Release the harness client's pooled sessions so they do not consume
+	// slots. A Client owns no connections, so the release goes through the axis
+	// this test constructed.
+	_ = env.h.ax.Close()
 	time.Sleep(50 * time.Millisecond)
 
 	listenAddr := env.addr
@@ -508,14 +453,12 @@ func TestMaxInboundConnsRejectsBeyondLimit(t *testing.T) {
 // MaxInboundConnIdle.
 func TestMaxInboundConnIdleCloses(t *testing.T) {
 	const idle = 120 * time.Millisecond
-	env := startLoadRESP(t, func(c *argos.Config) {
+	env := startLoadRESP(t, func(c *argos.Options) {
 		c.MaxInboundConns = 8
 		c.MaxInboundConnIdle = idle
 		c.MaxInboundConnAge = 30 * time.Minute
-		c.MaxIdleSessions = argos.Disabled
-		c.MaxSessionsPerEndpoint = 4
-	})
-	_ = env.h.cli.Close()
+	}, WithPool(4, 0, 0, 0))
+	_ = env.h.ax.Close()
 	listenAddr := env.addr
 
 	c, err := net.DialTimeout("tcp", listenAddr, time.Second)
@@ -546,14 +489,12 @@ func TestMaxInboundConnIdleCloses(t *testing.T) {
 // TestMaxInboundConnAgeDrains stops accepting new calls after age and drains.
 func TestMaxInboundConnAgeDrains(t *testing.T) {
 	const age = 200 * time.Millisecond
-	env := startLoadRESP(t, func(c *argos.Config) {
+	env := startLoadRESP(t, func(c *argos.Options) {
 		c.MaxInboundConns = 8
 		c.MaxInboundConnIdle = 30 * time.Second
 		c.MaxInboundConnAge = age
-		c.MaxIdleSessions = argos.Disabled
-		c.MaxSessionsPerEndpoint = 4
-	})
-	_ = env.h.cli.Close()
+	}, WithPool(4, 0, 0, 0))
+	_ = env.h.ax.Close()
 	listenAddr := env.addr
 
 	c, err := net.DialTimeout("tcp", listenAddr, time.Second)

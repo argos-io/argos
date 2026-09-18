@@ -5,12 +5,15 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/argos-io/argos/descriptor"
-	"github.com/argos-io/argos/framing"
+	"github.com/argos-io/argos/internal/session"
+	"github.com/argos-io/argos/internal/sessionpool"
 	"github.com/argos-io/argos/metadata"
+	"github.com/argos-io/argos/transport"
 )
 
 func testMethod(t *testing.T) descriptor.Method {
@@ -22,8 +25,8 @@ func testMethod(t *testing.T) descriptor.Method {
 	return m
 }
 
-func callSpec(role metadata.Role) framing.CallSpec {
-	return framing.CallSpec{Metadata: metadata.New(role, nil)}
+func callSpec(role metadata.Role) session.CallSpec {
+	return session.CallSpec{Metadata: metadata.New(role, nil)}
 }
 
 func TestSequentialUnaryRoundTrip(t *testing.T) {
@@ -32,9 +35,9 @@ func TestSequentialUnaryRoundTrip(t *testing.T) {
 	defer cliConn.Close()
 	defer srvConn.Close()
 
-	f := NewFraming(framing.Sequential)
+	f := NewFraming(session.Sequential)
 	ctx := context.Background()
-	spec := framing.SessionSpec{CodecName: "fake"}
+	spec := session.SessionSpec{CodecName: "fake"}
 
 	cs, err := f.NewClientSession(ctx, cliConn, spec)
 	if err != nil {
@@ -117,9 +120,9 @@ func TestSequentialCallCloseDoesNotCloseConn(t *testing.T) {
 	defer cliConn.Close()
 	defer srvConn.Close()
 
-	f := NewFraming(framing.Sequential)
+	f := NewFraming(session.Sequential)
 	ctx := context.Background()
-	spec := framing.SessionSpec{}
+	spec := session.SessionSpec{}
 	cs, err := f.NewClientSession(ctx, cliConn, spec)
 	if err != nil {
 		t.Fatal(err)
@@ -246,15 +249,15 @@ func TestOpenCallBusyScript(t *testing.T) {
 	defer cliConn.Close()
 	defer srvConn.Close()
 
-	f := NewFraming(framing.Sequential)
+	f := NewFraming(session.Sequential)
 	f.OpenCallHook = func(callSeq int) error {
 		if callSeq >= 1 {
-			return framing.ErrSessionBusy
+			return session.ErrSessionBusy
 		}
 		return nil
 	}
 	ctx := context.Background()
-	cs, err := f.NewClientSession(ctx, cliConn, framing.SessionSpec{})
+	cs, err := f.NewClientSession(ctx, cliConn, session.SessionSpec{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +265,93 @@ func TestOpenCallBusyScript(t *testing.T) {
 	_ = srvConn // peer present so pipe stays open
 
 	_, err = cs.OpenCall(ctx, testMethod(t), callSpec(metadata.RoleInitiator))
-	if !errors.Is(err, framing.ErrSessionBusy) {
+	if !errors.Is(err, session.ErrSessionBusy) {
 		t.Fatalf("OpenCall error = %v, want ErrSessionBusy", err)
+	}
+}
+
+func TestAxisOpenCallReusesDial(t *testing.T) {
+	t.Parallel()
+	var dials atomic.Int64
+	axis := New(session.Sequential, WithDial(func(ctx context.Context, endpoint string) (transport.Conn, error) {
+		dials.Add(1)
+		cli, srv := BytePipe()
+		go axisEchoServer(t, srv)
+		return cli, nil
+	}))
+	axis.AttachPool(sessionpool.New(axis.DialClientConn(), sessionpool.Options{
+		MaxSessionsPerEndpoint: 8,
+		MaxIdleSessions:        8,
+		MaxCallsPerConn:        MaxCallsPerConn(session.Sequential),
+	}))
+	defer axis.Close()
+
+	ctx := context.Background()
+	method := testMethod(t)
+	const n = 20
+	for i := 0; i < n; i++ {
+		call, err := axis.OpenCall(ctx, "ep", method, transport.CallSpec{
+			Metadata: metadata.New(metadata.RoleInitiator, nil),
+		})
+		if err != nil {
+			t.Fatalf("OpenCall #%d: %v", i, err)
+		}
+		if err := call.Send([]byte("x")); err != nil {
+			t.Fatalf("Send #%d: %v", i, err)
+		}
+		if err := call.HalfClose(); err != nil {
+			t.Fatalf("HalfClose #%d: %v", i, err)
+		}
+		_, release, err := call.Recv()
+		if err != nil {
+			t.Fatalf("Recv #%d: %v", i, err)
+		}
+		release()
+		if _, _, err := call.Recv(); err != io.EOF {
+			t.Fatalf("Recv terminal #%d: %v", i, err)
+		}
+		if err := call.Close(); err != nil {
+			t.Fatalf("Close #%d: %v", i, err)
+		}
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dial count = %d, want 1", got)
+	}
+}
+
+func axisEchoServer(t *testing.T, conn transport.Conn) {
+	t.Helper()
+	f := NewFraming(session.Sequential)
+	sess, err := f.NewServerSession(context.Background(), conn, session.SessionSpec{})
+	if err != nil {
+		_ = conn.Close()
+		return
+	}
+	defer sess.Close()
+	ctx := context.Background()
+	for {
+		sc, err := sess.AcceptCall(ctx, callSpec(metadata.RoleResponder))
+		if err != nil {
+			return
+		}
+		payload, release, err := sc.Recv()
+		if err != nil {
+			_ = sc.Close()
+			return
+		}
+		release()
+		if _, _, err := sc.Recv(); err != io.EOF {
+			_ = sc.Close()
+			return
+		}
+		if err := sc.Send(payload); err != nil {
+			_ = sc.Close()
+			return
+		}
+		if err := sc.Finish(nil); err != nil {
+			_ = sc.Close()
+			return
+		}
+		_ = sc.Close()
 	}
 }

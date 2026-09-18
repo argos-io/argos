@@ -9,29 +9,45 @@ import (
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
+	"github.com/argos-io/argos/internal/teststack"
 	"github.com/argos-io/argos/stream"
 )
 
+// openFilterClient builds a Client over an axis whose pool holds at most 8
+// sessions: small enough that a session leaking once per Open cannot hide.
 func openFilterClient(t *testing.T, dials *atomic.Int64, f filter.OpenFilter) *Client {
 	t.Helper()
 	return openFilterClientWith(t, dials, 8, f)
 }
 
-func openFilterClientWith(t *testing.T, dials *atomic.Int64, maxSessions int, f filter.OpenFilter) *Client {
+// openFilterClientWith builds a Client over an axis whose pool caps sessions at
+// poolMax. The cap belongs to the axis, so it is set on the pool the axis is
+// built with rather than on the Client's options.
+func openFilterClientWith(t *testing.T, dials *atomic.Int64, poolMax int, f filter.OpenFilter) *Client {
 	t.Helper()
+	ax := sequentialLoopback(t, dials)
+	t.Cleanup(func() { _ = ax.Close() })
+	pc := fakePoolOptions()
+	pc.MaxSessionsPerEndpoint = poolMax
+	attachFakePool(ax, pc)
+	// The leak test below detects a leak by exhausting this cap, so hold the
+	// axis to it: nothing checks the pool against the Client's options any
+	// more, and a cap that never arrived would make that test pass vacuously.
+	if got := ax.PoolLimits().MaxSessionsPerEndpoint; got != poolMax {
+		t.Fatalf("axis pool MaxSessionsPerEndpoint = %d, want %d", got, poolMax)
+	}
 	cli, err := New(
+		argos.WithTransport(teststack.TransportName(t, ax)),
+		argos.WithCodec(loopbackCodecName),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
-		argos.WithMaxSessionsPerEndpoint(maxSessions),
 		argos.WithOpenFilter(f),
-		sequentialLoopback(t, dials),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(func() { _ = cli.Close() })
 	return cli
 }
 

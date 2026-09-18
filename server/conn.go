@@ -12,14 +12,13 @@ import (
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/budget"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/stream"
 	"github.com/argos-io/argos/transport"
 )
 
-func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry, c transport.Conn) {
+func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry, c transport.ServerConn) {
 	cfg := lb.cfg
 	maxConns := int64(cfg.MaxInboundConns)
 	if n := lb.active.Add(1); maxConns > 0 && n > maxConns {
@@ -40,19 +39,12 @@ func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry
 	acceptCtx, acceptCancel := context.WithCancel(connCtx)
 	defer acceptCancel()
 
-	id := new(uint64)
+	// A connection arriving after Run's ctx ended has no live server to serve
+	// it. Serve stops with that ctx, so this is the race rather than the rule.
 	s.mu.Lock()
-	s.acceptCancels[id] = acceptCancel
-	s.connCancels[id] = connCancel
-	closed := s.closed
+	runCtx := s.runCtx
 	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.acceptCancels, id)
-		delete(s.connCancels, id)
-		s.mu.Unlock()
-	}()
-	if closed {
+	if runCtx != nil && runCtx.Err() != nil {
 		_ = c.Close()
 		return
 	}
@@ -65,7 +57,7 @@ func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry
 	defer ageTimer.Stop()
 
 	hsCtx, hsCancel := context.WithTimeout(connCtx, cfg.HandshakeTimeout)
-	sess, err := lb.framing.NewServerSession(hsCtx, c, lb.sessSpec)
+	err := c.Handshake(hsCtx)
 	hsCancel()
 	if err != nil {
 		argos.NotifyConnError(cfg, argos.ConnInfo{
@@ -76,13 +68,13 @@ func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry
 		_ = c.Close()
 		return
 	}
-	defer func() { _ = sess.Close() }()
+	defer func() { _ = c.Close() }()
 
 	var callWG sync.WaitGroup
 	defer callWG.Wait()
 
 	for {
-		var callHolder atomic.Pointer[framing.ServerCall]
+		var callHolder atomic.Pointer[transport.ServerCall]
 		md := metadata.New(metadata.RoleResponder, func(metadata.Metadata) error {
 			p := callHolder.Load()
 			if p == nil || *p == nil {
@@ -90,17 +82,17 @@ func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry
 			}
 			return (*p).SendHeaders()
 		})
-		spec := framing.CallSpec{Metadata: md}
+		spec := transport.CallSpec{Metadata: md}
 
 		waitCtx, waitCancel := context.WithCancel(acceptCtx)
 		idleTimer := time.AfterFunc(cfg.MaxInboundConnIdle, waitCancel)
 
-		call, err := sess.AcceptCall(waitCtx, spec)
+		call, err := c.AcceptCall(waitCtx, spec)
 		idleTimer.Stop()
 		waitCancel()
 
 		if err != nil {
-			if errors.Is(err, framing.ErrCallRejected) {
+			if errors.Is(err, transport.ErrCallRejected) {
 				s.handleRejected(call, err)
 				continue
 			}
@@ -114,7 +106,7 @@ func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry
 				// releases the connection context afterward.
 				return
 			}
-			// acceptCtx / idle / age / shutdown wake — clean loop exit.
+			// acceptCtx / idle / age wake — clean loop exit.
 			if acceptCtx.Err() != nil || waitCtx.Err() != nil {
 				if aged.Load() {
 					connCancel(ErrSessionExpired)
@@ -132,10 +124,10 @@ func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry
 
 		callHolder.Store(&call)
 
-		switch lb.reuse {
-		case framing.Concurrent:
+		switch lb.concurrency {
+		case transport.Concurrent:
 			callWG.Add(1)
-			go func(call framing.ServerCall, md metadata.CallMetadata) {
+			go func(call transport.ServerCall, md metadata.CallMetadata) {
 				defer callWG.Done()
 				s.handleCall(connCtx, lb, routes, call, md)
 			}(call, md)
@@ -145,7 +137,7 @@ func (s *Server) onConn(lb *liveBinding, routes map[string]map[string]routeEntry
 	}
 }
 
-func (s *Server) handleRejected(call framing.ServerCall, err error) {
+func (s *Server) handleRejected(call transport.ServerCall, err error) {
 	finishErr := status.Error(status.InvalidArgument, err.Error())
 	var se *status.StatusError
 	if errors.As(err, &se) {
@@ -161,7 +153,7 @@ func (s *Server) handleCall(
 	connCtx context.Context,
 	lb *liveBinding,
 	routes map[string]map[string]routeEntry,
-	call framing.ServerCall,
+	call transport.ServerCall,
 	md metadata.CallMetadata,
 ) {
 	defer func() { _ = call.Close() }()
@@ -182,7 +174,7 @@ func (s *Server) handleCall(
 
 	callCtx = metadata.ContextWith(callCtx, md)
 	callCtx = budget.ContextWith(callCtx, b)
-	if bs, ok := call.(framing.BudgetSetter); ok {
+	if bs, ok := call.(transport.BudgetSetter); ok {
 		bs.SetBudget(b)
 	}
 
@@ -213,7 +205,7 @@ func (s *Server) handleCall(
 	}
 
 	st := stream.Wrap(call, lb.codec)
-	// lb.cfg, not s.cfg: the per-binding Config already carries the server's
+	// lb.cfg, not s.cfg: the per-binding Options already carries the server's
 	// filters plus any that AddBinding appended for this binding. Chaining
 	// s.cfg.Filters here dropped the per-binding ones silently.
 	chain := filter.Chain(lb.cfg.Filters, entry.handler)
@@ -228,7 +220,7 @@ func (s *Server) handleCall(
 	}
 }
 
-func deriveCallCtx(connCtx context.Context, call framing.Call) (context.Context, context.CancelFunc) {
+func deriveCallCtx(connCtx context.Context, call transport.Call) (context.Context, context.CancelFunc) {
 	if dl, ok := call.Deadline(); ok {
 		return context.WithDeadline(connCtx, dl)
 	}

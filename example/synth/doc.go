@@ -1,8 +1,8 @@
-// Package synth is a synthetic Framing used as an assembly-gate shape (§1.1-4).
+// Package synth is a synthetic transport.Transport used as an assembly-gate shape (§1.1-4).
 //
 // It deliberately combines properties that real protocols rarely pack together:
 //
-//   - greeting-first handshake inside NewServerSession (HandshakeTimeout)
+//   - greeting-first handshake inside ServerConn.Handshake (HandshakeTimeout)
 //   - Sequential reuse over a byte-stream CarrierConn (tcp)
 //   - no metadata channel (SendHeaders → Unimplemented)
 //   - method name from a custom on-wire field (not an HTTP path)

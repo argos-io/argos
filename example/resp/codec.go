@@ -48,3 +48,7 @@ func (BytesCodec) Unmarshal(b []byte, v any) error {
 }
 
 func (BytesCodec) CodecName() string { return "raw" }
+
+func init() {
+	codec.Register("raw", func() (codec.Codec, error) { return NewBytesCodec(), nil })
+}

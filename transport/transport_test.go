@@ -33,9 +33,11 @@ func TestNoForbiddenImports(t *testing.T) {
 		t.Fatalf("go list: %v\n%s", err, out)
 	}
 	imports := string(out)
+	// The axis owns frames, so descriptor / metadata / budget are its own
+	// vocabulary. codec stays forbidden: message bodies are the other axis,
+	// and that import is what would make "Axis × Codec" a single axis.
 	forbidden := []string{
-		"github.com/argos-io/argos/descriptor",
-		"github.com/argos-io/argos/framing",
+		"github.com/argos-io/argos/internal/session",
 		"github.com/argos-io/argos/codec",
 		"google.golang.org/grpc",
 	}

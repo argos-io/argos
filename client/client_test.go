@@ -11,11 +11,10 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
-	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/internal/fake"
+	"github.com/argos-io/argos/internal/session"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/stream"
@@ -73,59 +72,13 @@ func (t *loopTransport) Close() error {
 	return nil
 }
 
-type loopbackPair struct {
-	tr *loopTransport
-	f  *fake.Framing
-}
-
-func fixedLoopback(tr transport.Transport, fr framing.Framing) argos.ClientOption {
-	return argos.JoinClient(
-		argos.WithTransport(func() (transport.Transport, error) { return tr, nil }),
-		argos.WithFraming(func() (framing.Framing, error) { return fr, nil }),
-		argos.WithCodec(func() (codec.Codec, error) { return bytesCodec{}, nil }),
-	)
-}
-
-// sequentialLoopback starts a fake Sequential server for each dialed BytePipe.
-func sequentialLoopback(t *testing.T, dials *atomic.Int64) argos.ClientOption {
-	t.Helper()
-	var current atomic.Pointer[loopbackPair]
-	build := func() *loopbackPair {
-		f := fake.NewFraming(framing.Sequential)
-		tr := &loopTransport{
-			dial: func(ctx context.Context, endpoint string) (transport.Conn, error) {
-				if dials != nil {
-					dials.Add(1)
-				}
-				cli, srv := fake.BytePipe()
-				go runEchoServer(t, f, srv)
-				return cli, nil
-			},
-		}
-		p := &loopbackPair{tr: tr, f: f}
-		current.Store(p)
-		return p
-	}
-	return argos.JoinClient(
-		argos.WithTransport(func() (transport.Transport, error) {
-			if p := current.Load(); p != nil {
-				return p.tr, nil
-			}
-			return build().tr, nil
-		}),
-		argos.WithFraming(func() (framing.Framing, error) {
-			if p := current.Load(); p != nil {
-				return p.f, nil
-			}
-			return build().f, nil
-		}),
-		argos.WithCodec(func() (codec.Codec, error) { return bytesCodec{}, nil }),
-	)
+func sequentialLoopback(t *testing.T, dials *atomic.Int64) *fake.Transport {
+	return echoLoopback(t, dials)
 }
 
 func runEchoServer(t *testing.T, f *fake.Framing, conn transport.Conn) {
 	t.Helper()
-	sess, err := f.NewServerSession(context.Background(), conn, framing.SessionSpec{})
+	sess, err := f.NewServerSession(context.Background(), conn, session.SessionSpec{})
 	if err != nil {
 		_ = conn.Close()
 		return
@@ -134,7 +87,7 @@ func runEchoServer(t *testing.T, f *fake.Framing, conn transport.Conn) {
 
 	for {
 		md := metadata.New(metadata.RoleResponder, nil)
-		sc, err := sess.AcceptCall(context.Background(), framing.CallSpec{Metadata: md})
+		sc, err := sess.AcceptCall(context.Background(), session.CallSpec{Metadata: md})
 		if err != nil {
 			return
 		}
@@ -144,7 +97,7 @@ func runEchoServer(t *testing.T, f *fake.Framing, conn transport.Conn) {
 	}
 }
 
-func handleEchoCall(sc framing.ServerCall) {
+func handleEchoCall(sc session.ServerCall) {
 	defer sc.Close()
 	var payloads [][]byte
 	for {
@@ -168,6 +121,35 @@ func handleEchoCall(sc framing.ServerCall) {
 	_ = sc.Finish(nil)
 }
 
+// echoRoundTrip runs one full unary exchange over cli on ctx, closes the call,
+// and checks the payload came back.
+func echoRoundTrip(t *testing.T, cli *Client, ctx context.Context) {
+	t.Helper()
+	cs, err := cli.Open(ctx, testMethod(t))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := cs.Send([]byte("ping")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := cs.HalfClose(); err != nil {
+		t.Fatalf("HalfClose: %v", err)
+	}
+	var got []byte
+	if err := cs.Recv(&got); err != nil {
+		t.Fatalf("Recv: %v", err)
+	}
+	if string(got) != "ping" {
+		t.Fatalf("Recv = %q, want ping", got)
+	}
+	if err := cs.Recv(&got); !errors.Is(err, io.EOF) {
+		t.Fatalf("Recv terminal: %v, want EOF", err)
+	}
+	if err := cs.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
 func newTestClient(t *testing.T, opts ...argos.ClientOption) *Client {
 	t.Helper()
 	// opts come last so a test can retune any of these.
@@ -175,15 +157,12 @@ func newTestClient(t *testing.T, opts ...argos.ClientOption) *Client {
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(8),
 		argos.WithMaxBufferedBytes(8 * 16 * 1024 * 1024), // 8 × default perCall
-		argos.WithMaxIdleSessions(8),
-		sequentialLoopback(t, nil),
 		argos.WithTarget(testTarget),
 	}
-	cli, err := New(append(base, opts...)...)
+	cli, err := newClientLoopback(t, sequentialLoopback(t, nil), append(base, opts...)...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(func() { _ = cli.Close() })
 	return cli
 }
 
@@ -256,11 +235,8 @@ func TestNewWithoutServiceNameFails(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			opts := append(tc.opts,
-				sequentialLoopback(t, nil),
-				argos.WithTarget(testTarget),
-			)
-			_, err := New(opts...)
+			opts := append(tc.opts, argos.WithTarget(testTarget))
+			_, err := newClientLoopback(t, sequentialLoopback(t, nil), opts...)
 			if err == nil {
 				t.Fatal("New built a Client that has no service to open calls for")
 			}
@@ -275,14 +251,13 @@ func TestNewFailsWhenConcurrentTimesPerCallExceedsBuffered(t *testing.T) {
 	t.Parallel()
 	// Force conflict via options: 128 × 16MiB >> 1GiB default buffered after
 	// raising concurrent without raising MaxBufferedBytes.
-	_, err := New(
+	_, err := newClientLoopback(t, sequentialLoopback(t, nil),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(128),
-		sequentialLoopback(t, nil),
 		argos.WithTarget(testTarget),
 	)
 	if err == nil {
-		t.Fatal("expected config error")
+		t.Fatal("expected options validation error")
 	}
 	msg := err.Error()
 	// The cross-check is the root package's now, so the message says "argos:";
@@ -302,19 +277,16 @@ func TestNewFailsWhenConcurrentTimesPerCallExceedsBuffered(t *testing.T) {
 func TestSessionReusableAfterCall(t *testing.T) {
 	t.Parallel()
 	var dials atomic.Int64
-	cli, err := New(
+	cli, err := newClientLoopback(t, sequentialLoopback(t, &dials),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
-		argos.WithMaxIdleSessions(4),
 		argos.WithHandshakeTimeout(50*time.Millisecond),
-		sequentialLoopback(t, &dials),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer cli.Close()
 	m := testMethod(t)
 
 	doCall := func() {
@@ -352,20 +324,20 @@ func TestSessionReusableAfterCall(t *testing.T) {
 
 func TestCallerCancelAbortsCall(t *testing.T) {
 	t.Parallel()
-	f := fake.NewFraming(framing.Sequential)
+	f := fake.NewFraming(session.Sequential)
 	holdRecv := make(chan struct{})
 	tr := &loopTransport{
 		dial: func(ctx context.Context, endpoint string) (transport.Conn, error) {
 			cli, srv := fake.BytePipe()
 			go func() {
-				sess, err := f.NewServerSession(context.Background(), srv, framing.SessionSpec{})
+				sess, err := f.NewServerSession(context.Background(), srv, session.SessionSpec{})
 				if err != nil {
 					_ = srv.Close()
 					return
 				}
 				defer sess.Close()
 				md := metadata.New(metadata.RoleResponder, nil)
-				sc, err := sess.AcceptCall(context.Background(), framing.CallSpec{Metadata: md})
+				sc, err := sess.AcceptCall(context.Background(), session.CallSpec{Metadata: md})
 				if err != nil {
 					return
 				}
@@ -377,17 +349,15 @@ func TestCallerCancelAbortsCall(t *testing.T) {
 			return cli, nil
 		},
 	}
-	cli, err := New(
+	cli, err := newClientLoopback(t, fixedLoopback(tr, f),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
-		fixedLoopback(tr, f),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer cli.Close()
 	defer close(holdRecv)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -427,20 +397,18 @@ func TestOpenFilterShortCircuitNeverDials(t *testing.T) {
 	t.Parallel()
 	var dials atomic.Int64
 	want := errors.New("auth denied")
-	cli, err := New(
+	cli, err := newClientLoopback(t, sequentialLoopback(t, &dials),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
 		argos.WithOpenFilter(func(ctx context.Context, m descriptor.Method, next filter.OpenFunc) (stream.Stream, error) {
 			return nil, want
 		}),
-		sequentialLoopback(t, &dials),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer cli.Close()
 
 	_, err = cli.Open(context.Background(), testMethod(t))
 	if !errors.Is(err, want) {
@@ -454,23 +422,21 @@ func TestOpenFilterShortCircuitNeverDials(t *testing.T) {
 func TestDialFailureMapsUnavailable(t *testing.T) {
 	t.Parallel()
 	root := &net.OpError{Op: "dial", Err: errors.New("connection refused")}
-	f := fake.NewFraming(framing.Sequential)
+	f := fake.NewFraming(session.Sequential)
 	tr := &loopTransport{
 		dial: func(ctx context.Context, endpoint string) (transport.Conn, error) {
 			return nil, root
 		},
 	}
-	cli, err := New(
+	cli, err := newClientLoopback(t, fixedLoopback(tr, f),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
-		fixedLoopback(tr, f),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer cli.Close()
 
 	_, err = cli.Open(context.Background(), testMethod(t))
 	if status.CodeOf(err) != status.Unavailable {
@@ -484,7 +450,7 @@ func TestDialFailureMapsUnavailable(t *testing.T) {
 
 func TestHandshakeTimeoutMapsDeadlineExceeded(t *testing.T) {
 	t.Parallel()
-	f := fake.NewFraming(framing.Sequential)
+	f := fake.NewFraming(session.Sequential)
 	f.Handshake = func(ctx context.Context, c transport.Conn) error {
 		<-ctx.Done()
 		return ctx.Err()
@@ -496,18 +462,16 @@ func TestHandshakeTimeoutMapsDeadlineExceeded(t *testing.T) {
 			return cli, nil
 		},
 	}
-	cli, err := New(
+	cli, err := newClientLoopback(t, fixedLoopback(tr, f),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
 		argos.WithHandshakeTimeout(30*time.Millisecond),
-		fixedLoopback(tr, f),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer cli.Close()
 
 	_, err = cli.Open(context.Background(), testMethod(t))
 	if status.CodeOf(err) != status.DeadlineExceeded {
@@ -524,7 +488,7 @@ func TestHandshakeTimeoutMapsDeadlineExceeded(t *testing.T) {
 func TestHandshakeTimeoutBeforeOpenFilterNext(t *testing.T) {
 	t.Parallel()
 	var nextOK atomic.Int64
-	f := fake.NewFraming(framing.Sequential)
+	f := fake.NewFraming(session.Sequential)
 	f.Handshake = func(ctx context.Context, c transport.Conn) error {
 		<-ctx.Done()
 		return ctx.Err()
@@ -536,7 +500,7 @@ func TestHandshakeTimeoutBeforeOpenFilterNext(t *testing.T) {
 			return cli, nil
 		},
 	}
-	cli, err := New(
+	cli, err := newClientLoopback(t, fixedLoopback(tr, f),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
@@ -550,13 +514,11 @@ func TestHandshakeTimeoutBeforeOpenFilterNext(t *testing.T) {
 			nextOK.Add(1)
 			return st, nil
 		}),
-		fixedLoopback(tr, f),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer cli.Close()
 
 	_, err = cli.Open(context.Background(), testMethod(t))
 	code := status.CodeOf(err)
@@ -568,10 +530,10 @@ func TestHandshakeTimeoutBeforeOpenFilterNext(t *testing.T) {
 	}
 }
 
-func TestNarrowInterfaceAssertStaysConfigError(t *testing.T) {
+func TestNarrowInterfaceAssertStaysSetupError(t *testing.T) {
 	t.Parallel()
 	// Concurrent framing requires StreamConn; ByteConn is CarrierConn only.
-	f := fake.NewFraming(framing.Concurrent)
+	f := fake.NewFraming(session.Concurrent)
 	tr := &loopTransport{
 		dial: func(ctx context.Context, endpoint string) (transport.Conn, error) {
 			cli, srv := fake.BytePipe()
@@ -579,41 +541,59 @@ func TestNarrowInterfaceAssertStaysConfigError(t *testing.T) {
 			return cli, nil
 		},
 	}
-	cli, err := New(
+	cli, err := newClientLoopback(t, fixedLoopback(tr, f),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
-		fixedLoopback(tr, f),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer cli.Close()
 
 	_, err = cli.Open(context.Background(), testMethod(t))
 	if err == nil {
-		t.Fatal("expected narrow-interface config error")
+		t.Fatal("expected narrow-interface setup error")
 	}
 	if status.CodeOf(err) != status.Unknown {
-		t.Fatalf("CodeOf = %v, want Unknown (unmapped config error); err=%v", status.CodeOf(err), err)
+		t.Fatalf("CodeOf = %v, want Unknown (unmapped setup error); err=%v", status.CodeOf(err), err)
 	}
 	if !strings.Contains(err.Error(), "requires") {
 		t.Fatalf("error = %v, want narrow-interface message", err)
 	}
 }
 
-func TestCloseIdempotentAndRejectsOpen(t *testing.T) {
+// A Client has no Close, so the caller's ctx is the only thing that can refuse
+// an Open. A call opened with an already-done ctx could never be governed by
+// that ctx, so Open refuses it up front instead of handing back a stream whose
+// lifetime has already ended.
+func TestOpenRefusesDoneContext(t *testing.T) {
 	t.Parallel()
-	cli := newTestClient(t)
-	if err := cli.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
+	var dials atomic.Int64
+	cli, err := newClientLoopback(t, sequentialLoopback(t, &dials),
+		argos.WithServiceName(testService),
+		argos.WithMaxConcurrentCalls(1),
+		argos.WithMaxBufferedBytes(16*1024*1024), // 1 × default perCall
+		argos.WithTarget(testTarget),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
 	}
-	if err := cli.Close(); err != nil {
-		t.Fatalf("second Close: %v", err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := cli.Open(ctx, testMethod(t)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Open with a done ctx = %v, want context.Canceled", err)
 	}
-	_, err := cli.Open(context.Background(), testMethod(t))
-	if !errors.Is(err, ErrClosed) {
-		t.Fatalf("Open after Close: %v, want ErrClosed", err)
+	if got := dials.Load(); got != 0 {
+		t.Fatalf("dials = %d, want 0: a refused Open must not reach the axis", got)
 	}
+
+	// The refusal must not have consumed admission either: this Client has one
+	// slot, so a leaked reservation shows up here.
+	cs, err := cli.Open(context.Background(), testMethod(t))
+	if err != nil {
+		t.Fatalf("Open after a refused Open: %v; the refusal held an admission slot", err)
+	}
+	_ = cs.Close()
 }

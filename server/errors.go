@@ -7,8 +7,8 @@ import "errors"
 var (
 	// ErrPeerGone means the peer disconnected or the connection broke.
 	ErrPeerGone = errors.New("server: peer gone")
-	// ErrServerShutdown means Server.Shutdown interrupted the connection
-	// after its drain deadline (or Server.Close forced teardown).
+	// ErrServerShutdown is the cause Server.Shutdown cancels Run's context
+	// with. Run treats it as a clean stop.
 	ErrServerShutdown = errors.New("server: shutdown")
 	// ErrSessionExpired means MaxInboundConnAge (or equivalent lifetime)
 	// elapsed for this inbound connection.

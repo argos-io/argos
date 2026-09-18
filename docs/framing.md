@@ -1,9 +1,9 @@
 # Framing 接入
 
-包：`github.com/argos-io/argos/framing`（接口）+ 子包 `grpc` / `httpunary` 或自建 `framing/yourproto`（参考 `example/resp`、`example/synth`）。
+Legacy 分帧接口在 `internal/session`；一等 Transport 实现在 `transport/grpc`、`transport/httpunary` 或 `example/resp`、`example/synth`。
 
 可依赖：`transport`, `descriptor`, `metadata`, `budget`, `status`。  
-**不可**依赖：`codec`（仅 `SessionSpec.CodecName` 字符串）、`compressor`（**仅** `framing/grpc` 例外）、`client` / `server`。
+**不可**依赖：`codec`（仅 `SessionSpec.CodecName` 字符串）、`compressor`（**仅** `grpc` 例外）、`client` / `server`。
 
 ## `Framing` 工厂
 
@@ -25,14 +25,14 @@ type Framing interface {
 
 - 对 `Conn` 做窄接口断言；不匹配 → 返回 error（**不要** Dial）。
 - 有连接级握手（HELLO/AUTH 等）在此完成；无握手则零 I/O 断言即可。
-- 成功则 **Session 拥有 Conn**；失败则组合层关闭 Conn。
+- 成功则 **Session 拥有 Conn**；失败则由拨号的轴（axis）关闭 Conn，**不是**组合层——组合层看不到 `Conn`。
 - 握手应使用**握手子 ctx**（带 `HandshakeTimeout`），不要挂在无 deadline 的连接 ctx 上。
 
 ## `ClientSession`
 
 ```go
 OpenCall(ctx, descriptor.Method, CallSpec) (Call, error)
-Reusable() bool   // 无 I/O；见 framing.go 注释五种 false 情况
+Reusable() bool   // 无 I/O；见 internal/session/session.go 注释五种 false 情况
 Close() error     // 关 Session + Conn
 ```
 
@@ -51,11 +51,13 @@ Close() error     // 关 Session + Conn
 | `(nil, io.EOF)` | 正常结束（对端关闭、OneCall 已消费等） |
 | 其他 error | 连接级；组合层结束循环并上报 |
 
-实现义务（顺序/复用协议必读 `framing.go` 注释）：
+实现义务（顺序/复用协议必读 `internal/session/session.go` 注释）：
 
 1. **残余 drain**：上一 call 未读尽的帧须在解析下一 OPEN 前有限丢弃（`MaxDrainBytes`）。
 2. **OpenTimeout**：首字节前只受 accept ctx；首字节后启动 Open 解析超时。
-3. **Reject 可写回**：wrap `framing.ErrCallRejected` + `status.Error`；参考 httpunary/grpc 非法 path、example/resp 非法命令。
+3. **Reject 可写回**：wrap `transport.ErrCallRejected` + `status.Error`（会话层自己的哨兵是 `session.ErrCallRejected`，由轴包成前者）；参考 httpunary/grpc 非法 path、example/resp 非法命令。
+
+`MaxDrainBytes` 与 `OpenTimeout` 都由轴在构造期定死（`WithLimits(transport.Limits{...})` 的对应字段），Framing 从 `SessionSpec.Options` 读到的就是这份快照；`argos.Options` 上没有这两个字段，不用去组合层找。
 
 ## `Call` / `ServerCall`
 
@@ -79,7 +81,7 @@ type ServerCall interface {
 - `Recv` 成功时 `release` 非 nil且须调用；`Close` 不回收仍被持有的 payload。
 - 发送方向结束但接收仍开放：返回 `transport.SendError` 且 `ReceiveOpen()==true`。
 - **Carrier 卫生**：未读到协议终态（STATUS / EOF）就 `Close` → `Session.Reusable()` 须变 false（Sequential 尤其重要）。
-- **budget**：可从 `context` 读 `budget.FromContext`；`framing/grpc`、`framing/httpunary` 等在读写路径可选 `TryAcquire`。
+- **budget**：可从 `context` 读 `budget.FromContext`；`grpc`、`httpunary` 等在读写路径可选 `TryAcquire`。
 
 ## 与 Transport 的配对（断言清单）
 
@@ -104,18 +106,18 @@ type ServerCall interface {
 - [ ] 包依赖不违反 [architecture.md](architecture.md#分层与依赖)
 - [ ] 测试：`internal/fake` 或真实 transport 环回
 
-## `framing/httpunary`
+## `httpunary`
 
 HTTP/1 unary 整包分帧（服务端需 `UnaryResponseWriter`，里程碑矩阵为 **http1**）。客户端 `OpenStream` 亦适用于 http2，但服务端 assert 以 http1 为准，**不以 http2 服务端为已验证组合**。
 
-| 工厂 | 路由 |
+| 配置 | 路由 |
 |------|------|
-| `httpunary.New()` / `NewRPC()` | RPC 式 `POST /{Service}/{Method}` |
-| `httpunary.NewREST(RESTConfig)` | 配置 `Binding{Method, Verb, Pattern}`；path 变量经 outgoing metadata `x-argos-path-<name>` |
+| `httpunary.NewTransport()`（默认） | RPC 式 `POST /{Service}/{Method}` |
+| `httpunary.NewTransport(httpunary.WithREST(RESTConfig))` | `Binding{Method, Verb, Pattern}`；path 变量经 outgoing metadata `x-argos-path-<name>` |
 
 `RequestPreface.Method` 与 `RequestHeaderReader.RequestMethod()` 由 `transport/http1`、`transport/http2` 实现；空 Method 表示 POST。
 
 ## 参考与反例
 
-- **内置分帧**：`framing/grpc`、`framing/httpunary`
+- **内置分帧**：`grpc`、`httpunary`
 - **连接级状态 / 非 gRPC 命令式 C/S**：`example/resp`、`example/synth`（仍实现同一套 `Framing` 接口，但可自定义握手与 `Accept` 语义；证明组合层无需为具体协议特判）

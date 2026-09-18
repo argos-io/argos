@@ -8,9 +8,6 @@ import (
 	"github.com/argos-io/argos/status"
 )
 
-// ErrClosed is returned by Open after Client.Close.
-var ErrClosed = errors.New("client: closed")
-
 // ErrCallClosed is returned by CallStream operations after CallStream.Close.
 var ErrCallClosed = errors.New("client: call closed")
 
@@ -61,7 +58,7 @@ func joinStatus(code status.Code, cause error) error {
 
 // mapEstablishErr maps connection-establishment failures (§7.3 fourth path).
 // Dial/TLS/handshake I/O → Unavailable; HandshakeTimeout → DeadlineExceeded;
-// narrow-interface assert failures stay as config errors; already-status
+// narrow-interface assert failures stay as axis setup errors; already-status
 // errors (e.g. ErrSessionsExhausted) pass through.
 func mapEstablishErr(err error) error {
 	if err == nil {

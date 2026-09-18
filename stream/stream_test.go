@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos/framing"
+	"github.com/argos-io/argos/internal/session"
 	"github.com/argos-io/argos/transport"
 )
 
@@ -87,7 +87,7 @@ func (c *fakeCall) Close() error {
 	return nil
 }
 
-var _ framing.Call = (*fakeCall)(nil)
+var _ session.Call = (*fakeCall)(nil)
 
 func TestWrapSendRecv(t *testing.T) {
 	t.Parallel()

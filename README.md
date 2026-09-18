@@ -10,7 +10,7 @@ Argos 把 **连接和会话（`Conn` / `Session`）** 放在 API 中心——握
 
 ## 架构一览
 
-三轴在 `ServiceConfig` 里**并排选配**，由 `client` / `server` **组装**；线上走 **Conn → Session → Call → Stream**（unary 即单元素 Stream）。概念与包依赖见 [architecture.md](docs/architecture.md)。
+三轴在 `ServiceOptions` 里**并排选配**，由 `client` / `server` **组装**；线上走 **Conn → Session → Call → Stream**（unary 即单元素 Stream）。概念与包依赖见 [architecture.md](docs/architecture.md)。
 
 ```mermaid
 flowchart TB
@@ -58,29 +58,26 @@ flowchart TB
 
 ## 快速开始
 
-[`example/echo`](example/echo) 演示同一服务多种传输；三轴预设见 [`example/echo/axes.go`](example/echo/axes.go)。
+[`example/echo`](example/echo) 演示同一服务多种传输（gRPC×HTTP/2 与 HTTP/1 unary 等）。
 
 ```go
-tr, fr, cd := echov1.GRPCAxes() // http2 + grpc + protobuf
-
 srv := server.New(
-    argos.WithService("echo.v1.EchoService",
-        argos.ServiceTransport(tr), argos.ServiceFraming(fr), argos.ServiceCodec(cd),
-        argos.ServiceListenAddress(":7001"),
+    argos.WithServerService("echo.v1.EchoService",
+        argos.ServiceBindListen(":9090", "grpc", "protobuf"),
     ),
 )
-_ = echov1.RegisterEchoService(srv, impl)
+_ = srv.Register(echov1.EchoServiceDesc, echov1.EchoServiceHandlers(impl))
 go srv.Run(ctx)
 
 ec, _ := echov1.NewEchoServiceClient(
-    argos.JoinClient(argos.WithTransport(tr), argos.WithFraming(fr), argos.WithCodec(cd)),
-    argos.WithTarget("ip://127.0.0.1:7001"),
+    argos.WithTransport("grpc"),
+    argos.WithCodec("protobuf"),
+    argos.WithTarget("ip://127.0.0.1:9090"),
 )
-defer ec.Close()
 _, _ = ec.Echo(ctx, &echov1.EchoRequest{Msg: "hi"})
 ```
 
-- 服务端：`RegisterXxxService` 挂业务实现（路由），与三轴无关。
+- 服务端：`Register(desc, XxxHandlers(impl))` 挂业务实现（路由），与 Transport×Codec 选型无关。
 - 不用生成桩时：`client.New` + `Open(ctx, method)`，见 [codec-and-wiring.md](docs/codec-and-wiring.md)。
 - 从 proto 生成桩：`go run ./cmd/argos generate stub ...`，见 [codegen.md](docs/codegen.md)。
 

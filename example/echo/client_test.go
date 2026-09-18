@@ -14,16 +14,35 @@ import (
 func TestClientEchoTransports(t *testing.T) {
 	cases := []struct {
 		name string
-		axes func() (argos.TransportFunc, argos.FramingFunc, argos.CodecFunc)
+		run  func(t *testing.T) EchoServiceClient
 	}{
-		{name: "grpc_http2", axes: GRPCAxes},
-		{name: "httpunary_rpc_http1", axes: HTTPUnaryRPCAxes},
+		{
+			name: "grpc_http2",
+			run: func(t *testing.T) EchoServiceClient {
+				ax, err := GRPCTransport()
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = ax.Close() })
+				return startEcho(t, ax, GRPCCodecName)
+			},
+		},
+		{
+			name: "httpunary_rpc_http1",
+			run: func(t *testing.T) EchoServiceClient {
+				ax, err := HTTPUnaryRPCTransport()
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = ax.Close() })
+				return startEcho(t, ax, HTTPUnaryCodecName)
+			},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tr, fr, cd := tc.axes()
-			ec := startEcho(t, tr, fr, cd)
+			ec := tc.run(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			resp, err := ec.Echo(ctx, &EchoRequest{Msg: tc.name})
@@ -38,8 +57,12 @@ func TestClientEchoTransports(t *testing.T) {
 }
 
 func TestWatchStreaming(t *testing.T) {
-	tr, fr, cd := GRPCAxes()
-	ec := startEcho(t, tr, fr, cd)
+	ax, err := GRPCTransport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ax.Close() })
+	ec := startEcho(t, ax, GRPCCodecName)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	stream, err := ec.Watch(ctx, &WatchRequest{Msg: "grpc_http2"})
@@ -64,8 +87,12 @@ func TestWatchStreaming(t *testing.T) {
 }
 
 func TestClientMetadataPassesAuthFilter(t *testing.T) {
-	tr, fr, cd := GRPCAxes()
-	ec := startEcho(t, tr, fr, cd, func(cfg *argos.Config) {
+	ax, err := GRPCTransport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ax.Close() })
+	ec := startEcho(t, ax, GRPCCodecName, func(cfg *argos.Options) {
 		cfg.Filters = append(cfg.Filters, ServerAuth)
 		cfg.OpenFilters = append(cfg.OpenFilters, ClientAuth)
 	})
@@ -81,13 +108,17 @@ func TestClientMetadataPassesAuthFilter(t *testing.T) {
 }
 
 func TestServerAuthRejectsMissingToken(t *testing.T) {
-	tr, fr, cd := GRPCAxes()
-	ec := startEcho(t, tr, fr, cd, func(cfg *argos.Config) {
+	ax, err := GRPCTransport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ax.Close() })
+	ec := startEcho(t, ax, GRPCCodecName, func(cfg *argos.Options) {
 		cfg.Filters = append(cfg.Filters, ServerAuth)
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := ec.Echo(ctx, &EchoRequest{Msg: "noauth"})
+	_, err = ec.Echo(ctx, &EchoRequest{Msg: "noauth"})
 	if status.CodeOf(err) != status.Unauthenticated {
 		t.Fatalf("Echo err = %v (code %v), want Unauthenticated", err, status.CodeOf(err))
 	}

@@ -14,7 +14,7 @@ func trackedCarrierCount(c transport.Conn) int {
 
 // trackedStreamConnCount reports how many Dial endpoint handles the Transport
 // still tracks. Used by tests to detect tracking-map leaks.
-func trackedStreamConnCount(tr transport.Transport) int {
+func trackedStreamConnCount(tr transport.Pipe) int {
 	t, ok := tr.(*Transport)
 	if !ok {
 		return -1

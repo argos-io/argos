@@ -90,7 +90,7 @@ func TestGenerateStubEchoProto(t *testing.T) {
 	for _, want := range []string{
 		"EchoServiceDesc",
 		"EchoService_Echo",
-		"RegisterEchoService",
+		"EchoServiceHandlers",
 		"descriptor.MustMethod",
 		"status.ErrCardinality",
 		"map[string]filter.Handler",

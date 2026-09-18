@@ -21,9 +21,11 @@ go test ./example/resp/ -race -count=1 -timeout 300s \
 | MaxInboundConnIdle | 50s | Idle inbound closed after timeout; aligned with `SessionIdleTimeout` |
 | MaxInboundConnAge | 30m | Stops new accepts on aged conn and drains; `Serve` still accepts fresh conns |
 
+The three pool rows (`MaxIdleSessions`, `SessionIdleTimeout`, `MaxSessionLifetime`) are limits of the **axis' pool**: they are fixed when the axis is constructed (`example/resp.WithPool`, plus `WithHandshakeTimeout`), not in `argos.Options`, which no longer carries them. The connection rows (`MaxInboundConns`, `MaxInboundConnIdle`, `MaxInboundConnAge`) are still `argos.Options` fields.
+
 ## 1. MaxIdleSessions — burst → idle → burst
 
-Config: `MaxSessionsPerEndpoint=64`, burst=64 held mid-flight (no Sequential intra-wave reuse), idle gap=300ms, client idle/lifetime timeouts disabled.
+Axis options: `WithPool(64, maxIdle, 0, 0)` — burst=64 held mid-flight (no Sequential intra-wave reuse), idle gap=300ms; the two zeros mean "off" for idle reclaim and lifetime cap (on the axis a zero is literal).
 
 Representative run (`TestBurstIdleBurstMaxIdleSessions`):
 

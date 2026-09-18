@@ -23,13 +23,13 @@ Argos 是 **C/S 协议组合运行时**：分层组装 **建连（Transport）�
 1. **流式和一问一答用同一套 API**——unary 当作单元素流，内核不另开 unary 专用路径。
 2. **协议 = Transport × Framing × Codec**；不兼容组合在建连或开承载后明确失败，不静默降级。
 3. **连接是一等事实**：`Transport` → `Conn` → `Session` → `Call`；握手、复用、连接级状态有明确落点。
-4. **可组装性可测**：内置与 `example/*` 中的组合只靠三轴装配，`client` / `server` 不为具体协议特判。已验证组合见 [compatibility-matrix.md](compatibility-matrix.md)。
+4. **可组装性可测**：内置与 `example/*` 中的组合只靠Transport × Codec（legacy 三工厂过渡）装配，`client` / `server` 不为具体协议特判。已验证组合见 [compatibility-matrix.md](compatibility-matrix.md)。
 5. **原生 gRPC**：与 grpc-go 在 h2c / TLS·ALPN 下互通（形态、状态码、metadata、详情、deadline、压缩）。
 6. **服务名是一等概念**：服务端按名登记，客户端按名打开调用。
 
 ## 非目标
 
-- 配置文件 / 热加载 / 插件生态（配置只走代码：`argos.DefaultConfig()`，无文件格式、无 reload）
+- 配置文件 / 热加载 / 插件生态（配置只走代码：`argos.DefaultOptions()`，无文件格式、无 reload）
 - 通用非 gRPC 的 HTTP/2 协议栈；http1 流式；udp 上的可靠传输或多路复用
 - 完整 RESP / 数据库协议（`example/resp` 仅为收门资产）
 - 不承诺与仓库历史旧线的线格式或状态码数值兼容
@@ -59,9 +59,9 @@ Argos 是 **C/S 协议组合运行时**：分层组装 **建连（Transport）�
 
 要点：
 
-- **三轴即工厂**——`ServiceConfig` / `WithService` 上直接写 `ServiceTransport` / `ServiceFraming` / `ServiceCodec`（或 `JoinService`）。每个 Client / 监听面各 `Assemble()` 一次；无全局注册表、无按名解析。
-- **Compressor 不是核心概念**——仅 gRPC 路径（`framing/grpc`）。
-- **复用不是第四轴**——`Framing.Reuse()` 声明承载力；借还由客户端会话池执行。
+- **Transport × Codec**——`ServiceOptions` 存已注册的 transport / codec **名称**（`codec.Register` / `transport.Register`）；`ServiceTransport` + `ServiceCodec` 与 client `WithTransport` + `WithCodec` 引用这些名称，装配时 `New(name)` 实例化。
+- **Compressor 不是核心概念**——仅 gRPC 路径（`grpc`）。
+- **复用不是第四维**——`Framing.Reuse()` 声明承载力；借还由客户端会话池执行。
 
 ```go
 type ReuseModel uint8
@@ -91,21 +91,21 @@ const (
 |---|---|---|
 | `descriptor` / `status` / `metadata` / `codec` | —— | `status` 不得依赖 protobuf/genproto |
 | `budget` | `status` | |
-| `compressor` | —— | **仅** `framing/grpc` 可依赖 |
-| `transport` | —— | 不 import `descriptor` / `framing` |
-| `transport/{tcp,ws,udp,http1,http2}` | `transport`、`status` | |
-| `framing` | `transport`、`descriptor`、`metadata`、`budget`、`status` | 不 import `compressor` |
-| `framing/grpc` | 同 `framing` + `compressor` + `internal/httpstatus` + genproto | 唯一可 import genproto |
-| `framing/httpunary` | 同 `framing` + `internal/httpstatus` | |
+| `compressor` | —— | **仅** `grpc` 可依赖 |
+| `transport` | `descriptor`、`metadata`、`budget` | 接口签名需要；**不** import `codec` |
+| `transport/{tcp,ws,udp,http1,http2}` | `transport`、`status` | 字节管道：不得 import `descriptor` / `metadata` / `budget` / `codec` / `internal/session` |
+| `transport/grpc` | `transport` + `transport/http2` + `descriptor` / `metadata` / `budget` / `status` + `internal/session` + `internal/sessionpool` + `internal/transportbind` + `internal/httpstatus` + `compressor` + genproto | 唯一可 import genproto |
+| `transport/httpunary` | `transport` + `transport/http1` + `descriptor` / `metadata` / `budget` / `status` + `internal/session` + `internal/sessionpool` + `internal/transportbind` + `internal/httpstatus` | 不得 import `compressor` / genproto |
 | `stream` / `filter` / `resolver` | 见表意 | |
-| `argos`（根） | `transport`、`framing`、`codec`、`filter` | Config / ServiceConfig；不 import 具体 transport 实现 |
+| `argos`（根） | `transport`、`codec`、`filter` | Options / ServiceOptions；不 import 具体 transport 实现 |
 | `client` / `server` | 除 `internal/*` 外上述；client 另加 resolver、sessionpool | 唯一组合层 |
 
 关键不变量（摘要）：
 
 1. 全仓一个通用路由器（`server`：Service → Method）。
-2. 不用 gRPC 的程序不得传递依赖 `framing/grpc` / `compressor` / genproto。
-3. 复用策略只在 `internal/sessionpool`（仅 `client` import）。
+2. 不用 gRPC 的程序不得传递依赖 `grpc` / `compressor` / genproto。
+3. 复用/池只在 axis 内或 `internal/sessionpool`（允许名单在 `invariants_test.go`：完整线栈 + example + client + `internal/fake`、`internal/transportbind`），`server` 永不池化。
 4. 一条连接一个 `AcceptCall` 循环；组合层不为 `example/*` 特判。
+5. `transport/` 下每个包都必须显式分类（字节管道 or 完整线栈），分类表在 `invariants_test.go` 的 `classifiedTransportPkgs`。
 
 扩展时的依赖摘要亦见 [overview.md](overview.md#依赖方向摘要)。

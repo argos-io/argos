@@ -1,15 +1,16 @@
-package sessionpool
+package sessionpool_test
 
 import (
 	"context"
 	"errors"
+	"github.com/argos-io/argos/internal/sessionpool"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/internal/fake"
+	"github.com/argos-io/argos/internal/session"
 	"github.com/argos-io/argos/transport"
 )
 
@@ -42,11 +43,11 @@ func TestConcurrentColdStartHonoursSessionCap(t *testing.T) {
 	t.Parallel()
 	var dials atomic.Int64
 	dial := concurrentDial(&dials)
-	f := fake.NewFraming(framing.Concurrent)
+	f := fake.NewFraming(session.Concurrent)
 
 	// Many rounds: the window is narrow, so one attempt proves little.
 	for round := 0; round < 200; round++ {
-		p := New(f, dial, Config{
+		p := newPool(f, dial, sessionpool.Options{
 			MaxSessionsPerEndpoint: 1,
 			MaxIdleSessions:        1,
 			SessionIdleTimeout:     time.Minute,
@@ -56,7 +57,7 @@ func TestConcurrentColdStartHonoursSessionCap(t *testing.T) {
 
 		const racers = 8
 		var wg sync.WaitGroup
-		got := make([]framing.ClientSession, racers)
+		got := make([]transport.ClientConn, racers)
 		for i := 0; i < racers; i++ {
 			wg.Add(1)
 			go func(i int) {
@@ -72,7 +73,7 @@ func TestConcurrentColdStartHonoursSessionCap(t *testing.T) {
 		}
 		wg.Wait()
 
-		distinct := make(map[framing.ClientSession]struct{})
+		distinct := make(map[transport.ClientConn]struct{})
 		for _, s := range got {
 			if s != nil {
 				distinct[s] = struct{}{}
@@ -104,7 +105,7 @@ func TestConcurrentDialFailureDoesNotRetryUnbounded(t *testing.T) {
 		return nil, dialErr
 	}
 
-	p := New(fake.NewFraming(framing.Concurrent), dial, Config{
+	p := newPool(fake.NewFraming(session.Concurrent), dial, sessionpool.Options{
 		MaxSessionsPerEndpoint: 4,
 		MaxIdleSessions:        4,
 		SessionIdleTimeout:     time.Minute,
@@ -153,7 +154,7 @@ func TestConcurrentDialFailureDoesNotRetryUnbounded(t *testing.T) {
 // lend saw one session under two identities.
 func TestDoubleReleaseDoesNotDuplicateIdleEntry(t *testing.T) {
 	t.Parallel()
-	p := New(fake.NewFraming(framing.Concurrent), concurrentDial(nil), Config{
+	p := newPool(fake.NewFraming(session.Concurrent), concurrentDial(nil), sessionpool.Options{
 		MaxSessionsPerEndpoint: 1,
 		MaxIdleSessions:        1,
 		SessionIdleTimeout:     time.Minute,

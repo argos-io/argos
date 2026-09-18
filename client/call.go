@@ -9,10 +9,10 @@ import (
 	"sync/atomic"
 
 	"github.com/argos-io/argos"
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/stream"
+	"github.com/argos-io/argos/transport"
 )
 
 // CallStream is one outbound call. Send/Recv/HalfClose go to the outermost
@@ -20,14 +20,12 @@ import (
 type CallStream struct {
 	client *Client
 	stream stream.Stream
-	call   framing.Call
-	sess   framing.ClientSession
+	call   transport.Call
 	md     metadata.CallMetadata
 
 	callCtx    context.Context
 	callCancel context.CancelFunc
-	stopBridge func() bool
-	stopWatch  func() bool // cancels framing.Call when callCtx is done
+	stopWatch  func() bool // cancels the Call when callCtx is done
 
 	headersCh   chan struct{}
 	headersOnce sync.Once
@@ -38,9 +36,9 @@ type CallStream struct {
 	closed    atomic.Bool
 	closeErr  error
 
-	// afterCallGate serializes framing.Call.Close. It is heap-allocated and
-	// referenced from the AfterFunc closure instead of the CallStream, so a
-	// dropped stream can still be collected while the timer runs.
+	// afterCallGate serializes Call.Close. It is heap-allocated and referenced
+	// from the AfterFunc closure instead of the CallStream, so a dropped
+	// stream can still be collected while the timer runs.
 	afterCallGate *afterCallGate
 
 	leak    *leakState
@@ -49,7 +47,7 @@ type CallStream struct {
 
 type afterCallGate struct {
 	mu   sync.Mutex
-	call framing.Call
+	call transport.Call
 }
 
 // leakState is what the cleanup hook sees. It must not reference the
@@ -57,7 +55,7 @@ type afterCallGate struct {
 // would never run.
 type leakState struct {
 	closed atomic.Bool
-	cfg    *argos.Config
+	cfg    *argos.Options
 	info   argos.CallInfo
 	// client is reclaimed so a leaked call does not hold its admission
 	// reservation for the lifetime of the Client. The Client outlives every
@@ -71,7 +69,7 @@ type leakState struct {
 // while abandoning the operation, so a call that had already delivered its
 // message was reported as a failure and the abandoned goroutine could still
 // write into the caller's memory after Send/Recv had returned. Blocking is
-// bounded instead by the call ctx: CallStream.Close closes the framing.Call,
+// bounded instead by the call ctx: CallStream.Close closes the Call,
 // and stopWatch does the same as soon as callCtx is done (installed in Open
 // before any operation can run), so a blocked Send/Recv is always unblocked.
 func (s *CallStream) Send(v any) error {
@@ -160,8 +158,8 @@ func (s *CallStream) Trailer() metadata.Metadata {
 	return s.md.IncomingTrailers()
 }
 
-// Close closes the framing.Call, releases the session to the pool, and
-// returns the admission reservation. Idempotent.
+// Close closes the Call — which is what returns its connection to the axis —
+// and gives back the admission reservation. Idempotent.
 func (s *CallStream) Close() error {
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
@@ -171,9 +169,6 @@ func (s *CallStream) Close() error {
 		}
 		s.cleanup.Stop()
 
-		if s.stopBridge != nil {
-			s.stopBridge()
-		}
 		if s.callCancel != nil {
 			s.callCancel()
 		}
@@ -187,9 +182,6 @@ func (s *CallStream) Close() error {
 			s.stopWatch()
 		}
 		err := s.call.Close()
-		if s.client != nil && s.client.pool != nil && s.sess != nil {
-			s.client.pool.Release(s.sess)
-		}
 		if s.client != nil {
 			s.client.releaseAdmit()
 		}

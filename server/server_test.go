@@ -20,8 +20,9 @@ import (
 	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/internal/fake"
+	"github.com/argos-io/argos/internal/session"
+	"github.com/argos-io/argos/internal/teststack"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/stream"
 	"github.com/argos-io/argos/transport"
@@ -107,8 +108,8 @@ func (t *testTransport) Shutdown(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
-		// Composition layer cancels conn ctx on deadline; still wait for onConn
-		// so Shutdown's contract ("connection done == onConn returned") holds.
+		// The axis drains its own connections: it still waits for onConn so its
+		// contract ("connection done == onConn returned") holds.
 		<-done
 		return ctx.Err()
 	}
@@ -180,20 +181,33 @@ func echoService() descriptor.Service {
 	return descriptor.MustService(svcName, m)
 }
 
-func testServiceAxes(tr transport.Transport, fr framing.Framing) argos.ServiceOption {
-	return argos.JoinService(
-		argos.ServiceTransport(func() (transport.Transport, error) { return tr, nil }),
-		argos.ServiceFraming(func() (framing.Framing, error) { return fr, nil }),
-		argos.ServiceCodec(func() (codec.Codec, error) { return rawCodec{}, nil }),
-	)
+func testServiceAxis(tr *testTransport, fr session.Framing) *fake.Transport {
+	f, _ := fr.(*fake.Framing)
+	return fake.New(session.Sequential, fake.WithFraming(f), fake.WithTransport(tr))
 }
 
-func startServer(t *testing.T, tr *testTransport, fr framing.Framing, h filter.Handler, opts ...argos.ServerOption) *Server {
+const testServerCodecName = "argos-server-test-raw"
+
+var errCodecFactory = errors.New("codec factory refused")
+
+const testRefusingCodecName = "argos-server-test-refusing"
+
+func init() {
+	codec.Register(testServerCodecName, func() (codec.Codec, error) { return rawCodec{}, nil })
+	codec.Register(testRefusingCodecName, func() (codec.Codec, error) { return nil, errCodecFactory })
+}
+
+func testServiceBindListen(t *testing.T, tr *testTransport, fr session.Framing, addr string) argos.ServiceOption {
+	t.Helper()
+	trName := teststack.TransportName(t, testServiceAxis(tr, fr))
+	return argos.ServiceBindListen(addr, trName, testServerCodecName)
+}
+
+func startServer(t *testing.T, tr *testTransport, fr session.Framing, h filter.Handler, opts ...argos.ServerOption) *Server {
 	t.Helper()
 	base := append([]argos.ServerOption{
-		argos.WithService(svcName,
-			testServiceAxes(tr, fr),
-			argos.ServiceListenAddress("127.0.0.1:0"),
+		argos.WithServerService(svcName,
+			testServiceBindListen(t, tr, fr, "127.0.0.1:0"),
 		),
 	}, opts...)
 	srv := New(base...)
@@ -202,32 +216,61 @@ func startServer(t *testing.T, tr *testTransport, fr framing.Framing, h filter.H
 	}); err != nil {
 		t.Fatal(err)
 	}
-	go func() {
-		_ = srv.Run(context.Background())
-	}()
-	// Give Serve a moment to enter its loop.
-	time.Sleep(10 * time.Millisecond)
-	t.Cleanup(func() { _ = srv.Close() })
+	t.Cleanup(startRun(t, srv))
 	return srv
 }
 
-func openClientCall(t *testing.T, clientConn transport.Conn, fr *fake.Framing, method descriptor.Method) framing.Call {
+// startRun launches srv.Run on a cancelable ctx and returns the stop function,
+// which cancels that ctx and waits for Run to return. Canceling Run's ctx is
+// how a server stops: the axes it serves belong to whoever constructed them, so
+// there is nothing for the caller to close.
+func startRun(t *testing.T, srv *Server) (stop func()) {
 	t.Helper()
-	sess, err := fr.NewClientSession(context.Background(), clientConn, framing.SessionSpec{
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- srv.Run(ctx) }()
+	// Give Serve a moment to enter its loop.
+	time.Sleep(10 * time.Millisecond)
+	return func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("Run did not return after its ctx was canceled")
+		}
+	}
+}
+
+// echoOnce opens one call on a fresh pipe offered to tr and returns the echoed
+// payload.
+func echoOnce(t *testing.T, tr *testTransport, fr *fake.Framing, payload string) string {
+	t.Helper()
+	client, serverConn := fake.BytePipe()
+	tr.Offer(serverConn)
+	method := descriptor.MustMethod(fullMethod, descriptor.Unary)
+	call := openClientCall(t, client, fr, method)
+	out := unaryRoundTrip(t, call, payload)
+	_ = call.Close()
+	return out
+}
+
+func openClientCall(t *testing.T, clientConn transport.Conn, fr *fake.Framing, method descriptor.Method) session.Call {
+	t.Helper()
+	sess, err := fr.NewClientSession(context.Background(), clientConn, session.SessionSpec{
 		CodecName: "raw",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sess.Close() })
-	call, err := sess.OpenCall(context.Background(), method, framing.CallSpec{})
+	call, err := sess.OpenCall(context.Background(), method, session.CallSpec{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return call
 }
 
-func unaryRoundTrip(t *testing.T, call framing.Call, payload string) string {
+func unaryRoundTrip(t *testing.T, call session.Call, payload string) string {
 	t.Helper()
 	if err := call.Send([]byte(payload)); err != nil {
 		t.Fatal(err)
@@ -265,8 +308,8 @@ func drainRecv(st stream.Stream) {
 
 func TestUnaryRegisterAndRun(t *testing.T) {
 	tr := newTestTransport()
-	srvFr := fake.NewFraming(framing.Sequential)
-	cliFr := fake.NewFraming(framing.Sequential)
+	srvFr := fake.NewFraming(session.Sequential)
+	cliFr := fake.NewFraming(session.Sequential)
 	var got atomic.Int64
 	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
 		got.Add(1)
@@ -295,13 +338,13 @@ func TestUnaryRegisterAndRun(t *testing.T) {
 	_ = srv
 }
 
-// A Filter passed to AddBinding was stored on the per-binding Config and then
+// A Filter passed to AddBinding was stored on the per-binding Options and then
 // never used: dispatch chained the server-level slice, so a per-binding filter
 // silently did nothing.
 func TestServiceListenFilterChain(t *testing.T) {
 	tr := newTestTransport()
-	srvFr := fake.NewFraming(framing.Sequential)
-	cliFr := fake.NewFraming(framing.Sequential)
+	srvFr := fake.NewFraming(session.Sequential)
+	cliFr := fake.NewFraming(session.Sequential)
 
 	var serverLevel, perBinding atomic.Int64
 	count := func(n *atomic.Int64) filter.Filter {
@@ -321,18 +364,15 @@ func TestServiceListenFilterChain(t *testing.T) {
 
 	srv := New(
 		argos.WithFilter(count(&serverLevel)),
-		argos.WithService(svcName,
-			testServiceAxes(tr, srvFr),
-			argos.ServiceListenAddress("127.0.0.1:0"),
+		argos.WithServerService(svcName,
+			testServiceBindListen(t, tr, srvFr, "127.0.0.1:0"),
 		),
 		argos.WithFilter(count(&perBinding)),
 	)
 	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: h}); err != nil {
 		t.Fatal(err)
 	}
-	go func() { _ = srv.Run(context.Background()) }()
-	time.Sleep(10 * time.Millisecond)
-	t.Cleanup(func() { _ = srv.Close() })
+	t.Cleanup(startRun(t, srv))
 
 	client, serverConn := fake.BytePipe()
 	tr.Offer(serverConn)
@@ -352,8 +392,8 @@ func TestServiceListenFilterChain(t *testing.T) {
 
 func TestTenSequentialCallsOneConn(t *testing.T) {
 	tr := newTestTransport()
-	srvFr := fake.NewFraming(framing.Sequential)
-	cliFr := fake.NewFraming(framing.Sequential)
+	srvFr := fake.NewFraming(session.Sequential)
+	cliFr := fake.NewFraming(session.Sequential)
 	var n atomic.Int64
 	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
 		n.Add(1)
@@ -370,14 +410,14 @@ func TestTenSequentialCallsOneConn(t *testing.T) {
 	tr.Offer(serverConn)
 
 	method := descriptor.MustMethod(fullMethod, descriptor.Unary)
-	sess, err := cliFr.NewClientSession(context.Background(), client, framing.SessionSpec{CodecName: "raw"})
+	sess, err := cliFr.NewClientSession(context.Background(), client, session.SessionSpec{CodecName: "raw"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sess.Close()
 
 	for i := 0; i < 10; i++ {
-		call, err := sess.OpenCall(context.Background(), method, framing.CallSpec{})
+		call, err := sess.OpenCall(context.Background(), method, session.CallSpec{})
 		if err != nil {
 			t.Fatalf("call %d: %v", i, err)
 		}
@@ -395,8 +435,8 @@ func TestTenSequentialCallsOneConn(t *testing.T) {
 
 func TestHandlerErrorDoesNotEndLoop(t *testing.T) {
 	tr := newTestTransport()
-	srvFr := fake.NewFraming(framing.Sequential)
-	cliFr := fake.NewFraming(framing.Sequential)
+	srvFr := fake.NewFraming(session.Sequential)
+	cliFr := fake.NewFraming(session.Sequential)
 	var n atomic.Int64
 	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
 		i := n.Add(1)
@@ -416,14 +456,14 @@ func TestHandlerErrorDoesNotEndLoop(t *testing.T) {
 	tr.Offer(serverConn)
 
 	method := descriptor.MustMethod(fullMethod, descriptor.Unary)
-	sess, err := cliFr.NewClientSession(context.Background(), client, framing.SessionSpec{CodecName: "raw"})
+	sess, err := cliFr.NewClientSession(context.Background(), client, session.SessionSpec{CodecName: "raw"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer sess.Close()
 
 	for i := 1; i <= 7; i++ {
-		call, err := sess.OpenCall(context.Background(), method, framing.CallSpec{})
+		call, err := sess.OpenCall(context.Background(), method, session.CallSpec{})
 		if err != nil {
 			t.Fatalf("call %d open: %v", i, err)
 		}
@@ -458,7 +498,7 @@ func TestHandlerErrorDoesNotEndLoop(t *testing.T) {
 
 func TestShutdownIdleConnExitsQuickly(t *testing.T) {
 	tr := newTestTransport()
-	fr := fake.NewFraming(framing.Sequential)
+	fr := fake.NewFraming(session.Sequential)
 	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
 		var req []byte
 		if err := st.Recv(&req); err != nil {
@@ -469,14 +509,14 @@ func TestShutdownIdleConnExitsQuickly(t *testing.T) {
 	}
 	srv := New(
 		argos.WithMaxInboundConnIdle(30*time.Second),
-		argos.WithService(svcName,
-			testServiceAxes(tr, fr),
-			argos.ServiceListenAddress("127.0.0.1:0"),
+		argos.WithServerService(svcName,
+			testServiceBindListen(t, tr, fr, "127.0.0.1:0"),
 		),
 	)
 	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: h}); err != nil {
 		t.Fatal(err)
 	}
+	// No cleanup stop here: Shutdown is the stop under test.
 	go func() { _ = srv.Run(context.Background()) }()
 	time.Sleep(10 * time.Millisecond)
 
@@ -498,72 +538,12 @@ func TestShutdownIdleConnExitsQuickly(t *testing.T) {
 		t.Fatalf("Shutdown: %v", err)
 	}
 	elapsed := time.Since(start)
-	// Keep-alive AcceptCall must wake on accept-ctx cancel, not wait for the
-	// Shutdown deadline (2s here). Allow a little scheduler slack.
+	// Shutdown waits for Run, and Run waits for the listen surfaces — not for
+	// the keep-alive connection parked in AcceptCall. Allow a little scheduler
+	// slack; waiting for it would take the connection's idle timeout (30s).
 	if elapsed > 50*time.Millisecond {
-		t.Fatalf("idle Shutdown took %v; want < 50ms (accept ctx wake)", elapsed)
+		t.Fatalf("idle Shutdown took %v; want < 50ms (no wait for idle connections)", elapsed)
 	}
-}
-
-func TestShutdownDrainsInFlightCall(t *testing.T) {
-	tr := newTestTransport()
-	fr := fake.NewFraming(framing.Sequential)
-	entered := make(chan struct{})
-	releaseH := make(chan struct{})
-	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
-		var req []byte
-		if err := st.Recv(&req); err != nil {
-			return err
-		}
-		drainRecv(st)
-		close(entered)
-		select {
-		case <-releaseH:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		return st.Send([]byte("done"))
-	}
-	srv := startServer(t, tr, fr, h)
-
-	client, serverConn := fake.BytePipe()
-	tr.Offer(serverConn)
-
-	method := descriptor.MustMethod(fullMethod, descriptor.Unary)
-	call := openClientCall(t, client, fr, method)
-	if err := call.Send([]byte("x")); err != nil {
-		t.Fatal(err)
-	}
-	_ = call.HalfClose()
-
-	select {
-	case <-entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handler did not enter")
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		done <- srv.Shutdown(context.Background())
-	}()
-
-	// Shutdown must not finish until in-flight call completes.
-	select {
-	case err := <-done:
-		t.Fatalf("Shutdown returned early: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	close(releaseH)
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Shutdown: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Shutdown did not complete after call drain")
-	}
-	_ = call.Close()
 }
 
 func TestNoConcreteFramingTypeSwitch(t *testing.T) {
@@ -655,9 +635,68 @@ func TestCauseSentinelsExported(t *testing.T) {
 	}
 }
 
+// Stopping the server must not stop a call it already accepted: Shutdown ends
+// the accept side only, and the in-flight call keeps its own ctx — the handler
+// finishes on its own and its response still reaches the client.
 func TestAcceptCancelDoesNotKillInFlight(t *testing.T) {
-	// Same as drain test: proves accept ctx cancel ≠ conn ctx cancel.
-	TestShutdownDrainsInFlightCall(t)
+	tr := newTestTransport()
+	fr := fake.NewFraming(session.Sequential)
+	entered := make(chan struct{})
+	releaseH := make(chan struct{})
+	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
+		var req []byte
+		if err := st.Recv(&req); err != nil {
+			return err
+		}
+		drainRecv(st)
+		close(entered)
+		select {
+		case <-releaseH:
+		case <-ctx.Done():
+			// The stop reached the call ctx, not just the accept side.
+			return ctx.Err()
+		}
+		return st.Send([]byte("done"))
+	}
+	srv := startServer(t, tr, fr, h)
+
+	client, serverConn := fake.BytePipe()
+	tr.Offer(serverConn)
+
+	method := descriptor.MustMethod(fullMethod, descriptor.Unary)
+	call := openClientCall(t, client, fr, method)
+	if err := call.Send([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	_ = call.HalfClose()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not enter")
+	}
+
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	// The handler is still holding the call: releasing it has to be enough for
+	// the response to reach the client that is waiting for it.
+	close(releaseH)
+	b, release, err := call.Recv()
+	if err != nil {
+		t.Fatalf("in-flight call after Shutdown: %v", err)
+	}
+	out := string(b)
+	release()
+	if out != "done" {
+		t.Fatalf("got %q, want %q", out, "done")
+	}
+	_, _, err = call.Recv()
+	if err != io.EOF {
+		t.Fatalf("want EOF after response, got %v", err)
+	}
+	_ = call.Close()
 }
 
 // ---------------------------------------------------------------------------
@@ -666,7 +705,7 @@ func TestAcceptCancelDoesNotKillInFlight(t *testing.T) {
 
 func TestInboundConnIdleClosesAccept(t *testing.T) {
 	tr := newTestTransport()
-	fr := fake.NewFraming(framing.Sequential)
+	fr := fake.NewFraming(session.Sequential)
 	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
 		var req []byte
 		if err := st.Recv(&req); err != nil {
@@ -683,11 +722,11 @@ func TestInboundConnIdleClosesAccept(t *testing.T) {
 	tr.Offer(serverConn)
 
 	method := descriptor.MustMethod(fullMethod, descriptor.Unary)
-	sess, err := fr.NewClientSession(context.Background(), client, framing.SessionSpec{CodecName: "raw"})
+	sess, err := fr.NewClientSession(context.Background(), client, session.SessionSpec{CodecName: "raw"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	call, err := sess.OpenCall(context.Background(), method, framing.CallSpec{})
+	call, err := sess.OpenCall(context.Background(), method, session.CallSpec{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,7 +737,7 @@ func TestInboundConnIdleClosesAccept(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		// Next OpenCall may fail once server closed the conn.
-		call2, err := sess.OpenCall(context.Background(), method, framing.CallSpec{})
+		call2, err := sess.OpenCall(context.Background(), method, session.CallSpec{})
 		if err != nil {
 			close(onClose)
 			break

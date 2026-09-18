@@ -20,17 +20,15 @@ func TestCallStreamLeakReturnsAdmission(t *testing.T) {
 	}
 
 	const slots = 2
-	cli, err := New(
+	cli, err := newClientLoopback(t, freshLoopback(t, nil, nil),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(slots),
 		argos.WithMaxBufferedBytes(slots*16*1024*1024),
-		freshLoopback(t, nil, nil, nil),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer cli.Close()
 
 	// Consume every admission slot and drop the streams without Close.
 	func() {
@@ -66,17 +64,15 @@ func TestCallStreamLeakReturnsAdmission(t *testing.T) {
 // for a call that was already dead. Header() must report the cancellation.
 func TestHeaderReportsCancellationAfterCancelledRecv(t *testing.T) {
 	t.Parallel()
-	cli, err := New(
+	cli, err := newClientLoopback(t, freshLoopback(t, nil, nil),
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
-		freshLoopback(t, nil, nil, nil),
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	defer cli.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cs, err := cli.Open(ctx, testMethod(t))

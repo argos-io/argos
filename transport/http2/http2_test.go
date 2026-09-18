@@ -48,7 +48,7 @@ func startServer(t *testing.T, onConn func(context.Context, transport.Conn)) (*T
 	return tr, a.String()
 }
 
-func dial(t *testing.T, addr string) (transport.Transport, transport.StreamConn) {
+func dial(t *testing.T, addr string) (transport.Pipe, transport.StreamConn) {
 	t.Helper()
 	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })

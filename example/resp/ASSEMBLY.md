@@ -5,7 +5,7 @@
 Implementing this RESP2 gate required **no** changes to public interfaces in:
 
 - `transport/` (root interfaces)
-- `framing/` (root interfaces; not concrete subpackages like `framing/grpc` unless wiring)
+- `protocol/` (root interfaces; not concrete subpackages like `grpc` unless wiring)
 - `client/`
 - `server/`
 

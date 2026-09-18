@@ -11,14 +11,13 @@ import (
 	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/transport"
 )
 
-// Server is the composition-layer server: Transport.Serve → AcceptCall loop →
+// Server is the composition-layer server: Link.Serve → AcceptCall loop →
 // admit → route → Accept → Filter → Finish/Close (§4.1 / §5.2).
 type Server struct {
-	cfg    *argos.Config
+	cfg    *argos.Options
 	cfgErr error // option set New rejected; returned by Run
 	admit  *admitGate
 
@@ -29,13 +28,10 @@ type Server struct {
 	// aborts before any listen surface is live leaves the Server as it was, so
 	// Run reports the real reason on the next call instead of claiming it
 	// already ran.
-	ran            bool
-	closed         bool
-	liveTransports []transport.Transport
-
-	// Per-connection cancels registered while onConn is active.
-	acceptCancels map[*uint64]context.CancelFunc
-	connCancels   map[*uint64]context.CancelCauseFunc
+	ran bool
+	// stopped latches when Shutdown is called, so a Run that starts afterwards
+	// is refused instead of quietly serving on a server someone already stopped.
+	stopped bool
 
 	runCtx    context.Context
 	runCancel context.CancelCauseFunc
@@ -45,9 +41,9 @@ type Server struct {
 }
 
 type listenReg struct {
-	axes argos.ServiceConfig
-	cfg  *argos.Config
-	name string
+	stack argos.ServiceOptions
+	cfg   *argos.Options
+	name  string
 }
 
 type routeEntry struct {
@@ -56,26 +52,24 @@ type routeEntry struct {
 }
 
 type liveBinding struct {
-	name     string
-	tr       transport.Transport
-	framing  framing.Framing
-	codec    codec.Codec
-	cfg      *argos.Config
-	reuse    framing.ReuseModel
-	active   atomic.Int64
-	sessSpec framing.SessionSpec
+	name        string
+	transport   transport.Transport
+	codec       codec.Codec
+	cfg         *argos.Options
+	concurrency transport.Concurrency
+	active      atomic.Int64
 }
 
-// New constructs a Server from options only: the Config it starts from is the
-// one named by argos.WithConfig, or the process default.
+// New constructs a Server from options only: the Options it starts from is the
+// one named by argos.WithServerOptions, or the process default.
 //
 // New does not return an error so that a Server value is always usable as a
 // receiver. A rejected option set is remembered and returned by Run, which is
 // the first point where it can matter.
 func New(opts ...argos.ServerOption) *Server {
-	cfg, err := argos.ServerConfig(opts...)
+	cfg, err := argos.ServerOptions(opts...)
 	if err != nil {
-		// Keep a valid Config so the admission gate and every later method
+		// Keep valid Options so the admission gate and every later method
 		// have real numbers to work with; the error is what callers see.
 		fallback := argos.Defaults()
 		cfg = &fallback
@@ -85,12 +79,10 @@ func New(opts ...argos.ServerOption) *Server {
 		perCall = 0
 	}
 	return &Server{
-		cfg:           cfg,
-		cfgErr:        err,
-		admit:         newAdmitGate(cfg.MaxConcurrentCalls, cfg.MaxBufferedBytes, perCall),
-		routes:        make(map[string]map[string]routeEntry),
-		acceptCancels: make(map[*uint64]context.CancelFunc),
-		connCancels:   make(map[*uint64]context.CancelCauseFunc),
+		cfg:    cfg,
+		cfgErr: err,
+		admit:  newAdmitGate(cfg.MaxConcurrentCalls, cfg.MaxBufferedBytes, perCall),
+		routes: make(map[string]map[string]routeEntry),
 	}
 }
 
@@ -105,7 +97,7 @@ func (s *Server) Register(d descriptor.Service, handlers map[string]filter.Handl
 	if s.ran || s.running {
 		return fmt.Errorf("server: Register after Run")
 	}
-	if s.closed {
+	if s.stopped {
 		return fmt.Errorf("server: closed")
 	}
 	if _, ok := s.routes[d.FullName()]; ok {
@@ -136,7 +128,7 @@ func (s *Server) Register(d descriptor.Service, handlers map[string]filter.Handl
 	return nil
 }
 
-// Run starts listen surfaces from Config.Services for each registered service,
+// Run starts listen surfaces from Options.Services for each registered service,
 // then blocks until they exit or ctx is canceled.
 func (s *Server) Run(ctx context.Context) error {
 	if s.cfgErr != nil {
@@ -146,7 +138,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("server: nil context")
 	}
 	s.mu.Lock()
-	if s.closed {
+	if s.stopped {
 		s.mu.Unlock()
 		return fmt.Errorf("server: closed")
 	}
@@ -173,57 +165,22 @@ func (s *Server) Run(ctx context.Context) error {
 	lives := make([]*liveBinding, 0, len(regs))
 	var startErr error
 	for _, reg := range regs {
-		tr, fr, cd, err := reg.axes.Assemble()
+		link, cd, err := newBinding(reg.name, reg.stack)
 		if err != nil {
 			startErr = fmt.Errorf("server: listen %q: %w", reg.name, err)
 			break
 		}
-		if checker, ok := fr.(interface {
-			CheckConfig(framing.Config) error
-		}); ok {
-			if err := checker.CheckConfig(framing.Config{
-				MaxMessageSize:         reg.cfg.MaxMessageSize,
-				MaxFrameSize:           reg.cfg.MaxFrameSize,
-				MaxMetadataSize:        reg.cfg.MaxMetadataSize,
-				MaxInboundMetadataSize: reg.cfg.MaxInboundMetadataSize,
-				ReadAheadMessages:      reg.cfg.ReadAheadMessages,
-				OpenTimeout:            reg.cfg.OpenTimeout,
-				MaxDrainBytes:          reg.cfg.MaxDrainBytes,
-			}); err != nil {
-				startErr = fmt.Errorf("server: listen %q: %w", reg.name, err)
-				_ = tr.Close()
-				break
-			}
-		}
-		codecName := ""
-		if n, ok := cd.(codec.Named); ok {
-			codecName = n.CodecName()
-		}
-		lb := &liveBinding{
-			name:    reg.name,
-			tr:      tr,
-			framing: fr,
-			codec:   cd,
-			cfg:     reg.cfg,
-			reuse:   fr.Reuse(),
-			sessSpec: framing.SessionSpec{
-				CodecName: codecName,
-				Config: framing.Config{
-					MaxMessageSize:  reg.cfg.MaxMessageSize,
-					MaxFrameSize:    reg.cfg.MaxFrameSize,
-					MaxMetadataSize: reg.cfg.MaxMetadataSize,
-
-					MaxInboundMetadataSize: reg.cfg.MaxInboundMetadataSize,
-					ReadAheadMessages:      reg.cfg.ReadAheadMessages,
-					OpenTimeout:            reg.cfg.OpenTimeout,
-					MaxDrainBytes:          reg.cfg.MaxDrainBytes,
-				},
-			},
-		}
-		lives = append(lives, lb)
+		lives = append(lives, &liveBinding{
+			name:        reg.name,
+			transport:   link,
+			codec:       cd,
+			cfg:         reg.cfg,
+			concurrency: link.CallConcurrency(),
+		})
 	}
 	if startErr != nil {
-		closeLives(lives)
+		// Nothing to release: no surface was served yet, and the axes belong to
+		// whoever constructed them — they may be serving someone else already.
 		s.mu.Lock()
 		s.running = false
 		runCancel(startErr)
@@ -234,24 +191,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	s.mu.Lock()
-	if s.closed {
-		// Close landed while the surfaces were being assembled: it snapshotted
-		// an empty liveTransports and will not run again, so these bindings
-		// have nobody else to release them. Run still reports a clean stop,
-		// like a Close that arrives once Serve is live.
-		s.running = false
-		runCancel(ErrServerShutdown)
-		s.runCtx = nil
-		s.runCancel = nil
-		s.mu.Unlock()
-		closeLives(lives)
-		return nil
-	}
 	s.ran = true
-	s.liveTransports = make([]transport.Transport, len(lives))
-	for i, lb := range lives {
-		s.liveTransports[i] = lb.tr
-	}
 	s.mu.Unlock()
 
 	for _, lb := range lives {
@@ -263,9 +203,11 @@ func (s *Server) Run(ctx context.Context) error {
 			if lb.cfg.ListenAddress != "" {
 				serveOpts = append(serveOpts, transport.WithListenAddress(lb.cfg.ListenAddress))
 			}
-			serveOpts = append(serveOpts, transport.WithHTTPTimeouts(
-				lb.cfg.HTTPReadHeaderTimeout, lb.cfg.HTTPIdleTimeout))
-			err := lb.tr.Serve(runCtx, func(_ context.Context, c transport.Conn) {
+			serveOpts = append(serveOpts,
+				transport.WithHTTPReadHeaderTimeout(lb.cfg.HTTPReadHeaderTimeout),
+				transport.WithHTTPIdleTimeout(lb.cfg.HTTPIdleTimeout),
+			)
+			err := lb.transport.Serve(runCtx, func(_ context.Context, c transport.ServerConn) {
 				s.onConn(lb, routes, c)
 			}, serveOpts...)
 			if err != nil && runCtx.Err() == nil {
@@ -279,12 +221,17 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	<-runCtx.Done()
-	_ = s.Close()
+	// Serve ended because runCtx ended, so every listener is already released.
+	// The transports are not ours to close: whoever constructed them does.
 	s.wg.Wait()
 
 	s.mu.Lock()
 	s.running = false
 	s.mu.Unlock()
+	// Run is over for good (ran is latched), so the admission gate closes with
+	// it. The aborted-start path above deliberately leaves the Server as it was
+	// and does not come through here.
+	s.admit.close()
 
 	if p := s.serveErr.Load(); p != nil {
 		return *p
@@ -299,106 +246,54 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
-// Shutdown stops accepting new calls (cancels accept ctx only), shuts down
-// transports, and waits for onConn to finish. On deadline it cancels connection
-// contexts with ErrServerShutdown so in-flight calls surface Unavailable.
+// Shutdown stops the server by canceling Run's context and waiting for Run to
+// return. Idempotent.
+//
+// It does not touch the transports. They belong to whoever constructed them —
+// the same instance may be serving another listen surface or a Client — so the
+// only stop signal is the ctx Run was given, which Serve already honors.
+//
+// # What "stopped" means here
+//
+// Run returns once the listen surfaces have stopped, and that is all Shutdown
+// waits for. It does NOT wait for handlers already in flight: those run on
+// goroutines the transport owns, and the server never joined them. So a
+// Shutdown that returns means the server accepts nothing new — not that the
+// work it accepted is finished.
+//
+// Draining connections is therefore the axis owner's business, not the
+// composition layer's: call the axis' own Shutdown if you need to wait for
+// in-flight calls. ctx bounds only the wait for Run, and expiry returns
+// ctx.Err() without forcing anything.
 func (s *Server) Shutdown(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return nil
-	}
-	for _, cancel := range s.acceptCancels {
-		cancel()
-	}
-	trs := append([]transport.Transport(nil), s.liveTransports...)
+	s.stopped = true
+	s.admit.close()
 	runCancel := s.runCancel
+	running := s.running
 	s.mu.Unlock()
 
-	var wg sync.WaitGroup
-	errCh := make(chan error, len(trs))
-	for _, tr := range trs {
-		wg.Add(1)
-		go func(tr transport.Transport) {
-			defer wg.Done()
-			if err := tr.Shutdown(ctx); err != nil {
-				errCh <- err
-			}
-		}(tr)
+	if runCancel != nil {
+		runCancel(ErrServerShutdown)
 	}
+	if !running {
+		return nil
+	}
+
 	done := make(chan struct{})
 	go func() {
-		wg.Wait()
+		s.wg.Wait()
 		close(done)
 	}()
-
 	select {
 	case <-done:
+		return nil
 	case <-ctx.Done():
-		s.mu.Lock()
-		for _, cancel := range s.connCancels {
-			cancel(ErrServerShutdown)
-		}
-		s.mu.Unlock()
-		<-done
-		if runCancel != nil {
-			runCancel(ErrServerShutdown)
-		}
-		s.wg.Wait()
-		_ = s.closeLocked()
 		return ctx.Err()
 	}
-
-	if runCancel != nil {
-		runCancel(ErrServerShutdown)
-	}
-	s.wg.Wait()
-	_ = s.closeLocked()
-
-	select {
-	case err := <-errCh:
-		return err
-	default:
-		return nil
-	}
-}
-
-// Close immediately interrupts connections and releases resources. Idempotent.
-func (s *Server) Close() error {
-	return s.closeLocked()
-}
-
-func (s *Server) closeLocked() error {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return nil
-	}
-	s.closed = true
-	s.admit.close()
-	for _, cancel := range s.acceptCancels {
-		cancel()
-	}
-	for _, cancel := range s.connCancels {
-		cancel(ErrServerShutdown)
-	}
-	trs := append([]transport.Transport(nil), s.liveTransports...)
-	runCancel := s.runCancel
-	s.mu.Unlock()
-
-	if runCancel != nil {
-		runCancel(ErrServerShutdown)
-	}
-	var first error
-	for _, tr := range trs {
-		if err := tr.Close(); err != nil && first == nil {
-			first = err
-		}
-	}
-	return first
 }
 
 func cloneRoutes(in map[string]map[string]routeEntry) map[string]map[string]routeEntry {
@@ -419,14 +314,14 @@ func (s *Server) buildListenRegs() ([]listenReg, error) {
 	for svcName := range s.routes {
 		sc, ok := s.cfg.Services[svcName]
 		if !ok {
-			return nil, fmt.Errorf("server: service %q registered but missing from Config.Services (use argos.WithService)", svcName)
+			return nil, fmt.Errorf("server: service %q registered but missing from Options.Services (use argos.WithServerService)", svcName)
 		}
 		plans, err := sc.ServerListenPlans(s.cfg.ListenAddress)
 		if err != nil {
 			return nil, fmt.Errorf("server: service %q: %w", svcName, err)
 		}
 		for i, plan := range plans {
-			key := argos.ServiceListenKey(plan.Address, plan.Axes)
+			key := argos.ServiceListenKey(plan.Address, plan.Stack)
 			if _, dup := seen[key]; dup {
 				continue
 			}
@@ -437,20 +332,11 @@ func (s *Server) buildListenRegs() ([]listenReg, error) {
 				cfg.ListenAddress = plan.Address
 			}
 			regs = append(regs, listenReg{
-				axes: plan.Axes,
-				cfg:  cfg,
-				name: fmt.Sprintf("%s-%d", svcName, i),
+				stack: plan.Stack,
+				cfg:   cfg,
+				name:  fmt.Sprintf("%s-%d", svcName, i),
 			})
 		}
 	}
 	return regs, nil
-}
-
-// closeLives releases the bindings a start assembled before it gave up. Only
-// their Transport holds anything: Framing and Codec own no releasable resource
-// (README §4.1).
-func closeLives(lives []*liveBinding) {
-	for _, lb := range lives {
-		_ = lb.tr.Close()
-	}
 }

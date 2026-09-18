@@ -11,7 +11,7 @@ type Codec interface {
 	// Unmarshal decodes b into v. b is borrowed only until return: the
 	// implementation MUST NOT retain aliases of b or its sub-slices after
 	// return. Copy any bytes that must outlive the call (§2.1 — contract
-	// reversed from v1). framing.Call.Recv payloads are released after
+	// reversed from v1). session.Call.Recv payloads are released after
 	// Unmarshal returns and may be reused.
 	Unmarshal(b []byte, v any) error
 }

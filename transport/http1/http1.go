@@ -27,7 +27,7 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ transport.Transport   = (*Transport)(nil)
+	_ transport.Pipe        = (*Transport)(nil)
 	_ transport.Conn        = (*streamConn)(nil)
 	_ transport.StreamConn  = (*streamConn)(nil)
 	_ transport.Conn        = (*serverConn)(nil)
@@ -103,7 +103,7 @@ type Transport struct {
 }
 
 // New returns an HTTP/1.1 Transport.
-func New(opts ...Option) transport.Transport {
+func New(opts ...Option) transport.Pipe {
 	var o options
 	for _, opt := range opts {
 		if opt != nil {

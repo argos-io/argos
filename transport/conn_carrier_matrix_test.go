@@ -252,7 +252,7 @@ func assertNotStreamConn(t *testing.T, label string, c transport.Conn) {
 	}
 }
 
-func dialServePair(t *testing.T, tr transport.Transport, onConn func(context.Context, transport.Conn)) (clientConn transport.Conn, serverTr transport.Transport) {
+func dialServePair(t *testing.T, tr transport.Pipe, onConn func(context.Context, transport.Conn)) (clientConn transport.Conn, serverTr transport.Pipe) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -283,7 +283,7 @@ func dialServePair(t *testing.T, tr transport.Transport, onConn func(context.Con
 	return conn, tr
 }
 
-func newClientTransport(t *testing.T, server transport.Transport) transport.Transport {
+func newClientTransport(t *testing.T, server transport.Pipe) transport.Pipe {
 	t.Helper()
 	switch server.(type) {
 	case *tcp.Transport:
@@ -302,7 +302,7 @@ func newClientTransport(t *testing.T, server transport.Transport) transport.Tran
 	}
 }
 
-func waitTransportAddr(t *testing.T, tr transport.Transport) string {
+func waitTransportAddr(t *testing.T, tr transport.Pipe) string {
 	t.Helper()
 	type addrer interface{ Addr() net.Addr }
 	a, ok := tr.(addrer)

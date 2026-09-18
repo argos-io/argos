@@ -1,4 +1,4 @@
-# Codec 与三轴装配
+# Codec 与 Transport × Codec 装配
 
 ## `Codec`
 
@@ -20,64 +20,60 @@ type Codec interface {
 
 内置 `protobuf` / `json` 面向 `proto.Message`。httpunary 默认 JSON + protojson；grpc 默认 protobuf。类型与 codec 不匹配在**首次调用**失败（见 [codegen.md](codegen.md)）。
 
-自定义消息模型（非 proto）须自带 `Codec` 并在 `ServiceCodec` 工厂中返回。
+自定义 `Codec` 在 `codec.Register` 中登记名称；子包可在 `init` 中注册（与 `resolver/ip` 相同模式）。
 
-## 三轴工厂类型
+## 注册表（`codec` / `transport`）
 
-根包 `argos`：
+**产品路径**：`ServiceOptions` 上写 **已注册的 transport 名 + codec 名**；`client.New` / 每个监听面装配时各调一次对应工厂的 `New(name)`。
 
 ```go
-type TransportFunc func() (transport.Transport, error)
-type FramingFunc   func() (framing.Framing, error)
-type CodecFunc     func() (codec.Codec, error)
+// codec.Register("mycodec", func() (codec.Codec, error) { ... })
+// transport.Register("mytr", func() (transport.Transport, error) { ... })
+
+// 内置（blank import 触发 init）：
+//   "protobuf", "json"     — codec/protobuf, codec/json
+//   "grpc", "httpunary"    — transport/grpc, transport/httpunary
 ```
 
-工厂**只构造**实例，不得 `Dial` / `Serve`。每个 `client.New` / 每个监听面 `Assemble()` 各调用一次，得到独立三元组。
-
-## `ServiceConfig` 装配
+## `ServiceOptions` 装配
 
 ```go
 server.New(
-    argos.WithService("my.v1.Service",
-        argos.ServiceTransport(func() (transport.Transport, error) { return tcp.New(), nil }),
-        argos.ServiceFraming(func() (framing.Framing, error) { return myframing.New(), nil }),
-        argos.ServiceCodec(func() (codec.Codec, error) { return protobuf.New(), nil }),
+    argos.WithServerService("my.v1.Service",
+        argos.ServiceTransport("grpc"),
+        argos.ServiceCodec("protobuf"),
         argos.ServiceListenAddress(":7001"),
     ),
 )
 
 client.New(
     argos.WithServiceName("my.v1.Service"),
-    argos.JoinClient(
-        argos.WithTransport(trFactory),
-        argos.WithFraming(frFactory),
-        argos.WithCodec(cdFactory),
-    ),
+    argos.WithTransport("grpc"),
+    argos.WithCodec("protobuf"),
     argos.WithTarget("ip://127.0.0.1:7001"),
 )
 ```
 
-多监听面：`ServiceListener(addr, ServiceTransport(...), ServiceFraming(...), ...)`，见 `example/echo`。
+也可直接写 `Options.Services[fullName] = argos.ServiceOptions{Transport: "grpc", Codec: "protobuf", Target: "..."}`。
 
-预设组合可封装为函数，返回三个 `Func`（模式见 `example/echo/axes.go` 的 `GRPCAxes`、`EnvelopeTCPAxes` 等）。
+多监听面：`ServiceBindListen(addr, transportName, codecName)`；见 `example/echo/main.go`。
 
 ## `SessionSpec` / `CallSpec`
 
-装配时 Framing 收到：
+Transport 实现内部握手时使用：
 
-- `SessionSpec{CodecName, Config}` — `Config` 为 `framing.Config` 快照（`MaxMessageSize`、`MaxFrameSize`、metadata 限额、`OpenTimeout`、`MaxDrainBytes` 等）
-- `CallSpec{Metadata}` — 组合层创建的 `CallMetadata`；入站 metadata 必须写入此 handle
+- `SessionSpec{CodecName, Options}` — `Options` 为 `session.Options` 快照，数值来自轴构造期用 `WithLimits(transport.Limits{...})` 定死的限额（帧/消息/metadata 上限、`ReadAheadMessages`、`OpenTimeout`、`MaxDrainBytes` 等）；`argos.Options` 上不带这些数字
+- `CallSpec{Metadata}` — 组合层创建的 `CallMetadata`
 
-Framing **不**从全局 `Config` 读；客户端 per-call `budget` 在 call ctx 上（见 [usage.md](usage.md)）。
+实现**不**从全局 `Options` 直接读；客户端 per-call `budget` 在 call ctx 上（见 [usage.md](usage.md)）。
 
 ## 生成桩与路由
 
-- Transport/Framing/Codec 与 `RegisterXxxService` **无关**；路由在 `server.Register` / 生成桩内。
-- 客户端工厂 `NewXxxClient` 内置 `service name`；三轴通过 `JoinClient` 或 `Config.Services` 提供。
+- Transport/Codec 与 `XxxHandlers` **无关**；路由在 `server.Register(desc, handlers)` / 生成桩内。
+- 客户端工厂 `NewXxxClient` 内置 `service name`；Transport + Codec 通过 `WithTransport` / `WithCodec` 或 `Options.Services` 提供。
 
 ## 检查单
 
-- [ ] 三个工厂在 `ServiceConfig` 或 `JoinClient` 中成组出现
+- [ ] Transport 与 Codec 名称在 `ServiceOptions`（`ServiceTransport` + `ServiceCodec`）或 client `WithTransport` + `WithCodec` 中成组出现，且已在对应包 `Register`
 - [ ] `CodecName` 与 codec 实现一致（若实现了 `Named`）
-- [ ] 未引入已删除的 registry API
 - [ ] `make verify` 通过；若新组合进入 echo 集成，更新 `example/echo` 测试

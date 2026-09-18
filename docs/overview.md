@@ -1,16 +1,16 @@
 # 扩展模型概览
 
-你要加新传输、新分帧或换 codec 时，先弄清三轴各管哪一段。目标协议不限于 gRPC：**凡能落在「连接 + Session 握手 + Call 交换（可选消息流）」上的 C/S 线协议** 都走同一套 `client` / `server` 组合层；覆盖边界见 [architecture.md](architecture.md#协议覆盖范围)。
+你要加新传输、新分帧或换 codec 时，先弄清 Transport × Codec 各管哪一段。目标协议不限于 gRPC：**凡能落在「连接 + Session 握手 + Call 交换（可选消息流）」上的 C/S 线协议** 都走同一套 `client` / `server` 组合层；覆盖边界见 [architecture.md](architecture.md#协议覆盖范围)。
 
-## 三轴各自回答什么
+## Transport × Codec 各自回答什么
 
-| 轴 | 问题 | 典型产出 |
+| 层 | 问题 | 典型产出 |
 |----|------|----------|
 | **Transport** | 怎么建连、一条连接上 I/O 长什么样 | `Conn`；按次交换用 `Carrier` |
-| **Framing** | 握手、复用几条调用、帧/状态写在哪 | `Session` → `Call` |
+| **Framing**（在 Transport 实现内） | 握手、复用几条调用、帧/状态写在哪 | `Session` → `Call` |
 | **Codec** | 业务消息 ↔ 字节 | 纯函数，无 I/O |
 
-协议 = 三轴**合法组合**。`client` / `server` 不会为某个具体实现写 `switch`；配错了在 `New*Session` 或 `OpenStream` 等地方**直接报错**，不会悄悄换协议。
+协议 = **已注册的** Transport 名 × Codec 名。`client` / `server` 不会为某个具体实现写 `switch`；配错了在装配或 `New*Session` 等处**直接报错**，不会悄悄换协议。
 
 ## 连接是一等事实
 
@@ -21,46 +21,25 @@ Transport.Dial/Serve → Conn
       → stream.Wrap(Call, Codec) → Stream
 ```
 
-- **只有 `Transport` 带 `Close()`**（三轴工厂本身无生命周期）。`Framing` / `Codec` 不得持有需释放的资源；资源归 `Session` / `Call` / `Conn`。
-- 装配中途失败时，组合层只回滚 **Transport**（已创建的 `Framing`/`Codec` 实例无 Close）。
+- **`Transport` 没有 `Close()`**：生命周期是构造它的 ctx（`Serve` 随该 ctx 结束）。limits / 池 / codec 名在构造期用 `WithLimits` / `WithPool` / `WithCodecName` 定死；组合层装配时只核对 codec 名是否与 Codec 一致。要显式释放的实现（如 `transport/grpc`）自带 `Close`，由**构造方**调用。
+- 装配中途失败时，组合层不关闭任何 axis（axis 归构造方）；axis 内部创建到一半的资源由 axis 自己回收。
 
 ## 如何挂到运行时
 
-1. 在 `ServiceConfig` 上设置三个工厂（或 `JoinService`）：
-   - `ServiceTransport` → `argos.TransportFunc`
-   - `ServiceFraming` → `argos.FramingFunc`
-   - `ServiceCodec` → `argos.CodecFunc`
-2. 客户端：`client.New(WithServiceName, WithTarget, JoinClient(WithTransport, WithFraming, WithCodec))`
-3. 服务端：`server.New(WithService(..., ServiceListenAddress))` + `RegisterXxxService`
-4. **无全局注册表**：不要往 `Config` 上挂按名字解析的 registry；参考 [example/echo/axes.go](../example/echo/axes.go)。
+1. 在 `codec` / `transport` 包 `Register` 名称（内置子包 `init` 已注册常见组合）；`ServiceOptions` 写 **Transport + Codec 名称**
+2. 客户端：`client.New(WithServiceName, WithTarget, WithTransport, WithCodec)`（值为注册名）
+3. 服务端：`server.New(WithServerService(..., ServiceListenAddress))` + `Register(desc, XxxHandlers(impl))`
+4. 进程级默认与限额：`argos.DefaultOptions()`、`argos.Options` 字段；见 [usage.md](usage.md)
+5. 参考 [example/echo](../example/echo) 与 [codec-and-wiring.md](codec-and-wiring.md)
 
 ## 依赖方向（摘要）
 
 由 `invariants_test.go` 强制。要点：
 
-- `transport/*` 不得 import `framing` / `descriptor`
-- `framing/*` 不得 import `codec`；仅 `framing/grpc` 可 import `compressor` 与 genproto
-- 不用 gRPC 的二进制不得传递依赖 `framing/grpc`
-- 复用策略只在 `internal/sessionpool`（客户端池读 `Framing.Reuse()`）
-
-完整表见 [architecture.md](architecture.md#分层与依赖)。
+- `transport/*` 不得 import `codec`（协议 = axis × codec，import 它就把两者焊死）；字节管道（`tcp` / `ws` / `udp` / `http1` / `http2`）另不得 import `descriptor` / `metadata` / `budget`，完整线栈（`grpc` / `httpunary`）才可以
+- 仅 `transport/grpc` 可 import `compressor` 与 genproto
+- 不用 gRPC 的二进制不得传递依赖 `grpc`
 
 ## 扩展验收
 
-```bash
-export GOROOT=/data/root/.gvm/1.27.1/go   # 若本机 gvm 与 go 不一致
-export PATH="$GOROOT/bin:$PATH"
-make verify    # 含 invariants、integration、deps 门禁
-```
-
-建议为新组合至少提供：
-
-- 包内单元/环回测试（可参考 `internal/fake`）
-- 若走组合层：在 `example/*` 或现有 echo 多传输测试中挂一条路径
-
-## 下一步读什么
-
-- 实现传输层 → [transport.md](transport.md)
-- 实现分帧层 → [framing.md](framing.md)
-- 消息类型与装配 → [codec-and-wiring.md](codec-and-wiring.md)
-- 选型已有组合 → [compatibility-matrix.md](compatibility-matrix.md)
+新组合：`make verify` 全绿；若进入 echo 集成，更新 `example/echo` 与 [compatibility-matrix.md](compatibility-matrix.md)。

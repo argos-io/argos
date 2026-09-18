@@ -47,8 +47,8 @@ func TestGenerateAllStreamingShapes(t *testing.T) {
 		"Watch(context.Context, *Request, ChatService_WatchServer) error",
 		"Collect(context.Context, ChatService_CollectServer) error",
 		"Chat(context.Context, ChatService_ChatServer) error",
-		"RegisterChatService(s *server.Server, impl ChatServiceServer) error",
-		"s.Register(ChatServiceDesc, map[string]filter.Handler{",
+		"ChatServiceHandlers(impl ChatServiceServer) map[string]filter.Handler",
+		"return map[string]filter.Handler{",
 		`Open(ctx, ChatService_Unary)`,
 		`Open(ctx, ChatService_Collect)`,
 		`Open(ctx, ChatService_Chat)`,
@@ -72,6 +72,9 @@ func TestGenerateAllStreamingShapes(t *testing.T) {
 		"server.Service",
 		"svc.Register(",
 		"const (",
+		// The streaming wrapper's Close (c.call.Close) is not the client-level
+		// Close the stub no longer emits.
+		"c.c.Close()",
 	} {
 		if strings.Contains(source, unwanted) {
 			t.Fatalf("generated source still contains %q\n%s", unwanted, source)
@@ -117,8 +120,8 @@ func TestGenerateSameMethodNameAcrossServicesCompiles(t *testing.T) {
 		"BetaService_Echo",
 		"AlphaServiceDesc",
 		"BetaServiceDesc",
-		"RegisterAlphaService",
-		"RegisterBetaService",
+		"AlphaServiceHandlers",
+		"BetaServiceHandlers",
 	} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("generated source missing %q\n%s", want, source)
@@ -126,8 +129,9 @@ func TestGenerateSameMethodNameAcrossServicesCompiles(t *testing.T) {
 	}
 }
 
-// The constructor carries the service name so a caller never has to repeat it,
-// and it owns the Client it built, which Close has to reach.
+// The constructor carries the service name so a caller never has to repeat it.
+// It also hands back a plain handle over the caller-owned transport axis: it
+// owns no connections, so the stub exposes no client-level Close.
 func TestGenerateClientConstructorCarriesServiceName(t *testing.T) {
 	got, err := Generate(oneUnaryService("OwnerService", "Do"))
 	if err != nil {
@@ -143,34 +147,78 @@ func TestGenerateClientConstructorCarriesServiceName(t *testing.T) {
 		`argos.WithServiceName("sample.v1.OwnerService")`,
 		"client.New(append([]argos.ClientOption{",
 		"return &ownerServiceClient{c: c}, nil",
-		"func (c *ownerServiceClient) Close() error {",
-		"return c.c.Close()",
 	} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("generated source missing %q\n%s", want, source)
 		}
 	}
-	// The interface has to expose Close, or the Client the constructor built is
-	// unreachable through the value it returns.
+	// The client interface must not declare Close: the value the constructor
+	// returns holds nothing to release.
 	iface := source[strings.Index(source, "type OwnerServiceClient interface {"):]
 	iface = iface[:strings.Index(iface, "}")]
-	if !strings.Contains(iface, "Close() error") {
-		t.Fatalf("OwnerServiceClient does not declare Close:\n%s", iface)
+	if strings.Contains(iface, "Close") {
+		t.Fatalf("OwnerServiceClient still declares Close:\n%s", iface)
+	}
+	for _, unwanted := range []string{
+		"c.c.Close()",
+		"func (c *ownerServiceClient) Close()",
+		"releasing its session pool",
+	} {
+		if strings.Contains(source, unwanted) {
+			t.Fatalf("generated source still contains %q\n%s", unwanted, source)
+		}
 	}
 }
 
-// An RPC named Close would be declared twice with two signatures, in the
-// interface and on the struct. The generator must say so instead of writing a
-// file that no compiler accepts.
-func TestGenerateRejectsRPCNamedClose(t *testing.T) {
-	_, err := Generate(oneUnaryService("LifecycleService", "Close"))
-	if err == nil {
-		t.Fatal("Generate accepted an RPC named Close")
+// Nothing in any shape claims the name Close for the client the constructor
+// returns: the client interface declares only the RPCs. The streaming wrapper's
+// Close (c.call.Close) lives on <Service>_<Method>Client, a different type, so
+// an RPC named Close is accepted and compiles.
+func TestGenerateAcceptsRPCNamedCloseForEveryShape(t *testing.T) {
+	if testing.Short() {
+		t.Skip("compiles generated code")
 	}
-	for _, want := range []string{"sample.v1.LifecycleService", "Close", "LifecycleServiceClient"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q does not name %q", err, want)
-		}
+	for _, shape := range []struct {
+		name         string
+		clientStream bool
+		serverStream bool
+	}{
+		{"unary", false, false},
+		{"server_stream", false, true},
+		{"client_stream", true, false},
+		{"bidi", true, true},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			file := closeNamedService(shape.clientStream, shape.serverStream)
+			source, err := Generate(file)
+			if err != nil {
+				t.Fatalf("Generate: %v", err)
+			}
+			if strings.Contains(string(source), "c.c.Close()") {
+				t.Fatalf("generated source emits a client-level Close:\n%s", source)
+			}
+			compileStub(t, file, "\t_ = sample.LifecycleService_Close.FullName()\n\tfmt.Println(\"ok\")\n")
+		})
+	}
+}
+
+func closeNamedService(clientStream, serverStream bool) ir.File {
+	return ir.File{
+		GoPackage:    "sample",
+		ProtoPackage: "sample.v1",
+		InputBase:    "sample",
+		Services: []ir.Service{{
+			GoName:   "LifecycleService",
+			FullName: "sample.v1.LifecycleService",
+			Methods: []ir.Method{{
+				GoName:       "Close",
+				FullName:     "sample.v1.LifecycleService.Close",
+				InputType:    "Request",
+				OutputType:   "Response",
+				ClientStream: clientStream,
+				ServerStream: serverStream,
+			}},
+		}},
 	}
 }
 
@@ -182,10 +230,7 @@ func TestGeneratedClientConstructorsCompile(t *testing.T) {
 		t.Skip("compiles generated code")
 	}
 	compileStub(t, oneUnaryService("OwnerService", "Do"), `	if c, err := sample.NewOwnerServiceClient(); err == nil {
-		if err := c.Close(); err != nil {
-			fmt.Println("Close:", err)
-			return
-		}
+		_ = c.Do
 	}
 	fmt.Println("ok")
 `)

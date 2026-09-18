@@ -54,7 +54,7 @@ type ConnInfo struct {
 
 // NotifyCallError invokes the call-error observer if set.
 // Panics in the observer are recovered so per-call errors never escape.
-func NotifyCallError(cfg *Config, info CallInfo, err error) {
+func NotifyCallError(cfg *Options, info CallInfo, err error) {
 	if cfg == nil {
 		return
 	}
@@ -72,7 +72,7 @@ func NotifyCallError(cfg *Config, info CallInfo, err error) {
 // Contract (§3.1-22 / §7.5): each connection-level error that belongs to no
 // call is reported exactly once and must not make Transport.Serve return.
 // Enforcement of the Serve contract lives in server; this helper only notifies.
-func NotifyConnError(cfg *Config, info ConnInfo, err error) {
+func NotifyConnError(cfg *Options, info ConnInfo, err error) {
 	if cfg == nil {
 		return
 	}

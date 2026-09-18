@@ -1,14 +1,20 @@
-// Package sessionpool is the client-side session pool.
+// Package sessionpool is connection pooling for a client-side protocol axis.
+//
+// It is protocol-agnostic bookkeeping: buckets, capacity, idle and lifetime.
+// Every judgement that needs to read the wire — the handshake, and whether an
+// unused connection is still good — belongs to the axis that supplies the
+// connections. That is why DialFunc hands back a connection that has already
+// handshaken, and why lend and return only ever consult Reusable().
 //
 // # Acquire / Release contract
 //
-// Acquire returns a framing.ClientSession with the pool's in-flight refcount
+// Acquire returns a transport.ClientConn with the pool's in-flight refcount
 // already incremented by one (a capacity slot pretaken for the forthcoming
-// OpenCall). The caller must OpenCall on that session, then after Call.Close
-// returns call Release exactly once for that Acquire.
+// OpenCall). The caller must OpenCall on that connection, then after
+// Call.Close returns call Release exactly once for that Acquire.
 //
 // OpenCall combines Acquire + sess.OpenCall with Busy/Spent fallback: on
-// framing.ErrSessionBusy it switches session (retry ≤ MaxSessionsPerEndpoint)
+// transport.ErrConnBusy it switches session (retry ≤ MaxSessionsPerEndpoint)
 // and never leaks that sentinel; on exhaust it returns status.ErrSessionsExhausted.
 //
 // Release decrements the refcount and applies the four-state return (§4.6):
@@ -20,7 +26,7 @@
 //
 // Acquire never waits for another caller's Release when MaxSessionsPerEndpoint
 // is reached; it returns status.ErrSessionsExhausted immediately. The only
-// wait is Concurrent cold-start singleflight for Dial+NewClientSession.
+// wait is multiplexed cold-start singleflight around DialFunc.
 //
 // Reusable() is read under the pool lock before lend and on return, mutually
 // exclusive with idle/lifetime reclaim. The pool keys buckets by endpoint only.
@@ -34,7 +40,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/descriptor"
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport"
 )
@@ -45,33 +50,40 @@ const (
 	defaultHandshakeTimeout       = 10 * time.Second
 )
 
-// Config holds instance-level pool limits.
-type Config struct {
+// Options holds instance-level pool limits.
+type Options struct {
 	MaxSessionsPerEndpoint int
 	MaxIdleSessions        int // 0 = keep no idle sessions
 	SessionIdleTimeout     time.Duration
 	MaxSessionLifetime     time.Duration
-	HandshakeTimeout       time.Duration // dial + NewClientSession
-	SessionSpec            framing.SessionSpec
+	HandshakeTimeout       time.Duration // bounds one DialFunc call
+	// MaxCallsPerConn is the protocol's reuse model as a number: 1 for
+	// sequential and one-shot connections, -1 for multiplexed ones. A
+	// multiplexed pool also singleflights cold start, because every waiter
+	// would otherwise dial a connection it does not need.
+	MaxCallsPerConn int
 }
 
-// DialFunc dials one transport.Conn for endpoint. The pool owns the Conn
-// until NewClientSession succeeds (Session then owns it) or fails (pool closes it).
-type DialFunc func(ctx context.Context, endpoint string) (transport.Conn, error)
+// DialFunc produces one connection for endpoint, handshake included. The pool
+// never sees a half-established connection: an implementation that dials but
+// fails to handshake releases the socket itself and returns an error.
+type DialFunc func(ctx context.Context, endpoint string) (transport.ClientConn, error)
 
-// Pool is a concrete endpoint-keyed session pool.
+// Pool is a concrete endpoint-keyed connection pool.
 type Pool struct {
-	framing framing.Framing
-	dial    DialFunc
-	cfg     Config
-	reuse   framing.ReuseModel
-	capPer  int // 1 for Sequential/OneCall; -1 for Concurrent (unlimited)
+	dial DialFunc
+	// cfg is written once, in New, and never again: the limits an axis will
+	// enforce are fixed when the axis is constructed. Readers below therefore
+	// take no lock. Installing limits at bind time instead is what made these
+	// reads race a writer and let a second Client's Options overwrite the first's.
+	cfg    Options
+	capPer int // 1 for sequential/one-shot; -1 for multiplexed (unlimited)
 
 	mu      sync.Mutex
 	closed  bool
 	buckets map[string]*bucket
-	bySess  map[framing.ClientSession]*entry
-	flights map[string]*dialFlight // Concurrent cold-start only
+	bySess  map[transport.ClientConn]*entry
+	flights map[string]*dialFlight // multiplexed cold start only
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -80,13 +92,13 @@ type Pool struct {
 type bucket struct {
 	entries []*entry
 	idle    []*entry
-	// pendingDial counts in-flight Dial+NewClientSession reservations
-	// toward MaxSessionsPerEndpoint (Sequential / OneCallPerConn).
+	// pendingDial counts in-flight DialFunc reservations toward
+	// MaxSessionsPerEndpoint (sequential / one-shot).
 	pendingDial int
 }
 
 type entry struct {
-	sess      framing.ClientSession
+	sess      transport.ClientConn
 	endpoint  string
 	refcount  int
 	createdAt time.Time
@@ -96,13 +108,40 @@ type entry struct {
 
 type dialFlight struct {
 	done chan struct{}
-	sess framing.ClientSession
+	sess transport.ClientConn
 	err  error
+}
+
+// DefaultOptions is the pool-limit baseline: the single source of the numbers
+// every axis seeds its construction-time pool from. argos.Options does not carry
+// these fields — the axis is the only place they live — so this is what a bare
+// axis enforces.
+//
+// MaxCallsPerConn is left zero because it is the protocol's reuse model, which
+// only the axis knows.
+func DefaultOptions() Options {
+	return Options{
+		MaxSessionsPerEndpoint: defaultMaxSessionsPerEndpoint,
+		MaxIdleSessions:        defaultMaxIdleSessions,
+		SessionIdleTimeout:     50 * time.Second,
+		MaxSessionLifetime:     30 * time.Minute,
+		HandshakeTimeout:       defaultHandshakeTimeout,
+	}
+}
+
+// Options returns the pool's effective limits. It exists so an axis can report
+// what it will actually enforce: the pool has already filled in its defaults by
+// the time this is readable, so the values are the ones in force.
+func (p *Pool) Options() Options {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cfg
 }
 
 // New builds a pool. Zero/negative MaxSessionsPerEndpoint and HandshakeTimeout
 // take §6.1 defaults; MaxIdleSessions < 0 defaults to 8 (0 means no idle keep).
-func New(f framing.Framing, dial DialFunc, cfg Config) *Pool {
+// MaxCallsPerConn <= 0 other than -1 means one call per connection.
+func New(dial DialFunc, cfg Options) *Pool {
 	if cfg.MaxSessionsPerEndpoint <= 0 {
 		cfg.MaxSessionsPerEndpoint = defaultMaxSessionsPerEndpoint
 	}
@@ -112,19 +151,18 @@ func New(f framing.Framing, dial DialFunc, cfg Config) *Pool {
 	if cfg.HandshakeTimeout <= 0 {
 		cfg.HandshakeTimeout = defaultHandshakeTimeout
 	}
-	reuse := f.Reuse()
 	capPer := 1
-	if reuse == framing.Concurrent {
+	if cfg.MaxCallsPerConn < 0 {
 		capPer = -1
+	} else if cfg.MaxCallsPerConn > 1 {
+		capPer = cfg.MaxCallsPerConn
 	}
 	p := &Pool{
-		framing: f,
 		dial:    dial,
 		cfg:     cfg,
-		reuse:   reuse,
 		capPer:  capPer,
 		buckets: make(map[string]*bucket),
-		bySess:  make(map[framing.ClientSession]*entry),
+		bySess:  make(map[transport.ClientConn]*entry),
 		flights: make(map[string]*dialFlight),
 		stopCh:  make(chan struct{}),
 	}
@@ -135,24 +173,24 @@ func New(f framing.Framing, dial DialFunc, cfg Config) *Pool {
 
 // Acquire pretakes one in-flight slot on a reusable session, or dials a new
 // one. It does not call OpenCall.
-func (p *Pool) Acquire(ctx context.Context, endpoint string) (framing.ClientSession, error) {
+func (p *Pool) Acquire(ctx context.Context, endpoint string) (transport.ClientConn, error) {
 	return p.acquire(ctx, endpoint, nil)
 }
 
-// OpenCall acquires a session, calls sess.OpenCall, and on framing.ErrSessionBusy
+// OpenCall acquires a session, calls sess.OpenCall, and on transport.ErrConnBusy
 // releases the pretaken slot, skips that session for this attempt chain, and
 // retries with another. Retry count is at most MaxSessionsPerEndpoint.
 //
 // On exhaust it returns status.ErrSessionsExhausted (Code ResourceExhausted).
-// framing.ErrSessionBusy and framing.ErrSessionSpent never leak to the caller.
+// transport.ErrConnBusy and transport.ErrConnSpent never leak to the caller.
 //
-// On framing.ErrSessionSpent the session is closed/discarded and another is tried.
+// On transport.ErrConnSpent the session is closed/discarded and another is tried.
 //
 // On success the caller must Release(sess) after Call.Close returns (same
 // contract as Acquire).
-func (p *Pool) OpenCall(ctx context.Context, endpoint string, m descriptor.Method, spec framing.CallSpec) (framing.Call, framing.ClientSession, error) {
+func (p *Pool) OpenCall(ctx context.Context, endpoint string, m descriptor.Method, spec transport.CallSpec) (transport.Call, transport.ClientConn, error) {
 	max := p.cfg.MaxSessionsPerEndpoint
-	skip := make(map[framing.ClientSession]struct{})
+	skip := make(map[transport.ClientConn]struct{})
 
 	for attempt := 0; attempt < max; attempt++ {
 		sess, err := p.acquire(ctx, endpoint, skip)
@@ -163,12 +201,12 @@ func (p *Pool) OpenCall(ctx context.Context, endpoint string, m descriptor.Metho
 		if err == nil {
 			return call, sess, nil
 		}
-		if errors.Is(err, framing.ErrSessionBusy) {
+		if errors.Is(err, transport.ErrConnBusy) {
 			skip[sess] = struct{}{}
 			p.Release(sess)
 			continue
 		}
-		if errors.Is(err, framing.ErrSessionSpent) {
+		if errors.Is(err, transport.ErrConnSpent) {
 			_ = sess.Close()
 			p.Release(sess)
 			continue
@@ -179,9 +217,41 @@ func (p *Pool) OpenCall(ctx context.Context, endpoint string, m descriptor.Metho
 	return nil, nil, status.ErrSessionsExhausted
 }
 
+// OpenCallReleasing is OpenCall with Release folded into Call.Close, which is
+// what transport.Transport promises its callers: they hold a call, never a
+// connection. Every axis that pools wants this shape, so it lives here rather
+// than being re-wrapped by each one.
+func (p *Pool) OpenCallReleasing(ctx context.Context, endpoint string, m descriptor.Method, spec transport.CallSpec) (transport.Call, error) {
+	call, conn, err := p.OpenCall(ctx, endpoint, m, spec)
+	if err != nil {
+		return nil, err
+	}
+	return &releasingCall{Call: call, pool: p, conn: conn}, nil
+}
+
+// releasingCall returns its connection when the call ends. Release happens
+// strictly after Call.Close, so the pool reads the connection's final
+// Reusable() state.
+type releasingCall struct {
+	transport.Call
+	pool *Pool
+	conn transport.ClientConn
+	once sync.Once
+}
+
+func (c *releasingCall) Close() error {
+	err := c.Call.Close()
+	c.once.Do(func() {
+		if c.pool != nil && c.conn != nil {
+			c.pool.Release(c.conn)
+		}
+	})
+	return err
+}
+
 // acquire is Acquire with an optional skip set used by OpenCall Busy fallback
 // so the pool switches session instead of re-lending the same busy one.
-func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.ClientSession]struct{}) (framing.ClientSession, error) {
+func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[transport.ClientConn]struct{}) (transport.ClientConn, error) {
 	for {
 		p.mu.Lock()
 		if p.closed {
@@ -198,7 +268,7 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.Cl
 		b := p.bucketLocked(endpoint)
 		atCap := len(b.entries)+b.pendingDial >= p.cfg.MaxSessionsPerEndpoint
 
-		if p.reuse == framing.Concurrent {
+		if p.capPer < 0 {
 			if fl, waiting := p.flights[endpoint]; waiting {
 				p.mu.Unlock()
 				select {
@@ -242,8 +312,8 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.Cl
 			b.pendingDial++
 			p.mu.Unlock()
 
-			// Deferred: a panic inside dialNew (pluggable Dial or
-			// NewClientSession) must not leave the flight registered. Otherwise
+			// Deferred: a panic inside dialNew (the axis's own dial and
+			// handshake) must not leave the flight registered. Otherwise
 			// every later Acquire for this endpoint joins a flight nobody will
 			// ever close and blocks until its own ctx expires.
 			//
@@ -253,7 +323,7 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.Cl
 			// existed but nothing accounted for it, so a concurrent Acquire saw
 			// an empty endpoint and dialled a second session past
 			// MaxSessionsPerEndpoint.
-			var sess framing.ClientSession
+			var sess transport.ClientConn
 			var err error
 			retired := false
 			retireFlight := func() {
@@ -308,7 +378,7 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.Cl
 			return sess, nil
 		}
 
-		// Sequential / OneCallPerConn: each waiter dials its own session.
+		// Sequential / one-shot: each waiter dials its own connection.
 		if atCap {
 			p.mu.Unlock()
 			return nil, status.ErrSessionsExhausted
@@ -316,7 +386,7 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.Cl
 		b.pendingDial++
 		p.mu.Unlock()
 
-		var sess framing.ClientSession
+		var sess transport.ClientConn
 		var err error
 		func() {
 			defer func() {
@@ -355,7 +425,7 @@ func (p *Pool) acquire(ctx context.Context, endpoint string, skip map[framing.Cl
 }
 
 // Release returns a session after Call.Close. It must pair with a successful Acquire.
-func (p *Pool) Release(sess framing.ClientSession) {
+func (p *Pool) Release(sess transport.ClientConn) {
 	if sess == nil {
 		return
 	}
@@ -387,12 +457,12 @@ func (p *Pool) Close() error {
 	}
 	p.closed = true
 	close(p.stopCh)
-	var sessions []framing.ClientSession
+	var sessions []transport.ClientConn
 	for s := range p.bySess {
 		sessions = append(sessions, s)
 	}
 	p.buckets = make(map[string]*bucket)
-	p.bySess = make(map[framing.ClientSession]*entry)
+	p.bySess = make(map[transport.ClientConn]*entry)
 	p.mu.Unlock()
 
 	for _, s := range sessions {
@@ -402,7 +472,7 @@ func (p *Pool) Close() error {
 	return nil
 }
 
-func (p *Pool) dialNew(ctx context.Context, endpoint string) (framing.ClientSession, error) {
+func (p *Pool) dialNew(ctx context.Context, endpoint string) (transport.ClientConn, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -416,16 +486,7 @@ func (p *Pool) dialNew(ctx context.Context, endpoint string) (framing.ClientSess
 		}
 	}()
 
-	conn, err := p.dial(hsCtx, endpoint)
-	if err != nil {
-		return nil, err
-	}
-	sess, err := p.framing.NewClientSession(hsCtx, conn, p.cfg.SessionSpec)
-	if err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	return sess, nil
+	return p.dial(hsCtx, endpoint)
 }
 
 func (p *Pool) bucketLocked(endpoint string) *bucket {
@@ -437,7 +498,7 @@ func (p *Pool) bucketLocked(endpoint string) *bucket {
 	return b
 }
 
-func (p *Pool) addEntryLocked(endpoint string, sess framing.ClientSession, now time.Time) *entry {
+func (p *Pool) addEntryLocked(endpoint string, sess transport.ClientConn, now time.Time) *entry {
 	e := &entry{
 		sess:      sess,
 		endpoint:  endpoint,
@@ -449,7 +510,7 @@ func (p *Pool) addEntryLocked(endpoint string, sess framing.ClientSession, now t
 	return e
 }
 
-func (p *Pool) tryLendLocked(endpoint string, now time.Time, skip map[framing.ClientSession]struct{}) (framing.ClientSession, bool) {
+func (p *Pool) tryLendLocked(endpoint string, now time.Time, skip map[transport.ClientConn]struct{}) (transport.ClientConn, bool) {
 	b := p.buckets[endpoint]
 	if b == nil {
 		return nil, false

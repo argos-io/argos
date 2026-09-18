@@ -11,7 +11,9 @@
 | tcp | resp（example） | — | Sequential | 连接级 HELLO/AUTH、无 metadata |
 | tcp | synth（example） | — | Sequential | 服务端先发 greeting 等合成行为 |
 
-echo 多传输入口：`example/echo/axes.go`（grpc × http2、httpunary × http1）。
+产品选型：**Transport 实例 × Codec**（如 `transport/grpc` + protobuf、`transport/httpunary` + json）。echo 入口：`example/echo/binding.go`（`GRPCTransport`、`HTTPUnaryRPCTransport`）。
+
+上表按实现内部分解为 pipe + framing，便于对照 `Reuse()` 与 Carrier；对外配置不再要求三工厂。
 
 ## Conn × Framing 角色
 

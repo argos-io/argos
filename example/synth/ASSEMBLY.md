@@ -6,7 +6,7 @@ Implementing this synthetic Framing gate required **no** changes to public
 interfaces in:
 
 - `transport/` (root interfaces)
-- `framing/` (root interfaces)
+- `protocol/` (root interfaces)
 - `client/`
 - `server/`
 

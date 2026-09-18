@@ -8,9 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/transport"
-	"github.com/argos-io/argos/transport/tcp"
 )
 
 // In-package: the defect is in the framing Call itself — its ctx and the
@@ -51,25 +49,20 @@ func silentPeer(t *testing.T) string {
 
 // clientCallAgainstSilentPeer dials silentPeer, completes the client handshake
 // and opens one call with callCtx.
-func clientCallAgainstSilentPeer(t *testing.T, callCtx context.Context) framing.Call {
+func clientCallAgainstSilentPeer(t *testing.T, callCtx context.Context) transport.Call {
 	t.Helper()
-	fr := New()
-	tr := tcp.New()
+	ax := New()
+	t.Cleanup(func() { _ = ax.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, err := tr.Dial(ctx, transport.DialSpec{Endpoint: silentPeer(t)})
+
+	conn, err := ax.dial(ctx, silentPeer(t))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("dial: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	sess, err := fr.NewClientSession(ctx, conn, framing.SessionSpec{})
-	if err != nil {
-		t.Fatalf("NewClientSession: %v", err)
-	}
-	t.Cleanup(func() { _ = sess.Close() })
-
-	c, err := sess.OpenCall(callCtx, MethodPING, framing.CallSpec{})
+	c, err := conn.OpenCall(callCtx, MethodPING, transport.CallSpec{})
 	if err != nil {
 		t.Fatalf("OpenCall: %v", err)
 	}

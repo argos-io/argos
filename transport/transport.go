@@ -71,16 +71,16 @@ func WithListenAddress(addr string) ServerOption {
 	return serverOptionFunc(func(c *serveConfig) { c.listenAddress = addr })
 }
 
-// WithHTTPTimeouts sets the HTTP-level timeouts for the HTTP-based transports
-// (ws, http1, http2). They bound connections that never reach onConn: a peer
-// that connects and sends nothing (or half a request line) otherwise holds a
-// goroutine and an fd forever, because the composition layer's connection
-// admission and idle timers only start once onConn is called.
-func WithHTTPTimeouts(readHeader, idle time.Duration) ServerOption {
-	return serverOptionFunc(func(c *serveConfig) {
-		c.httpReadHeaderTimeout = readHeader
-		c.httpIdleTimeout = idle
-	})
+// WithHTTPReadHeaderTimeout bounds how long an HTTP-based peer may take to send
+// a request header block or upgrade before onConn runs.
+func WithHTTPReadHeaderTimeout(d time.Duration) ServerOption {
+	return serverOptionFunc(func(c *serveConfig) { c.httpReadHeaderTimeout = d })
+}
+
+// WithHTTPIdleTimeout bounds how long a keep-alive HTTP connection may sit idle
+// between requests or streams.
+func WithHTTPIdleTimeout(d time.Duration) ServerOption {
+	return serverOptionFunc(func(c *serveConfig) { c.httpIdleTimeout = d })
 }
 
 // ServerSettings is the resolved view of ServerOption values for concrete
@@ -108,9 +108,10 @@ func ApplyServerOptions(opts ...ServerOption) ServerSettings {
 	}
 }
 
-// Transport produces Conn only. It does not import descriptor, framing, or
-// codec.
-type Transport interface {
+// Pipe dials and listens at the byte level and produces Conn only. Product-
+// facing transport (OpenCall / AcceptCall) lives in transport.go as Transport;
+// Pipe is an implementation detail inside grpc, resp, tcp, http2, and similar.
+type Pipe interface {
 	Serve(ctx context.Context,
 		onConn func(context.Context, Conn),
 		opts ...ServerOption) error
@@ -152,7 +153,7 @@ type StreamConn interface {
 type Carrier interface {
 	// Abort is idempotent; it interrupts in-flight I/O waits on this exchange.
 	//
-	// Only the framing.Call that holds it or the Session that created it may
+	// Only the session.Call that holds it or the Session that created it may
 	// call Abort. The client/server composition layer, Filters, and application
 	// code must not: to cancel a call use Call.Close; to tear down a connection
 	// use Session.Close. Session is the sole creator of Carrier and therefore

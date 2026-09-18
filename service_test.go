@@ -6,61 +6,40 @@ import (
 	"testing"
 
 	"github.com/argos-io/argos/codec"
-	"github.com/argos-io/argos/framing"
+	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/transport"
 )
 
-func TestServiceConfigAssembleReturnsIndependentInstances(t *testing.T) {
+const (
+	testStubTransportName = "argos-test-stub-transport"
+	testStubSerialCodec   = "argos-test-stub-serial"
+)
+
+var stubCodecSerial atomic.Int64
+
+func init() {
+	transport.Register(testStubTransportName, func() (transport.Transport, error) {
+		return &stubTransport{}, nil
+	})
+	codec.Register(testStubSerialCodec, func() (codec.Codec, error) {
+		return &stubCodec{id: int(stubCodecSerial.Add(1))}, nil
+	})
+}
+
+func TestAssembleCodecReturnsIndependentInstances(t *testing.T) {
 	t.Parallel()
-	var n atomic.Int64
-	transportFn := func() (transport.Transport, error) {
-		id := int(n.Add(1))
-		return &stubTransport{id: id}, nil
-	}
-	framingFn := func() (framing.Framing, error) {
-		id := int(n.Add(1))
-		return &stubFraming{id: id}, nil
-	}
-	codecFn := func() (codec.Codec, error) {
-		id := int(n.Add(1))
-		return &stubCodec{id: id}, nil
+	sc := ServiceOptions{
+		Transport: testStubTransportName,
+		Codec:     testStubSerialCodec,
 	}
 
-	cfg, err := ClientConfig(
-		WithConfig(&Config{}),
-		WithServiceName("echo.v1.EchoService"),
-		JoinClient(
-			WithTransport(transportFn),
-			WithFraming(framingFn),
-			WithCodec(codecFn),
-		),
-	)
+	co1, err := sc.AssembleCodec()
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, sel := cfg.SelectedService()
-	if sel.Transport == nil || sel.Framing == nil || sel.Codec == nil {
-		t.Fatal("axes not stored")
-	}
-
-	tr1, fr1, co1, err := sel.Assemble()
+	co2, err := sc.AssembleCodec()
 	if err != nil {
 		t.Fatal(err)
-	}
-	tr2, fr2, co2, err := sel.Assemble()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	st1 := tr1.(*stubTransport)
-	st2 := tr2.(*stubTransport)
-	if st1 == st2 || st1.id == st2.id {
-		t.Fatalf("Transport reused: %#v vs %#v", st1, st2)
-	}
-	sf1 := fr1.(*stubFraming)
-	sf2 := fr2.(*stubFraming)
-	if sf1 == sf2 || sf1.id == sf2.id {
-		t.Fatalf("Framing reused: %#v vs %#v", sf1, sf2)
 	}
 	sc1 := co1.(*stubCodec)
 	sc2 := co2.(*stubCodec)
@@ -69,48 +48,27 @@ func TestServiceConfigAssembleReturnsIndependentInstances(t *testing.T) {
 	}
 }
 
-func TestServiceConfigAssembleClosesPartialBuild(t *testing.T) {
+func TestIncompleteServiceStack(t *testing.T) {
 	t.Parallel()
-	tr := &stubTransport{id: 1}
-	sc := ServiceConfig{
-		Transport: func() (transport.Transport, error) { return tr, nil },
-		Framing:   func() (framing.Framing, error) { return &stubFraming{id: 2}, nil },
-		Codec:     func() (codec.Codec, error) { return nil, nil },
-	}
-
-	if _, _, _, err := sc.Assemble(); err == nil {
-		t.Fatal("Assemble accepted a Codec factory that returned no Codec")
-	}
-	// Assemble returns no component with an error, so a Transport it built and
-	// kept would be unreachable and never closed.
-	if !tr.closed.Load() {
-		t.Error("failed Assemble left the Transport it had built open")
+	if _, err := (ServiceOptions{Codec: "protobuf"}).AssembleCodec(); err == nil {
+		t.Fatal("expected error without Transport")
 	}
 }
 
-type stubTransport struct {
-	id     int
-	closed atomic.Bool
-}
+type stubTransport struct{}
 
-func (s *stubTransport) Serve(context.Context, func(context.Context, transport.Conn), ...transport.ServerOption) error {
+func (s *stubTransport) OpenCall(context.Context, string, descriptor.Method, transport.CallSpec) (transport.Call, error) {
+	return nil, nil
+}
+func (s *stubTransport) Serve(context.Context, func(context.Context, transport.ServerConn), ...transport.ServerOption) error {
 	return nil
 }
-func (s *stubTransport) Dial(context.Context, transport.DialSpec, ...transport.ClientOption) (transport.Conn, error) {
-	return nil, nil
-}
-func (s *stubTransport) Shutdown(context.Context) error { return nil }
-func (s *stubTransport) Close() error                   { s.closed.Store(true); return nil }
+func (s *stubTransport) CallConcurrency() transport.Concurrency { return transport.Sequential }
 
-type stubFraming struct{ id int }
-
-func (s *stubFraming) Reuse() framing.ReuseModel { return framing.OneCallPerConn }
-func (s *stubFraming) NewClientSession(context.Context, transport.Conn, framing.SessionSpec) (framing.ClientSession, error) {
-	return nil, nil
-}
-func (s *stubFraming) NewServerSession(context.Context, transport.Conn, framing.SessionSpec) (framing.ServerSession, error) {
-	return nil, nil
-}
+// The stub deliberately returns the zero codec name: an empty name reads as
+// "this axis names no codec on the wire", so the assembly-time codec-name check
+// has nothing to compare and a test here never trips over it.
+func (s *stubTransport) CodecName() string { return "" }
 
 type stubCodec struct{ id int }
 

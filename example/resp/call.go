@@ -296,7 +296,7 @@ func (c *serverCall) Accept(m descriptor.Method) error {
 	}
 	if m.Shape() != want {
 		return status.Error(status.Unimplemented,
-			"resp: shape "+shapeName(m.Shape())+" unsupported (Framing=resp); need "+shapeName(want))
+			"resp: shape "+shapeName(m.Shape())+" unsupported (axis=resp); need "+shapeName(want))
 	}
 	if m.FullName() != c.method {
 		return status.Error(status.Internal, "resp: Accept method mismatch")

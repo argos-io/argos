@@ -13,10 +13,10 @@ type ctxKey struct{}
 // ConnState is connection-scoped protocol state. On the server, the call ctx
 // is derived from the connection ctx, so handlers read this via FromContext.
 //
-// When the composition layer has placed a *ConnState on the connection ctx
-// (ContextWith), NewServerSession fills it in place. Otherwise the session
-// installs a Sequential same-goroutine handoff so FromContext still works
-// through server.Server without a core API change.
+// When the composition layer has placed a *ConnState on the handshake ctx
+// (ContextWith), ServerConn.Handshake fills it in place. Otherwise the
+// session installs a Sequential same-goroutine handoff so FromContext still
+// works through server.Server without a core API change.
 type ConnState struct {
 	mu sync.Mutex
 
@@ -74,7 +74,7 @@ func (s *ConnState) setOnExclusive(cb func()) {
 }
 
 // ContextWith attaches st to ctx. Prefer placing an empty *ConnState on the
-// connection ctx before NewServerSession so handshake can fill it in place.
+// handshake ctx before ServerConn.Handshake so handshake can fill it in place.
 func ContextWith(ctx context.Context, st *ConnState) context.Context {
 	return context.WithValue(ctx, ctxKey{}, st)
 }

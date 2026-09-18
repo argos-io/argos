@@ -4,24 +4,20 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/argos-io/argos"
-	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/internal/fake"
+	"github.com/argos-io/argos/internal/session"
+	"github.com/argos-io/argos/internal/teststack"
 	"github.com/argos-io/argos/stream"
-	"github.com/argos-io/argos/transport"
 )
 
 func TestProtocolAssembleOncePerServerStart(t *testing.T) {
-	var calls atomic.Int64
 	tr := newTestTransport()
-	fr := fake.NewFraming(framing.Sequential)
+	fr := fake.NewFraming(session.Sequential)
 	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
 		var req []byte
 		if err := st.Recv(&req); err != nil {
@@ -30,30 +26,13 @@ func TestProtocolAssembleOncePerServerStart(t *testing.T) {
 		drainRecv(st)
 		return st.Send(req)
 	}
-
-	srv := New(argos.WithService(svcName,
-		argos.JoinService(
-			argos.ServiceTransport(func() (transport.Transport, error) {
-				calls.Add(1)
-				return tr, nil
-			}),
-			argos.ServiceFraming(func() (framing.Framing, error) { return fr, nil }),
-			argos.ServiceCodec(func() (codec.Codec, error) { return rawCodec{}, nil }),
-		),
-		argos.ServiceListenAddress("127.0.0.1:0"),
+	srv := New(argos.WithServerService(svcName,
+		testServiceBindListen(t, tr, fr, "127.0.0.1:0"),
 	))
 	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: h}); err != nil {
 		t.Fatal(err)
 	}
-
-	go func() { _ = srv.Run(context.Background()) }()
-	time.Sleep(15 * time.Millisecond)
-	t.Cleanup(func() { _ = srv.Close() })
-
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("protocol assemble calls after Run = %d, want 1", got)
-	}
-
+	t.Cleanup(startRun(t, srv))
 	for i := 0; i < 3; i++ {
 		client, serverConn := fake.BytePipe()
 		tr.Offer(serverConn)
@@ -62,72 +41,11 @@ func TestProtocolAssembleOncePerServerStart(t *testing.T) {
 		_ = unaryRoundTrip(t, call, "x")
 		_ = call.Close()
 	}
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("protocol assemble calls after accepts = %d, want 1", got)
-	}
 }
 
-func TestShutdownDeadlineInterruptsInFlight(t *testing.T) {
+func TestShutdownIdempotent(t *testing.T) {
 	tr := newTestTransport()
-	fr := fake.NewFraming(framing.Sequential)
-	entered := make(chan struct{})
-	handlerDone := make(chan error, 1)
-	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
-		var req []byte
-		if err := st.Recv(&req); err != nil {
-			return err
-		}
-		drainRecv(st)
-		close(entered)
-		select {
-		case <-ctx.Done():
-			err := ctx.Err()
-			handlerDone <- err
-			return err
-		case <-time.After(10 * time.Second):
-			handlerDone <- errors.New("handler timed out without interrupt")
-			return errors.New("not interrupted")
-		}
-	}
-	srv := startServer(t, tr, fr, h)
-
-	client, serverConn := fake.BytePipe()
-	tr.Offer(serverConn)
-
-	method := descriptor.MustMethod(fullMethod, descriptor.Unary)
-	call := openClientCall(t, client, fr, method)
-	if err := call.Send([]byte("hold")); err != nil {
-		t.Fatal(err)
-	}
-	_ = call.HalfClose()
-
-	select {
-	case <-entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("handler did not enter")
-	}
-
-	shCtx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
-	defer cancel()
-	err := srv.Shutdown(shCtx)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Shutdown: %v, want context.DeadlineExceeded", err)
-	}
-
-	select {
-	case herr := <-handlerDone:
-		if herr == nil {
-			t.Fatal("handler returned nil; want interrupt error")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("in-flight call was not interrupted by Shutdown deadline")
-	}
-	_ = call.Close()
-}
-
-func TestCloseIdempotent(t *testing.T) {
-	tr := newTestTransport()
-	fr := fake.NewFraming(framing.Sequential)
+	fr := fake.NewFraming(session.Sequential)
 	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
 		var req []byte
 		if err := st.Recv(&req); err != nil {
@@ -137,99 +55,88 @@ func TestCloseIdempotent(t *testing.T) {
 		return st.Send(req)
 	}
 	srv := startServer(t, tr, fr, h)
-	if err := srv.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if err := srv.Close(); err != nil {
-		t.Fatalf("second Close: %v", err)
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
 	}
 	if err := srv.Shutdown(context.Background()); err != nil {
-		t.Fatalf("Shutdown after Close: %v", err)
+		t.Fatalf("second Shutdown: %v", err)
+	}
+	// A stopped server stays stopped: Run must refuse rather than start serving
+	// again behind the caller's back.
+	if err := srv.Run(context.Background()); err == nil {
+		t.Fatal("Run after Shutdown succeeded")
+	}
+	// The stop is the server's own: it must not have closed the caller's axis.
+	if tr.isClosed() {
+		t.Error("Shutdown closed the axis the surface served on")
 	}
 }
 
 func TestFactoryIsolationAcrossListeners(t *testing.T) {
-	var calls atomic.Int64
 	tr1, tr2 := newTestTransport(), newTestTransport()
-	fr1, fr2 := fake.NewFraming(framing.Sequential), fake.NewFraming(framing.Sequential)
-
-	listenerAxes := func(tr transport.Transport, fr framing.Framing) argos.ServiceOption {
-		return argos.JoinService(
-			argos.ServiceTransport(func() (transport.Transport, error) {
-				calls.Add(1)
-				return tr, nil
-			}),
-			argos.ServiceFraming(func() (framing.Framing, error) { return fr, nil }),
-			argos.ServiceCodec(func() (codec.Codec, error) { return rawCodec{}, nil }),
-		)
-	}
-	srv := New(argos.WithService(svcName,
-		argos.ServiceListener("127.0.0.1:1", listenerAxes(tr1, fr1)),
-		argos.ServiceListener("127.0.0.1:2", listenerAxes(tr2, fr2)),
+	fr1, fr2 := fake.NewFraming(session.Sequential), fake.NewFraming(session.Sequential)
+	srv := New(argos.WithServerService(svcName,
+		testServiceBindListen(t, tr1, fr1, "127.0.0.1:1"),
+		testServiceBindListen(t, tr2, fr2, "127.0.0.1:2"),
 	))
-	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
-		return nil
-	}
+	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error { return nil }
 	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: h}); err != nil {
 		t.Fatal(err)
 	}
-
-	go func() { _ = srv.Run(context.Background()) }()
-	time.Sleep(15 * time.Millisecond)
-	t.Cleanup(func() { _ = srv.Close() })
-
-	if got := calls.Load(); got != 2 {
-		t.Fatalf("protocol assemble calls = %d, want 2 (once per listener)", got)
+	stop := startRun(t, srv)
+	stop()
+	// Two surfaces means two axis instances: stopping the server that served on
+	// them must leave both where it found them.
+	if tr1.isClosed() || tr2.isClosed() {
+		t.Errorf("stop left axes closed: first=%v second=%v", tr1.isClosed(), tr2.isClosed())
 	}
 }
 
-var errAxisFactory = errors.New("transport factory refused")
-
-// newAbortingServer returns a Server whose second listen surface cannot
-// assemble, so Run aborts after the first surface is already built, plus that
-// first surface's Transport.
-func newAbortingServer(t *testing.T) (*Server, *testTransport) {
+// newAbortingServer returns a Server whose second listen surface cannot be
+// assembled, so Run fails part-way through the surface list, after the first
+// surface has already been assembled, plus both surfaces' Transport.
+func newAbortingServer(t *testing.T) (*Server, *testTransport, *testTransport) {
 	t.Helper()
-	tr := newTestTransport()
-	fr := fake.NewFraming(framing.Sequential)
-	srv := New(argos.WithService(svcName,
-		argos.ServiceListener("127.0.0.1:1", testServiceAxes(tr, fr)),
-		argos.ServiceListener("127.0.0.1:2",
-			argos.ServiceTransport(func() (transport.Transport, error) { return nil, errAxisFactory }),
-			argos.ServiceFraming(func() (framing.Framing, error) { return fr, nil }),
-			argos.ServiceCodec(func() (codec.Codec, error) { return rawCodec{}, nil }),
-		),
+	tr1, tr2 := newTestTransport(), newTestTransport()
+	fr := fake.NewFraming(session.Sequential)
+	srv := New(argos.WithServerService(svcName,
+		testServiceBindListen(t, tr1, fr, "127.0.0.1:1"),
+		argos.ServiceBindListen("127.0.0.1:2", teststack.TransportName(t, testServiceAxis(tr2, fr)), testRefusingCodecName),
 	))
-	t.Cleanup(func() { _ = srv.Close() })
 	if err := srv.Register(echoService(), map[string]filter.Handler{
 		methodEcho: func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 	}); err != nil {
 		t.Fatal(err)
 	}
-	return srv, tr
+	return srv, tr1, tr2
 }
 
-func TestStartFailureClosesAssembledTransport(t *testing.T) {
-	srv, tr := newAbortingServer(t)
+// An aborted start is not a stop: the axes it touched belong to the caller, and
+// Run must leave them exactly where it found them.
+func TestStartFailureLeavesAxesOpen(t *testing.T) {
+	srv, tr1, tr2 := newAbortingServer(t)
 
-	if err := srv.Run(context.Background()); !errors.Is(err, errAxisFactory) {
-		t.Fatalf("Run: %v, want %v", err, errAxisFactory)
+	if err := srv.Run(context.Background()); !errors.Is(err, errCodecFactory) {
+		t.Fatalf("Run: %v, want %v", err, errCodecFactory)
 	}
-	if !tr.isClosed() {
-		t.Error("aborted Run left the Transport it had assembled open")
+	if tr1.isClosed() {
+		t.Error("aborted Run closed the axis it had already assembled")
+	}
+	if tr2.isClosed() {
+		t.Error("aborted Run closed the axis whose assembly failed")
 	}
 }
 
 func TestStartFailureLeavesServerRestartable(t *testing.T) {
-	srv, _ := newAbortingServer(t)
+	srv, _, _ := newAbortingServer(t)
 
-	if err := srv.Run(context.Background()); !errors.Is(err, errAxisFactory) {
-		t.Fatalf("first Run: %v, want %v", err, errAxisFactory)
+	if err := srv.Run(context.Background()); !errors.Is(err, errCodecFactory) {
+		t.Fatalf("first Run: %v, want %v", err, errCodecFactory)
 	}
 	// No listen surface ever went live, so the second Run must report why the
 	// start failed rather than reject the call as a restart.
-	if err := srv.Run(context.Background()); !errors.Is(err, errAxisFactory) {
-		t.Fatalf("second Run: %v, want %v", err, errAxisFactory)
+	if err := srv.Run(context.Background()); !errors.Is(err, errCodecFactory) {
+		t.Fatalf("second Run: %v, want %v", err, errCodecFactory)
 	}
 	other := descriptor.MustService("test.v1.Other",
 		descriptor.MustMethod("test.v1.Other."+methodEcho, descriptor.Unary))
@@ -240,65 +147,13 @@ func TestStartFailureLeavesServerRestartable(t *testing.T) {
 	}
 }
 
-func TestCloseDuringStartClosesAssembledTransports(t *testing.T) {
-	tr1, tr2 := newTestTransport(), newTestTransport()
-	fr := fake.NewFraming(framing.Sequential)
-	assembling := make(chan struct{})
-	resume := make(chan struct{})
-
-	srv := New(argos.WithService(svcName,
-		argos.ServiceListener("127.0.0.1:1", testServiceAxes(tr1, fr)),
-		// Holds the start inside the assembly loop until the test has closed
-		// the Server, so Close snapshots the live surfaces while there are none.
-		argos.ServiceListener("127.0.0.1:2",
-			argos.ServiceTransport(func() (transport.Transport, error) {
-				close(assembling)
-				<-resume
-				return tr2, nil
-			}),
-			argos.ServiceFraming(func() (framing.Framing, error) { return fr, nil }),
-			argos.ServiceCodec(func() (codec.Codec, error) { return rawCodec{}, nil }),
-		),
-	))
-	t.Cleanup(func() { _ = srv.Close() })
-	if err := srv.Register(echoService(), map[string]filter.Handler{
-		methodEcho: func(context.Context, descriptor.Method, stream.Stream) error { return nil },
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	runErr := make(chan error, 1)
-	go func() { runErr <- srv.Run(context.Background()) }()
-
-	<-assembling
-	if err := srv.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	close(resume)
-
-	select {
-	case err := <-runErr:
-		if err != nil {
-			t.Fatalf("Run: %v, want nil after Close", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not return after Close during start")
-	}
-	if !tr1.isClosed() || !tr2.isClosed() {
-		t.Errorf("Close during start left Transports open: first=%v second=%v",
-			tr1.isClosed(), tr2.isClosed())
-	}
-}
-
 func TestRejectedOptionsSurfaceFromRun(t *testing.T) {
 	tr := newTestTransport()
-	fr := fake.NewFraming(framing.Sequential)
+	fr := fake.NewFraming(session.Sequential)
 	srv := New(
-		argos.WithMaxConcurrentCalls(-5),
-		argos.WithService(svcName, testServiceAxes(tr, fr), argos.ServiceListenAddress("127.0.0.1:0")),
+		argos.WithServerMaxConcurrentCalls(-5),
+		argos.WithServerService(svcName, testServiceBindListen(t, tr, fr, "127.0.0.1:0")),
 	)
-	t.Cleanup(func() { _ = srv.Close() })
-
 	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: func(context.Context, descriptor.Method, stream.Stream) error {
 		return nil
 	}}); err != nil {
@@ -310,5 +165,71 @@ func TestRejectedOptionsSurfaceFromRun(t *testing.T) {
 	}
 	if !strings.Contains(runErr.Error(), "MaxConcurrentCalls") {
 		t.Fatalf("Run: %v, want the error to name MaxConcurrentCalls", runErr)
+	}
+}
+
+// echoHandler reads one message and echoes it back.
+func echoHandler(ctx context.Context, m descriptor.Method, st stream.Stream) error {
+	var req []byte
+	if err := st.Recv(&req); err != nil {
+		return err
+	}
+	drainRecv(st)
+	return st.Send(req)
+}
+
+// An axis belongs to whoever constructed it, and the server only ever serves on
+// it. Neither stop path may close it, and the same instance has to keep serving
+// afterwards.
+func TestStopLeavesAxisUsable(t *testing.T) {
+	tr := newTestTransport()
+	srvFr := fake.NewFraming(session.Sequential)
+	cliFr := fake.NewFraming(session.Sequential)
+	// One axis instance, three servers: every stop has to leave it serving.
+	axis := testServiceAxis(tr, srvFr)
+	trName := teststack.TransportName(t, axis)
+	serve := func() *Server {
+		srv := New(argos.WithServerService(svcName,
+			argos.ServiceBindListen("127.0.0.1:0", trName, testServerCodecName),
+		))
+		if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: echoHandler}); err != nil {
+			t.Fatal(err)
+		}
+		return srv
+	}
+
+	// Stop path 1: Run's ctx is canceled.
+	srv := serve()
+	stop := startRun(t, srv)
+	if out := echoOnce(t, tr, cliFr, "one"); out != "one" {
+		t.Fatalf("first server echoed %q, want %q", out, "one")
+	}
+	stop()
+	if tr.isClosed() {
+		t.Fatal("canceling Run's ctx closed the axis the surface served on")
+	}
+
+	// Stop path 2: Shutdown.
+	srv = serve()
+	stop = startRun(t, srv)
+	if out := echoOnce(t, tr, cliFr, "two"); out != "two" {
+		t.Fatalf("second server echoed %q, want %q", out, "two")
+	}
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+	if tr.isClosed() {
+		t.Fatal("Shutdown closed the axis the surface served on")
+	}
+	stop()
+
+	// The same instance serves a third server: same transport, same framing.
+	srv = serve()
+	t.Cleanup(startRun(t, srv))
+	if out := echoOnce(t, tr, cliFr, "three"); out != "three" {
+		t.Fatalf("third server echoed %q, want %q", out, "three")
+	}
+	if tr.isClosed() {
+		t.Fatal("stopping the servers closed the axis they served on")
 	}
 }

@@ -6,7 +6,7 @@
 
 ## 项目是什么
 
-**Argos** 用 Transport × Framing × Codec 三轴拼 **C/S 协议**；连接（`Conn`/`Session`）在 API 里是一等公民。gRPC/proto 是一等路径，**非 RPC**（如 `example/resp` RESP2×tcp）同属验证范围。
+**Argos** 用 **Transport × Codec** 拼 **C/S 协议**（`transport.Transport` 实例 = 传输 + 分帧 + 连接/池）。gRPC/proto 是一等路径，**非 RPC**（如 `example/resp` RESP2×tcp）同属验证范围。
 
 | | |
 |---|---|
@@ -20,19 +20,18 @@
 
 ```
 descriptor/  status/  metadata/  budget/
-transport/  transport/{tcp,ws,udp,http1,http2}/
-framing/  framing/{grpc,httpunary}/
+transport/  transport_impl.go  transport/{tcp,ws,udp,http1,http2,grpc,httpunary}/
 codec/  codec/{protobuf,json}/
 compressor/  compressor/{gzip,grpccodec}/
 stream/  filter/
 resolver/  resolver/ip/
 client/  server/
-internal/fake/  internal/sessionpool/  internal/httpstatus/
+internal/session/  internal/sessionpool/  internal/transportbind/  internal/httpstatus/  internal/fake/
 internal/codegen/  internal/codegen/{ir,frontend,gen,stub,check}/
 cmd/argos/
 example/{echo,resp,synth}/
-argos 根包（Config/Option/ServiceConfig）
-docs/          # 协议接入（Transport/Framing/Codec 抽象与检查单）
+argos 根包（Options / ClientOption / ServerOption / ServiceOptions）
+docs/          # 协议接入（Transport 契约与检查单）
 Makefile · .github/workflows/ci.yml · invariants_test.go
 ```
 
@@ -42,24 +41,24 @@ Makefile · .github/workflows/ci.yml · invariants_test.go
 
 ## 协议接入（AI 必读）
 
-扩展或新组合 **Transport × Framing × Codec** 时，先读 [`docs/README.md`](docs/README.md)，再按轴深入：
+新协议或新组合 **Transport × Codec** 时，先读 [`docs/README.md`](docs/README.md)，再按层深入：
 
 | 任务 | 文档 | 源码真源 |
 |------|------|----------|
-| 新传输 / 新 Conn·Carrier | [`docs/transport.md`](docs/transport.md) | `transport/transport.go` |
-| 新分帧 / Session·Call | [`docs/framing.md`](docs/framing.md) | `framing/framing.go` |
-| Codec + 三轴工厂挂接 | [`docs/codec-and-wiring.md`](docs/codec-and-wiring.md) | `service.go`, `example/echo/axes.go` |
-| 选型已有组合 | [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md) | 各 `transport/*`, `framing/*` |
+| **Transport 契约**（OpenCall / Serve / CallConcurrency / CodecName / 生命周期） | [`docs/transport.md`](docs/transport.md) | `transport/transport_impl.go` |
+| 新 `Pipe`（字节面）或新线栈 axis 实现 | [`docs/transport.md`](docs/transport.md) | `transport/{tcp,ws,udp,http1,http2}`, `transport/grpc/link.go`, `example/resp/link.go` |
+| Call / AcceptCall 分帧语义 | [`docs/framing.md`](docs/framing.md) | `internal/session`, `transport/grpc/framing.go` |
+| Codec + 挂接 | [`docs/codec-and-wiring.md`](docs/codec-and-wiring.md) | `service.go`, `example/echo/binding.go` |
+| 选型已有组合 | [`docs/compatibility-matrix.md`](docs/compatibility-matrix.md) | 各 `transport/*/link.go` 与 example |
 
 **硬性约定（摘要）**
 
-1. **无全局 registry**：三轴只用 `ServiceTransport` / `ServiceFraming` / `ServiceCodec` 工厂；勿恢复按名解析。
-2. **只有 `Transport.Close()`**：Framing/Codec 工厂无生命周期；资源在 Session/Call/Conn。
-3. **Transport** 不 import framing；**Framing** 不 import codec（grpc 除外可 import compressor/genproto）。
-4. **Framing** 在 `New*Session` 对 `Conn` 做窄接口 assert；不匹配即 error。
-5. **`AcceptCall`**：`ErrCallRejected` 须返回可 `Finish` 的 `ServerCall`；连接级错误才结束 accept 循环。
-6. **发送失败** 用 `transport.SendError`；`ReceiveOpen` 语义见 `transport/transport.go`。
-7. 行为变更配测试；提交前 `make verify`。
+1. **按名注册**：`codec.Register` / `transport.Register`；`ServiceOptions` 与 `WithTransport` / `WithCodec` 引用注册名，装配时 `New(name)` 实例化。
+2. **axis 生命周期归构造方**：`transport.Transport` 无 `Close`/`Shutdown`——生命周期就是构造它的 ctx，`Serve` 随该 ctx 结束；要显式释放的实现自带 `Close`（如 `transport/grpc`）。组合层对共享实例**既不 `Close` 也不改配置**：limits / 池 / codec 名只在构造期用 `WithLimits` / `WithPool` / `WithCodecName` 定死——那些数字只有构造处一个来源，`argos.Options` 不带它们，没有第二份可对照的拷贝；装配期只核对 codec 名（`internal/transportbind.CheckCodecName`），不一致即报错；谁构造谁关闭。组合层自身亦无可释放资源：`client.Client` 无 `Close`；`server.Server` 靠 `Run(ctx)` 的 ctx 停止，`Shutdown(ctx)` 只是取消该 ctx 并等 `Run` 返回，不碰 transport，也不打断在途连接。**停止 = 不再接受新调用**，不等于在途调用已结束：`Run` 只等监听面的 `Serve` 返回，处理器跑在 transport 自己的协程上，server 从不 join 它们；要等连接排空，由轴的所有者调轴自己的 `Shutdown(ctx)`。
+3. **ServerConn.Handshake**：握手超时与错误上报在 server 组合层；Transport 内只做协议 I/O。
+4. **`AcceptCall`**：`ErrCallRejected` 须返回可 `Finish` 的 `ServerCall`；连接级错误才结束 accept 循环。
+5. **transport 根包** 可 import `descriptor` / `metadata` / `budget`（接口签名需要），**不** import `codec`；完整线栈实现（`transport/grpc`、`transport/httpunary`）可 import `internal/session`、`internal/sessionpool`（池在 axis 内），字节管道（`tcp`/`ws`/`udp`/`http1`/`http2`）不得 import `descriptor` / `metadata` / `budget`。
+6. 行为变更配测试；提交前 `make verify`。
 
 `docs/` 只放**接入与契约**说明，不写计划草稿或未决决策（仍直接改 README + 代码）。
 

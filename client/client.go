@@ -1,5 +1,5 @@
 // Package client is the client-side composition layer: admission, OpenFilter
-// chain, session pool, and CallStream.
+// chain, and CallStream. Connectivity belongs to the protocol axis.
 package client
 
 import (
@@ -8,15 +8,13 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
-	"sync/atomic"
 
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/budget"
 	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/framing"
-	"github.com/argos-io/argos/internal/sessionpool"
+	"github.com/argos-io/argos/internal/transportbind"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/resolver"
 	"github.com/argos-io/argos/status"
@@ -24,74 +22,45 @@ import (
 	"github.com/argos-io/argos/transport"
 )
 
-// Client owns one Transport×Framing×Codec triple, a session pool, and
-// instance-level admission (MaxConcurrentCalls + MaxBufferedBytes).
+// opener is the client-side surface of one protocol transport instance.
+type opener interface {
+	OpenCall(ctx context.Context, endpoint string, m descriptor.Method, spec transport.CallSpec) (transport.Call, error)
+}
+
+// Client owns one protocol (transport + codec) and instance-level admission
+// (MaxConcurrentCalls + MaxBufferedBytes).
+//
+// It has no Close. Everything a Close used to release belongs to the axis:
+// connections and the pool are the axis' business and the axis' constructor
+// closes them, while admission is returned by CallStream.Close. Dropping a
+// Client therefore leaks nothing that was not already released, and a call in
+// flight is governed by the ctx it was opened with — which is the only lifetime
+// the caller ever expressed.
 type Client struct {
-	cfg     *argos.Config
+	cfg     *argos.Options
 	service string
 	target  string
 
-	tr      transport.Transport
-	framing framing.Framing
 	codec   codec.Codec
-	pool    *sessionpool.Pool
+	opener  opener
 	perCall int64
-
-	lifetime       context.Context
-	cancelLifetime context.CancelFunc
-
-	mu     sync.Mutex
-	closed bool
 
 	// Admission: concurrent call slots + instance buffer pool.
 	admitMu   sync.Mutex
 	inFlight  int
 	bufRemain int64
-
-	leak    *clientLeakState
-	cleanup runtime.Cleanup
 }
 
-// clientLeakState is what the Client's cleanup hook sees. Like the CallStream
-// one it must not reference the Client, or the Client would never become
-// unreachable and the hook would never run — which is also why the pool's
-// DialFunc closes over the Transport instead of over the Client.
-type clientLeakState struct {
-	closed atomic.Bool
-	cfg    *argos.Config
-	target string
-	pool   *sessionpool.Pool
-	tr     transport.Transport
-	cancel context.CancelFunc
-}
-
-// release is what both Close and the cleanup hook run.
-func (st *clientLeakState) release() error {
-	st.cancel()
-	var first error
-	if st.pool != nil {
-		if err := st.pool.Close(); err != nil {
-			first = err
-		}
-	}
-	if st.tr != nil {
-		if err := st.tr.Close(); err != nil && first == nil {
-			first = err
-		}
-	}
-	return first
-}
-
-// New builds a Client from options only: the Config it starts from is the one
-// named by argos.WithConfig, or the process default. argos.WithServiceName
+// New builds a Client from options only: the Options it starts from is the one
+// named by argos.WithClientOptions, or the process default. argos.WithServiceName
 // names the service the Client opens calls for and is required — generated
 // stubs pass their own.
 //
-// It assembles the service's protocol once (no network I/O) and creates an
-// empty session pool. Protocol and target come from Config.Services for the
-// selected service name; a target is required before the first Open.
+// It assembles the service's protocol once (no network I/O). Protocol and
+// target come from Options.Services for the selected service name; a target is
+// required before the first Open.
 func New(opts ...argos.ClientOption) (*Client, error) {
-	cfg, err := argos.ClientConfig(opts...)
+	cfg, err := argos.ClientOptions(opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -106,110 +75,49 @@ func New(opts ...argos.ClientOption) (*Client, error) {
 	}
 
 	target := sel.Target
-	tr, fr, cd, err := sel.Assemble()
+	op, cd, err := newOpener(cfg, service, sel)
 	if err != nil {
-		return nil, fmt.Errorf("client: service %q: %w", service, err)
-	}
-	if err := checkFramingConfig(fr, cfg); err != nil {
-		_ = tr.Close() // Framing and Codec hold nothing to release (README §4.1)
-		return nil, fmt.Errorf("client: %w", err)
+		return nil, err
 	}
 
-	life, cancelLife := context.WithCancel(context.Background())
-	c := &Client{
-		cfg:            cfg,
-		service:        service,
-		target:         target,
-		tr:             tr,
-		framing:        fr,
-		codec:          cd,
-		perCall:        pc,
-		lifetime:       life,
-		cancelLifetime: cancelLife,
-		bufRemain:      cfg.MaxBufferedBytes,
-	}
-
-	codecName := ""
-	if n, ok := cd.(codec.Named); ok {
-		codecName = n.CodecName()
-	}
-	// dial closes over the Transport and the lifetime ctx, not over the
-	// Client: the Client holds the pool, so a DialFunc pointing back at the
-	// Client would make the pair reachable from the cleanup hook below and the
-	// hook would never run.
-	dial := func(ctx context.Context, endpoint string) (transport.Conn, error) {
-		select {
-		case <-life.Done():
-			return nil, ErrClosed
-		default:
-		}
-		return tr.Dial(ctx, transport.DialSpec{Endpoint: endpoint})
-	}
-	c.pool = sessionpool.New(fr, dial, sessionpool.Config{
-		MaxSessionsPerEndpoint: cfg.MaxSessionsPerEndpoint,
-		MaxIdleSessions:        cfg.MaxIdleSessions,
-		SessionIdleTimeout:     cfg.SessionIdleTimeout,
-		MaxSessionLifetime:     cfg.MaxSessionLifetime,
-		HandshakeTimeout:       cfg.HandshakeTimeout,
-		SessionSpec: framing.SessionSpec{
-			CodecName: codecName,
-			Config: framing.Config{
-				MaxMessageSize:  cfg.MaxMessageSize,
-				MaxFrameSize:    cfg.MaxFrameSize,
-				MaxMetadataSize: cfg.MaxMetadataSize,
-
-				MaxInboundMetadataSize: cfg.MaxInboundMetadataSize,
-				ReadAheadMessages:      cfg.ReadAheadMessages,
-				OpenTimeout:            cfg.OpenTimeout,
-				MaxDrainBytes:          cfg.MaxDrainBytes,
-			},
-		},
-	})
-
-	// Close is still the contract — it is the only way to release the sessions
-	// and the pool's reclaim goroutine at a point the program chooses. This
-	// hook is the safety net for a Client that is dropped instead: without it
-	// a forgotten Close leaked a goroutine and every socket it held for the
-	// life of the process.
-	c.leak = &clientLeakState{
-		cfg:    cfg,
-		target: target,
-		pool:   c.pool,
-		tr:     tr,
-		cancel: cancelLife,
-	}
-	c.cleanup = runtime.AddCleanup(c, func(st *clientLeakState) {
-		if st.closed.Load() {
-			return
-		}
-		argos.NotifyConnError(st.cfg, argos.ConnInfo{
-			Side:     argos.SideClient,
-			Endpoint: st.target,
-			Phase:    argos.ConnPhaseClose,
-		}, errors.New("client: Client leaked without Close"))
-		_ = st.release()
-	}, c.leak)
-	return c, nil
+	return &Client{
+		cfg:       cfg,
+		service:   service,
+		target:    target,
+		codec:     cd,
+		opener:    op,
+		perCall:   pc,
+		bufRemain: cfg.MaxBufferedBytes,
+	}, nil
 }
 
-// checkBindingConfig lets a Framing reject size limits its carrier cannot
-// deliver, before any dial. Framings that do not implement it opt out.
-func checkFramingConfig(fr framing.Framing, cfg *argos.Config) error {
-	checker, ok := fr.(interface {
-		CheckConfig(framing.Config) error
-	})
-	if !ok {
-		return nil
+func newOpener(cfg *argos.Options, service string, sel argos.ServiceOptions) (opener, codec.Codec, error) {
+	if sel.Transport == "" {
+		return nil, nil, fmt.Errorf("client: service %q: missing Transport", service)
 	}
-	return checker.CheckConfig(framing.Config{
-		MaxMessageSize:         cfg.MaxMessageSize,
-		MaxFrameSize:           cfg.MaxFrameSize,
-		MaxMetadataSize:        cfg.MaxMetadataSize,
-		MaxInboundMetadataSize: cfg.MaxInboundMetadataSize,
-		ReadAheadMessages:      cfg.ReadAheadMessages,
-		OpenTimeout:            cfg.OpenTimeout,
-		MaxDrainBytes:          cfg.MaxDrainBytes,
-	})
+	tr, err := sel.AssembleTransport()
+	if err != nil {
+		return nil, nil, fmt.Errorf("client: service %q: %w", service, err)
+	}
+	cd, err := sel.AssembleCodec()
+	if err != nil {
+		return nil, nil, fmt.Errorf("client: service %q: %w", service, err)
+	}
+	what := fmt.Sprintf("client: service %q", service)
+	if err := transportbind.CheckCodecName(what, tr.CodecName(), cd); err != nil {
+		return nil, nil, err
+	}
+	return transportOpener{tr: tr}, cd, nil
+}
+
+// transportOpener uses a caller-supplied transport instance. It only opens
+// calls: the axis owns its connections and its pool, and neither this type nor
+// the Client that holds it may release them, because the same instance may be
+// in use by other Clients and by a listen surface.
+type transportOpener struct{ tr transport.Transport }
+
+func (o transportOpener) OpenCall(ctx context.Context, endpoint string, m descriptor.Method, spec transport.CallSpec) (transport.Call, error) {
+	return o.tr.OpenCall(ctx, endpoint, m, spec)
 }
 
 // Open admits one call, runs the OpenFilter chain, and returns a CallStream.
@@ -227,13 +135,6 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 		return nil, fmt.Errorf("client: method service %q does not match client service %q", m.Service(), c.service)
 	}
 
-	c.mu.Lock()
-	closed := c.closed
-	c.mu.Unlock()
-	if closed {
-		return nil, ErrClosed
-	}
-
 	if err := c.admit(); err != nil {
 		return nil, err
 	}
@@ -249,18 +150,15 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 	// Admission still reserves perCall bytes at the Client regardless.
 	callBudget := budget.New(c.perCall)
 
+	// The caller's ctx is the whole lifetime of this call: there is no Client
+	// Close to cancel it from behind the caller's back, so a call ends when its
+	// own ctx does.
 	callCtx, callCancel := context.WithCancel(ctx)
-	// Bridge client lifetime (stand-in for conn cancel on Client.Close) into
-	// the call ctx. True per-session conn ctx lives in the pool; see 1.13b gaps.
-	stopBridge := context.AfterFunc(c.lifetime, callCancel)
 
 	callCtx = metadata.ContextWith(callCtx, md)
 	callCtx = budget.ContextWith(callCtx, callBudget)
 
-	var (
-		gotCall framing.Call
-		gotSess framing.ClientSession
-	)
+	var gotCall transport.Call
 
 	terminus := func(ctx context.Context, method descriptor.Method) (stream.Stream, error) {
 		if method.FullName() != m.FullName() {
@@ -274,27 +172,23 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 		if err != nil {
 			return nil, err
 		}
-		call, sess, err := c.pool.OpenCall(ctx, endpoint, method, framing.CallSpec{Metadata: md})
+		call, err := c.opener.OpenCall(ctx, endpoint, method, transport.CallSpec{Metadata: md})
 		if err != nil {
 			return nil, mapEstablishErr(err)
 		}
-		gotCall, gotSess = call, sess
+		gotCall = call
 		return stream.Wrap(call, c.codec), nil
 	}
 
 	// abandonOpen unwinds a call the filter chain opened but will not return.
-	// Dropping it here used to leak the framing.Call and pin the borrowed
-	// session forever: the pool only reclaims entries whose refcount is zero,
-	// and the entry kept counting against MaxSessionsPerEndpoint until the
-	// client could no longer open anything.
+	// Dropping it here used to leak the Call and pin the borrowed connection
+	// forever: the axis only reclaims a connection whose calls have all ended,
+	// and it kept counting against MaxSessionsPerEndpoint until the client
+	// could no longer open anything.
 	abandonOpen := func() {
-		stopBridge()
 		callCancel()
 		if gotCall != nil {
 			_ = gotCall.Close()
-		}
-		if gotSess != nil && c.pool != nil {
-			c.pool.Release(gotSess)
 		}
 	}
 
@@ -320,15 +214,13 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 		client:     c,
 		stream:     st,
 		call:       gotCall,
-		sess:       gotSess,
 		md:         md,
 		callCtx:    callCtx,
 		callCancel: callCancel,
-		stopBridge: stopBridge,
 		headersCh:  make(chan struct{}),
 		closedCh:   make(chan struct{}),
 	}
-	// Caller cancel / lifetime cancel must unblock framing Recv/Send.
+	// Caller cancel must unblock the axis Recv/Send.
 	gate := &afterCallGate{call: gotCall}
 	cs.afterCallGate = gate
 	cs.stopWatch = context.AfterFunc(callCtx, func() {
@@ -353,24 +245,17 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 		// Reclaim the admission reservation. Reporting alone left one slot of
 		// MaxConcurrentCalls and perCall bytes of MaxBufferedBytes held for the
 		// life of the Client, so a leak eventually produced ErrCallsExhausted
-		// with no call in flight. The pooled session is deliberately not
-		// released here: nobody called framing Call.Close, so the session's
-		// demux state is unknown and handing it to another call would be worse
-		// than losing it. stopWatch closes the call when the lifetime ctx ends.
+		// with no call in flight. The connection is deliberately not touched
+		// here: only Call.Close returns it to the axis, and nobody called it,
+		// so the call's wire state is unknown and handing the connection to
+		// another call would be worse than losing it. stopWatch closes the call
+		// when the lifetime ctx ends.
 		if st.client != nil {
 			st.client.releaseAdmit()
 		}
 	}, cs.leak)
 
 	admitted = false // CallStream.Close releases admission
-
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		abandonOpen()
-		return nil, ErrClosed
-	}
-	c.mu.Unlock()
 
 	return cs, nil
 }
@@ -396,24 +281,4 @@ func (c *Client) releaseAdmit() {
 		c.inFlight--
 	}
 	c.bufRemain += c.perCall
-}
-
-// Close rejects new Opens, cancels in-flight calls via the lifetime ctx,
-// and closes the session pool. Idempotent.
-func (c *Client) Close() error {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil
-	}
-	c.closed = true
-	c.mu.Unlock()
-
-	if c.leak == nil { // New always sets it; a zero Client has nothing to release.
-		c.cancelLifetime()
-		return nil
-	}
-	c.leak.closed.Store(true)
-	c.cleanup.Stop()
-	return c.leak.release()
 }

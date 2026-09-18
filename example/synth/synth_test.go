@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,48 +12,47 @@ import (
 	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/framing"
+	"github.com/argos-io/argos/internal/teststack"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/stream"
 	"github.com/argos-io/argos/transport"
-	"github.com/argos-io/argos/transport/tcp"
 
 	_ "github.com/argos-io/argos/resolver/ip"
 )
 
-type hasAddr interface {
-	Addr() net.Addr
-}
-
-// testConfig is the tuning shared by both halves of a synth test. The knobs
-// below no longer belong to one option list — session limits are client-only,
-// inbound-connection limits and ListenAddress are server-only — so the shared
-// tuning travels as a Config that each constructor names with argos.WithConfig.
-func testConfig() *argos.Config {
-	return &argos.Config{
-		MaxConcurrentCalls:     16,
-		MaxBufferedBytes:       16 * 16 * 1024 * 1024,
-		MaxIdleSessions:        4,
-		MaxSessionsPerEndpoint: 4,
-		HandshakeTimeout:       5 * time.Second,
-		MaxInboundConnIdle:     30 * time.Second,
-		MaxInboundConnAge:      30 * time.Minute,
-		ListenAddress:          "127.0.0.1:0",
+func testOptions() *argos.Options {
+	return &argos.Options{
+		MaxConcurrentCalls: 16,
+		MaxBufferedBytes:   16 * 16 * 1024 * 1024,
+		HandshakeTimeout:   5 * time.Second,
+		MaxInboundConnIdle: 30 * time.Second,
+		MaxInboundConnAge:  30 * time.Minute,
+		ListenAddress:      "127.0.0.1:0",
 	}
 }
 
-func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ...argos.ServerOption) (addr string, baseT argos.TransportFunc, baseF argos.FramingFunc, baseC argos.CodecFunc) {
+type synthHarness struct {
+	addr    string
+	srvAxis *Transport
+	cliAxis *Transport
+}
+
+// startSynthServer brings up a synth server and a client over one service.
+// Session and pool limits are fixed when an axis is constructed and no Options
+// holds a second copy, so there is nothing for a bare axis to disagree with:
+// the built-in pool baseline is the one these tests run against.
+func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ...argos.ServerOption) *synthHarness {
 	t.Helper()
-	baseT, baseF, baseC = TCPAxes()
-	var addrTr hasAddr
-	bound := make(chan struct{})
-	tc := testConfig()
-	srv := server.New(append(append([]argos.ServerOption{argos.WithConfig(tc)}, extra...),
-		argos.WithService(ServiceName,
-			synthServerService(baseT, baseF, baseC, &addrTr, bound),
-			argos.ServiceListenAddress(tc.ListenAddress),
+	cfg := testOptions()
+	srvAxis := New()
+	cliAxis := New()
+	srvTr := teststack.TransportName(t, srvAxis)
+	srv := server.New(append(append([]argos.ServerOption{argos.WithServerOptions(cfg)}, extra...),
+		argos.WithServerService(ServiceName,
+			argos.ServiceTransport(srvTr), argos.ServiceCodec("raw"),
+			argos.ServiceListenAddress(cfg.ListenAddress),
 		))...)
 
 	methods := []descriptor.Method{
@@ -66,92 +64,39 @@ func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ..
 	if err := srv.Register(svc, handlers); err != nil {
 		t.Fatal(err)
 	}
-	go func() { _ = srv.Run(context.Background()) }()
-	select {
-	case <-bound:
-	case <-time.After(3 * time.Second):
-		t.Fatal("protocol not assembled")
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if a := addrTr.Addr(); a != nil {
-			addr = a.String()
-			t.Cleanup(func() { _ = srv.Close() })
-			return addr, baseT, baseF, baseC
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("listener not ready")
-	return "", nil, nil, nil
+	// A Server stops when Run's ctx is canceled — there is no Server.Close —
+	// and the two axes belong to this helper, which constructed them.
+	runCtx, stopServer := context.WithCancel(context.Background())
+	go func() { _ = srv.Run(runCtx) }()
+	addr := waitTCPAddr(t, srvAxis)
+	t.Cleanup(func() {
+		stopServer()
+		_ = srvAxis.Close()
+		_ = cliAxis.Close()
+	})
+	return &synthHarness{addr: addr, srvAxis: srvAxis, cliAxis: cliAxis}
 }
 
-func countingClient(baseT argos.TransportFunc, baseF argos.FramingFunc, baseC argos.CodecFunc, dials *atomic.Int64) argos.ClientOption {
-	return argos.JoinClient(
-		argos.WithTransport(func() (transport.Transport, error) {
-			tr, err := baseT()
-			if err != nil {
-				return nil, err
-			}
-			return &countingTransport{Transport: tr, dials: dials}, nil
-		}),
-		argos.WithFraming(baseF),
-		argos.WithCodec(baseC),
-	)
-}
-
-func synthServerService(baseT argos.TransportFunc, baseF argos.FramingFunc, baseC argos.CodecFunc, addrOut *hasAddr, bound chan struct{}) argos.ServiceOption {
-	var tr transport.Transport
-	return argos.JoinService(
-		argos.ServiceTransport(func() (transport.Transport, error) {
-			if tr != nil {
-				return tr, nil
-			}
-			got, err := baseT()
-			if err != nil {
-				return nil, err
-			}
-			a, ok := got.(hasAddr)
-			if !ok {
-				return nil, errors.New("synth: tcp transport missing Addr()")
-			}
-			tr = got
-			*addrOut = a
-			select {
-			case <-bound:
-			default:
-				close(bound)
-			}
-			return tr, nil
-		}),
-		argos.ServiceFraming(baseF),
-		argos.ServiceCodec(baseC),
-	)
-}
-
-func newSynthClient(t *testing.T, addr string, preset argos.ClientOption, extra ...argos.ClientOption) *client.Client {
+func newSynthClient(t *testing.T, h *synthHarness, extra ...argos.ClientOption) *client.Client {
 	t.Helper()
+	cliTr := teststack.TransportName(t, h.cliAxis)
 	cli, err := client.New(append([]argos.ClientOption{
-		argos.WithConfig(testConfig()),
+		argos.WithClientOptions(testOptions()),
 		argos.WithServiceName(ServiceName),
-		preset,
-		argos.WithTarget("ip://" + addr),
+		argos.WithTransport(cliTr), argos.WithCodec("raw"),
+		argos.WithTarget("ip://" + h.addr),
 	}, extra...)...)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
-	t.Cleanup(func() { _ = cli.Close() })
 	return cli
 }
 
-func waitTCPAddr(t *testing.T, tr transport.Transport) string {
+func waitTCPAddr(t *testing.T, ax *Transport) string {
 	t.Helper()
-	a, ok := tr.(hasAddr)
-	if !ok {
-		t.Fatal("transport missing Addr()")
-	}
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if addr := a.Addr(); addr != nil {
+		if addr := ax.Addr(); addr != nil {
 			return addr.String()
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -160,34 +105,31 @@ func waitTCPAddr(t *testing.T, tr transport.Transport) string {
 	return ""
 }
 
-// TestGreetingReceivedBeforeCall proves NewServerSession sends the greeting
-// before AcceptCall, and NewClientSession observes it before OpenCall.
+// TestGreetingReceivedBeforeCall proves Handshake sends the greeting before
+// AcceptCall, and the client handshake observes it before OpenCall.
 func TestGreetingReceivedBeforeCall(t *testing.T) {
 	t.Parallel()
-	srvTr := tcp.New()
+	ax := New()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	defer srvTr.Close()
+	defer ax.Close()
 
 	go func() {
-		_ = srvTr.Serve(ctx, func(_ context.Context, c transport.Conn) {
+		_ = ax.Serve(ctx, func(_ context.Context, c transport.ServerConn) {
 			hsCtx, hsCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer hsCancel()
-			fr := New()
-			sess, err := fr.NewServerSession(hsCtx, c, framing.SessionSpec{})
-			if err != nil {
+			if err := c.Handshake(hsCtx); err != nil {
 				_ = c.Close()
 				return
 			}
-			defer sess.Close()
-			// Bounded: an unbounded AcceptCall turns a failure into a hang.
+			defer c.Close()
 			acceptCtx, acceptCancel := context.WithTimeout(ctx, 5*time.Second)
 			defer acceptCancel()
 			for {
 				md := metadata.New(metadata.RoleResponder, func(metadata.Metadata) error {
 					return status.Error(status.Unimplemented, "unused")
 				})
-				sc, err := sess.AcceptCall(acceptCtx, framing.CallSpec{Metadata: md})
+				sc, err := c.AcceptCall(acceptCtx, transport.CallSpec{Metadata: md})
 				if err != nil {
 					return
 				}
@@ -209,29 +151,32 @@ func TestGreetingReceivedBeforeCall(t *testing.T) {
 		}, transport.WithListenAddress("127.0.0.1:0"))
 	}()
 
-	addr := waitTCPAddr(t, srvTr)
-	cliTr := tcp.New()
-	defer cliTr.Close()
-	conn, err := cliTr.Dial(context.Background(), transport.DialSpec{Endpoint: addr})
+	addr := waitTCPAddr(t, ax)
+	conn, err := ax.tr.Dial(context.Background(), transport.DialSpec{Endpoint: addr})
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer conn.Close()
 
+	car, err := assertByteCarrier(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &ConnState{}
+	s := newSession(ax, conn, car, true, st)
 	hsCtx, hsCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer hsCancel()
-	cs, err := New().NewClientSession(hsCtx, conn, framing.SessionSpec{})
-	if err != nil {
-		t.Fatalf("NewClientSession: %v", err)
+	if err := s.clientHandshake(hsCtx); err != nil {
+		t.Fatalf("clientHandshake: %v", err)
 	}
-	defer cs.Close()
+	defer s.closeSession()
 
-	cliSess := cs.(*clientSession)
-	if g := cliSess.state.Greeting(); g != DefaultGreeting {
-		t.Fatalf("greeting = %q, want %q (must be read during NewClientSession, before OpenCall)", g, DefaultGreeting)
+	if g := st.Greeting(); g != DefaultGreeting {
+		t.Fatalf("greeting = %q, want %q (must be read during handshake, before OpenCall)", g, DefaultGreeting)
 	}
 
-	call, err := cs.OpenCall(context.Background(), descriptor.MustMethod(MethodPing, descriptor.Unary), framing.CallSpec{})
+	cc := &clientConn{session: s}
+	call, err := cc.OpenCall(context.Background(), descriptor.MustMethod(MethodPing, descriptor.Unary), transport.CallSpec{})
 	if err != nil {
 		t.Fatalf("OpenCall: %v", err)
 	}
@@ -268,7 +213,7 @@ func TestCustomMethodFieldRouting(t *testing.T) {
 			if err := st.Recv(&in); err != nil {
 				return err
 			}
-			_ = st.Recv(&in) // EOF
+			_ = st.Recv(&in)
 			return st.Send([]byte("ping-ok"))
 		},
 		"Echo": func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
@@ -284,8 +229,8 @@ func TestCustomMethodFieldRouting(t *testing.T) {
 			return status.Error(status.Unimplemented, "not in this test")
 		},
 	}
-	addr, _, _, _ := startSynthServer(t, handlers)
-	cli := newSynthClient(t, addr, ClientTCP())
+	h := startSynthServer(t, handlers)
+	cli := newSynthClient(t, h)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -338,12 +283,6 @@ func TestCustomMethodFieldRouting(t *testing.T) {
 	}
 }
 
-// TestSendHeadersUnimplemented pins the contract for a carrier with no
-// explicit headers channel: CallMetadata.SendHeaders reports the stable
-// status.Unimplemented, leaves outgoing headers unfrozen, and the call itself
-// still completes. The handler records what it saw and the test goroutine
-// asserts on it after the RPC finished — an assertion that only lives inside
-// the handler cannot tell a completed call from one that never ran.
 func TestSendHeadersUnimplemented(t *testing.T) {
 	t.Parallel()
 
@@ -352,8 +291,7 @@ func TestSendHeadersUnimplemented(t *testing.T) {
 		code   status.Code
 		err    error
 	}
-	var observed atomic.Value
-	observed.Store(sendHeadersObs{})
+	var observed sendHeadersObs
 
 	handlers := map[string]filter.Handler{
 		"Ping": func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
@@ -362,11 +300,10 @@ func TestSendHeadersUnimplemented(t *testing.T) {
 				return status.Error(status.Internal, "synth: missing CallMetadata in handler ctx")
 			}
 			err := md.SendHeaders()
-			observed.Store(sendHeadersObs{called: true, code: status.CodeOf(err), err: err})
+			observed = sendHeadersObs{called: true, code: status.CodeOf(err), err: err}
 			if err == nil {
 				return status.Error(status.Internal, "synth: SendHeaders succeeded on a carrier with no header channel")
 			}
-			// Unimplemented must not freeze outgoing headers.
 			if addErr := md.AddOutgoingHeader("x-synth", "1"); addErr != nil {
 				return status.Error(status.Internal, "synth: AddOutgoingHeader after unimplemented SendHeaders: "+addErr.Error())
 			}
@@ -382,8 +319,8 @@ func TestSendHeadersUnimplemented(t *testing.T) {
 		"Echo":      func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 		"Exclusive": func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 	}
-	addr, _, _, _ := startSynthServer(t, handlers)
-	cli := newSynthClient(t, addr, ClientTCP())
+	h := startSynthServer(t, handlers)
+	cli := newSynthClient(t, h)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cs, err := cli.Open(ctx, descriptor.MustMethod(MethodPing, descriptor.Unary))
@@ -410,25 +347,24 @@ func TestSendHeadersUnimplemented(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	obs, _ := observed.Load().(sendHeadersObs)
-	if !obs.called {
+	if !observed.called {
 		t.Fatal("handler never saw CallMetadata.SendHeaders (Ping was not routed to the handler)")
 	}
-	if obs.code != status.Unimplemented {
-		t.Fatalf("handler SendHeaders = %v (code %v), want Unimplemented", obs.err, obs.code)
+	if observed.code != status.Unimplemented {
+		t.Fatalf("handler SendHeaders = %v (code %v), want Unimplemented", observed.err, observed.code)
 	}
 }
 
 func TestConnStateFromContext(t *testing.T) {
 	t.Parallel()
-	var sawGreeting atomic.Value
+	var sawGreeting string
 	handlers := map[string]filter.Handler{
 		"Ping": func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
 			stt, ok := FromContext(ctx)
 			if !ok || stt == nil {
 				return status.Error(status.Internal, "synth: ConnState missing from handler ctx")
 			}
-			sawGreeting.Store(stt.Greeting())
+			sawGreeting = stt.Greeting()
 			var in []byte
 			_ = st.Recv(&in)
 			_ = st.Recv(&in)
@@ -437,8 +373,8 @@ func TestConnStateFromContext(t *testing.T) {
 		"Echo":      func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 		"Exclusive": func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 	}
-	addr, _, _, _ := startSynthServer(t, handlers)
-	cli := newSynthClient(t, addr, ClientTCP())
+	h := startSynthServer(t, handlers)
+	cli := newSynthClient(t, h)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cs, err := cli.Open(ctx, descriptor.MustMethod(MethodPing, descriptor.Unary))
@@ -454,9 +390,8 @@ func TestConnStateFromContext(t *testing.T) {
 	_ = cs.Recv(&out)
 	_ = cs.Close()
 
-	g, _ := sawGreeting.Load().(string)
-	if g != DefaultGreeting {
-		t.Fatalf("handler FromContext greeting = %q, want %q", g, DefaultGreeting)
+	if sawGreeting != DefaultGreeting {
+		t.Fatalf("handler FromContext greeting = %q, want %q", sawGreeting, DefaultGreeting)
 	}
 }
 
@@ -467,32 +402,32 @@ func TestConnStateContextWith(t *testing.T) {
 	hsCtx, cancel := context.WithTimeout(connCtx, 5*time.Second)
 	defer cancel()
 
-	srvTr := tcp.New()
-	defer srvTr.Close()
+	ax := New()
+	defer ax.Close()
 	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
 	go func() {
-		_ = srvTr.Serve(ctx, func(_ context.Context, c transport.Conn) {
-			_, err := New().NewServerSession(hsCtx, c, framing.SessionSpec{})
-			if err != nil {
+		_ = ax.Serve(ctx, func(_ context.Context, c transport.ServerConn) {
+			if err := c.Handshake(hsCtx); err != nil {
 				_ = c.Close()
 				return
 			}
-			// Session owns conn; leave it until test ends.
 			<-ctx.Done()
 			_ = c.Close()
 		}, transport.WithListenAddress("127.0.0.1:0"))
 	}()
-	addr := waitTCPAddr(t, srvTr)
-	cliTr := tcp.New()
-	defer cliTr.Close()
-	conn, err := cliTr.Dial(context.Background(), transport.DialSpec{Endpoint: addr})
+	addr := waitTCPAddr(t, ax)
+	conn, err := ax.tr.Dial(context.Background(), transport.DialSpec{Endpoint: addr})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	_, err = New().NewClientSession(hsCtx, conn, framing.SessionSpec{})
+	car, err := assertByteCarrier(conn)
 	if err != nil {
+		t.Fatal(err)
+	}
+	s := newSession(ax, conn, car, true, &ConnState{})
+	if err := s.clientHandshake(hsCtx); err != nil {
 		t.Fatalf("client handshake: %v", err)
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -516,7 +451,6 @@ func TestExclusiveKeepsConnectionOutOfPool(t *testing.T) {
 		},
 		"Echo": func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 		"Exclusive": func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
-			// Multiple exchanges on one bidi call / one connection.
 			for i := 0; i < 3; i++ {
 				var in []byte
 				if err := st.Recv(&in); err != nil {
@@ -534,16 +468,14 @@ func TestExclusiveKeepsConnectionOutOfPool(t *testing.T) {
 		},
 	}
 
-	var dials atomic.Int64
-	baseT, baseF, baseC := TCPAxes()
-	clientPreset := countingClient(baseT, baseF, baseC, &dials)
-
-	var addrTr hasAddr
-	bound := make(chan struct{})
-	tc := testConfig()
-	srv := server.New(argos.WithConfig(tc), argos.WithService(ServiceName,
-		synthServerService(baseT, baseF, baseC, &addrTr, bound),
-		argos.ServiceListenAddress(tc.ListenAddress),
+	cliAxis := New()
+	srvAxis := New()
+	srvTr := teststack.TransportName(t, srvAxis)
+	cliTr := teststack.TransportName(t, cliAxis)
+	cfg := testOptions()
+	srv := server.New(argos.WithServerOptions(cfg), argos.WithServerService(ServiceName,
+		argos.ServiceTransport(srvTr), argos.ServiceCodec("raw"),
+		argos.ServiceListenAddress(cfg.ListenAddress),
 	))
 	methods := []descriptor.Method{
 		descriptor.MustMethod(MethodPing, descriptor.Unary),
@@ -553,26 +485,32 @@ func TestExclusiveKeepsConnectionOutOfPool(t *testing.T) {
 	if err := srv.Register(descriptor.MustService(ServiceName, methods...), handlers); err != nil {
 		t.Fatal(err)
 	}
-	go func() { _ = srv.Run(context.Background()) }()
-	select {
-	case <-bound:
-	case <-time.After(3 * time.Second):
-		t.Fatal("bind timeout")
-	}
-	addr := waitTCPAddr(t, addrTr.(transport.Transport))
-	t.Cleanup(func() { _ = srv.Close() })
+	runCtx, stopServer := context.WithCancel(context.Background())
+	go func() { _ = srv.Run(runCtx) }()
+	addr := waitTCPAddr(t, srvAxis)
+	t.Cleanup(func() {
+		stopServer()
+		_ = srvAxis.Close()
+		_ = cliAxis.Close()
+	})
 
-	cli := newSynthClient(t, addr, clientPreset)
+	cli, err := client.New(
+		argos.WithClientOptions(testOptions()),
+		argos.WithServiceName(ServiceName),
+		argos.WithTransport(cliTr), argos.WithCodec("raw"),
+		argos.WithTarget("ip://"+addr),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// The client dials lazily, so the count is still zero here: every dial
-	// counted below belongs to the exclusive call.
-	if got := dials.Load(); got != 0 {
+	if got := cliAxis.Dials(); got != 0 {
 		t.Fatalf("dials before exclusive Open = %d, want 0", got)
 	}
 
-	// Exclusive bidi: three exchanges, then half-close.
 	cs, err := cli.Open(ctx, descriptor.MustMethod(MethodExclusive, descriptor.BidiStreaming))
 	if err != nil {
 		t.Fatalf("Open Exclusive: %v", err)
@@ -599,14 +537,11 @@ func TestExclusiveKeepsConnectionOutOfPool(t *testing.T) {
 	if err := cs.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	// One call, one connection: the exclusive call must not have opened a
-	// second connection on top of the one dial above.
-	dialsAfterExclusive := dials.Load()
+	dialsAfterExclusive := cliAxis.Dials()
 	if dialsAfterExclusive != 1 {
 		t.Fatalf("dials after exclusive call = %d, want exactly 1", dialsAfterExclusive)
 	}
 
-	// Next Ping must dial again — exclusive session is not returned to the pool.
 	cs, err = cli.Open(ctx, descriptor.MustMethod(MethodPing, descriptor.Unary))
 	if err != nil {
 		t.Fatalf("Open Ping: %v", err)
@@ -617,7 +552,7 @@ func TestExclusiveKeepsConnectionOutOfPool(t *testing.T) {
 	_ = cs.Recv(&out)
 	_ = cs.Close()
 
-	if got := dials.Load(); got <= dialsAfterExclusive {
+	if got := cliAxis.Dials(); got <= dialsAfterExclusive {
 		t.Fatalf("dials after Ping = %d, want > %d (exclusive must keep conn out of pool)", got, dialsAfterExclusive)
 	}
 }
@@ -634,9 +569,8 @@ func TestSequentialReuseAfterPing(t *testing.T) {
 		"Echo":      func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 		"Exclusive": func(context.Context, descriptor.Method, stream.Stream) error { return nil },
 	}
-	var dials atomic.Int64
-	addr, baseT, baseF, baseC := startSynthServer(t, handlers)
-	cli := newSynthClient(t, addr, countingClient(baseT, baseF, baseC, &dials))
+	h := startSynthServer(t, handlers)
+	cli := newSynthClient(t, h)
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
 		cs, err := cli.Open(ctx, descriptor.MustMethod(MethodPing, descriptor.Unary))
@@ -650,18 +584,7 @@ func TestSequentialReuseAfterPing(t *testing.T) {
 		_ = cs.Recv(&out)
 		_ = cs.Close()
 	}
-	if got := dials.Load(); got != 1 {
+	if got := h.cliAxis.Dials(); got != 1 {
 		t.Fatalf("dials = %d, want 1 (Sequential reuse)", got)
 	}
-}
-
-// countingTransport wraps Dial to count connection establishments.
-type countingTransport struct {
-	transport.Transport
-	dials *atomic.Int64
-}
-
-func (t *countingTransport) Dial(ctx context.Context, spec transport.DialSpec, opts ...transport.ClientOption) (transport.Conn, error) {
-	t.dials.Add(1)
-	return t.Transport.Dial(ctx, spec, opts...)
 }

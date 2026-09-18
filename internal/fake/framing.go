@@ -10,17 +10,17 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/descriptor"
-	"github.com/argos-io/argos/framing"
+	"github.com/argos-io/argos/internal/session"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport"
 )
 
 var (
-	_ framing.Framing       = (*Framing)(nil)
-	_ framing.ClientSession = (*ClientSession)(nil)
-	_ framing.ServerSession = (*ServerSession)(nil)
-	_ framing.Call          = (*Call)(nil)
-	_ framing.ServerCall    = (*ServerCall)(nil)
+	_ session.Framing       = (*Framing)(nil)
+	_ session.ClientSession = (*ClientSession)(nil)
+	_ session.ServerSession = (*ServerSession)(nil)
+	_ session.Call          = (*Call)(nil)
+	_ session.ServerCall    = (*ServerCall)(nil)
 )
 
 const (
@@ -96,19 +96,19 @@ func readFrame(r io.Reader, buf []byte) (typ byte, callID uint32, payload, rest 
 	return typ, callID, payload, rest, nil
 }
 
-// Framing is a configurable fake framing.Framing for in-process tests.
+// Framing is a configurable fake session.Framing for in-process tests.
 type Framing struct {
-	Model framing.ReuseModel
+	Model session.ReuseModel
 
 	// Handshake runs during New*Session; may block until ctx is done.
 	Handshake func(ctx context.Context, c transport.Conn) error
 
 	// OpenCallHook is invoked before allocating a call (1-based callSeq).
-	// Return framing.ErrSessionBusy / ErrSessionSpent to script pool fallbacks.
+	// Return session.ErrSessionBusy / ErrSessionSpent to script pool fallbacks.
 	OpenCallHook func(callSeq int) error
 
 	// AcceptCallHook is invoked after reading OPEN (1-based callSeq).
-	// Return framing.ErrCallRejected to script accept-loop continue paths.
+	// Return session.ErrCallRejected to script accept-loop continue paths.
 	AcceptCallHook func(callSeq int) error
 
 	// Hygiene, when true (default), marks Reusable false if Close without terminal.
@@ -119,15 +119,15 @@ type Framing struct {
 }
 
 // NewFraming returns a Framing with the given reuse model and Hygiene enabled.
-func NewFraming(model framing.ReuseModel) *Framing {
+func NewFraming(model session.ReuseModel) *Framing {
 	return &Framing{Model: model, Hygiene: true}
 }
 
-// Reuse implements framing.Framing.
-func (f *Framing) Reuse() framing.ReuseModel { return f.Model }
+// Reuse implements session.Framing.
+func (f *Framing) Reuse() session.ReuseModel { return f.Model }
 
-// NewClientSession implements framing.Framing.
-func (f *Framing) NewClientSession(ctx context.Context, c transport.Conn, _ framing.SessionSpec) (framing.ClientSession, error) {
+// NewClientSession implements session.Framing.
+func (f *Framing) NewClientSession(ctx context.Context, c transport.Conn, _ session.SessionSpec) (session.ClientSession, error) {
 	if err := f.handshake(ctx, c); err != nil {
 		return nil, err
 	}
@@ -138,7 +138,7 @@ func (f *Framing) NewClientSession(ctx context.Context, c transport.Conn, _ fram
 		id:       f.SessionID,
 	}
 	switch f.Model {
-	case framing.Concurrent:
+	case session.Concurrent:
 		sc, ok := c.(transport.StreamConn)
 		if !ok {
 			return nil, fmt.Errorf("fake: Concurrent client requires StreamConn")
@@ -159,8 +159,8 @@ func (f *Framing) NewClientSession(ctx context.Context, c transport.Conn, _ fram
 	return s, nil
 }
 
-// NewServerSession implements framing.Framing.
-func (f *Framing) NewServerSession(ctx context.Context, c transport.Conn, _ framing.SessionSpec) (framing.ServerSession, error) {
+// NewServerSession implements session.Framing.
+func (f *Framing) NewServerSession(ctx context.Context, c transport.Conn, _ session.SessionSpec) (session.ServerSession, error) {
 	if err := f.handshake(ctx, c); err != nil {
 		return nil, err
 	}
@@ -220,7 +220,7 @@ func (s *ClientSession) MarkBad() {
 	s.mu.Unlock()
 }
 
-// Reusable implements framing.ClientSession.
+// Reusable implements session.ClientSession.
 func (s *ClientSession) Reusable() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -233,7 +233,7 @@ func (s *ClientSession) Reusable() bool {
 	return true
 }
 
-// Close implements framing.ClientSession.
+// Close implements session.ClientSession.
 func (s *ClientSession) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -246,20 +246,20 @@ func (s *ClientSession) Close() error {
 	return s.conn.Close()
 }
 
-// OpenCall implements framing.ClientSession.
-func (s *ClientSession) OpenCall(ctx context.Context, m descriptor.Method, _ framing.CallSpec) (framing.Call, error) {
+// OpenCall implements session.ClientSession.
+func (s *ClientSession) OpenCall(ctx context.Context, m descriptor.Method, _ session.CallSpec) (session.Call, error) {
 	s.mu.Lock()
 	if s.closed || !s.reusable {
 		s.mu.Unlock()
 		return nil, errors.New("fake: session not reusable")
 	}
-	if s.framing.Model == framing.OneCallPerConn && s.spent {
+	if s.framing.Model == session.OneCallPerConn && s.spent {
 		s.mu.Unlock()
-		return nil, framing.ErrSessionSpent
+		return nil, session.ErrSessionSpent
 	}
-	if s.framing.Model != framing.Concurrent && s.inFlight > 0 {
+	if s.framing.Model != session.Concurrent && s.inFlight > 0 {
 		s.mu.Unlock()
-		return nil, framing.ErrSessionBusy
+		return nil, session.ErrSessionBusy
 	}
 	s.callSeq++
 	seq := s.callSeq
@@ -285,11 +285,11 @@ func (s *ClientSession) OpenCall(ctx context.Context, m descriptor.Method, _ fra
 	)
 
 	s.mu.Lock()
-	if s.framing.Model != framing.Concurrent && s.inFlight > 0 {
+	if s.framing.Model != session.Concurrent && s.inFlight > 0 {
 		s.mu.Unlock()
-		return nil, framing.ErrSessionBusy
+		return nil, session.ErrSessionBusy
 	}
-	if s.framing.Model == framing.OneCallPerConn {
+	if s.framing.Model == session.OneCallPerConn {
 		s.spent = true
 	}
 	s.inFlight++
@@ -371,7 +371,7 @@ type Call struct {
 
 	// done is closed by Close. recvLoop never closes inbox, so a Recv parked on
 	// it would otherwise stay blocked forever — Close must unblock in-flight
-	// Recv/Send (framing.Call).
+	// Recv/Send (session.Call).
 	done chan struct{}
 }
 
@@ -454,18 +454,18 @@ func (c *Call) readOne() (typ byte, id uint32, payload []byte, err error) {
 	return typ, id, payload, err
 }
 
-// Method implements framing.Call.
+// Method implements session.Call.
 func (c *Call) Method() string { return c.method }
 
-// Deadline implements framing.Call.
+// Deadline implements session.Call.
 func (c *Call) Deadline() (time.Time, bool) { return time.Time{}, false }
 
-// SendHeaders implements framing.Call.
+// SendHeaders implements session.Call.
 func (c *Call) SendHeaders() error {
 	return status.Error(status.Unimplemented, "fake: SendHeaders not supported")
 }
 
-// Recv implements framing.Call.
+// Recv implements session.Call.
 func (c *Call) Recv() (payload []byte, release func(), err error) {
 	// A buffered item wins over the close signal so an already-delivered
 	// message is never dropped; the close signal then guarantees Close unblocks
@@ -507,7 +507,7 @@ func (c *Call) handleRecvItem(it recvItem, ok bool) (payload []byte, release fun
 	return p, func() {}, nil
 }
 
-// Send implements framing.Call.
+// Send implements session.Call.
 func (c *Call) Send(payload []byte) error {
 	if err := writeFrame(c.carrier, frameData, c.callID, payload); err != nil {
 		c.markBad()
@@ -516,7 +516,7 @@ func (c *Call) Send(payload []byte) error {
 	return nil
 }
 
-// HalfClose implements framing.Call.
+// HalfClose implements session.Call.
 func (c *Call) HalfClose() error {
 	c.mu.Lock()
 	if c.half {
@@ -532,7 +532,7 @@ func (c *Call) HalfClose() error {
 	return nil
 }
 
-// Finish implements framing.Call (responder).
+// Finish implements session.Call (responder).
 func (c *Call) Finish(err error) error {
 	code := uint32(status.OK)
 	msg := ""
@@ -553,7 +553,7 @@ func (c *Call) Finish(err error) error {
 	return nil
 }
 
-// Close implements framing.Call. Does not close Conn/Carrier.
+// Close implements session.Call. Does not close Conn/Carrier.
 func (c *Call) Close() error {
 	c.mu.Lock()
 	if c.closed {
@@ -665,7 +665,7 @@ func (s *ServerSession) endFlight() {
 	s.mu.Unlock()
 }
 
-// Close implements framing.ServerSession.
+// Close implements session.ServerSession.
 func (s *ServerSession) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -677,20 +677,20 @@ func (s *ServerSession) Close() error {
 	return s.conn.Close()
 }
 
-// AcceptCall implements framing.ServerSession.
-func (s *ServerSession) AcceptCall(ctx context.Context, _ framing.CallSpec) (framing.ServerCall, error) {
+// AcceptCall implements session.ServerSession.
+func (s *ServerSession) AcceptCall(ctx context.Context, _ session.CallSpec) (session.ServerCall, error) {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
 		return nil, io.EOF
 	}
-	if s.framing.Model == framing.OneCallPerConn && s.spent {
+	if s.framing.Model == session.OneCallPerConn && s.spent {
 		s.mu.Unlock()
 		return nil, io.EOF
 	}
-	if s.framing.Model != framing.Concurrent && s.inFlight > 0 {
+	if s.framing.Model != session.Concurrent && s.inFlight > 0 {
 		s.mu.Unlock()
-		return nil, framing.ErrSessionBusy
+		return nil, session.ErrSessionBusy
 	}
 	s.mu.Unlock()
 
@@ -751,7 +751,7 @@ func (s *ServerSession) AcceptCall(ctx context.Context, _ framing.CallSpec) (fra
 	s.callSeq++
 	seq := s.callSeq
 	hook := s.framing.AcceptCallHook
-	if s.framing.Model == framing.OneCallPerConn {
+	if s.framing.Model == session.OneCallPerConn {
 		s.spent = true
 	}
 	s.inFlight++
@@ -795,7 +795,7 @@ type ServerCall struct {
 	*Call
 }
 
-// Accept implements framing.ServerCall.
+// Accept implements session.ServerCall.
 func (c *ServerCall) Accept(m descriptor.Method) error {
 	if m.FullName() != c.method {
 		return fmt.Errorf("fake: method mismatch: got %q want %q", m.FullName(), c.method)

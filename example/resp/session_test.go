@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/transport"
 	"github.com/argos-io/argos/transport/tcp"
 )
@@ -68,16 +67,16 @@ func tcpPair(t *testing.T) (transport.Conn, net.Conn) {
 
 // serverSessionWithPeerHandshake completes the connection-level HELLO handshake
 // with peer and returns the server session under test.
-func serverSessionWithPeerHandshake(t *testing.T, fr *Framing, conn transport.Conn, peer net.Conn) *serverSession {
+func serverSessionWithPeerHandshake(t *testing.T, ax *Transport, conn transport.Conn, peer net.Conn) *serverConn {
 	t.Helper()
 	if _, err := peer.Write(EncodeArray("HELLO", "2")); err != nil {
 		t.Fatalf("peer HELLO: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	sess, err := fr.NewServerSession(ctx, conn, framing.SessionSpec{})
-	if err != nil {
-		t.Fatalf("NewServerSession: %v", err)
+	sess := &serverConn{axis: ax, conn: conn}
+	if err := sess.Handshake(ctx); err != nil {
+		t.Fatalf("Handshake: %v", err)
 	}
 	t.Cleanup(func() { _ = sess.Close() })
 
@@ -89,7 +88,7 @@ func serverSessionWithPeerHandshake(t *testing.T, fr *Framing, conn transport.Co
 	if !strings.HasPrefix(string(buf[:n]), "+OK") {
 		t.Fatalf("peer HELLO reply = %q, want +OK", buf[:n])
 	}
-	return sess.(*serverSession)
+	return sess
 }
 
 // TestServerAcceptCallReturnsWhenPeerDiesMidFrame: readLoop exits on a carrier
@@ -117,7 +116,7 @@ func TestServerAcceptCallReturnsWhenPeerDiesMidFrame(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := ss.AcceptCall(context.Background(), framing.CallSpec{})
+		_, err := ss.AcceptCall(context.Background(), transport.CallSpec{})
 		done <- err
 	}()
 

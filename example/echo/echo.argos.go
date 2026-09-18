@@ -13,7 +13,6 @@ import (
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/metadata"
-	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/stream"
 )
@@ -38,9 +37,9 @@ type EchoService_WatchServer interface {
 	Send(*Event) error
 }
 
-// RegisterEchoService registers EchoService handlers on s. Routing uses descriptor Methods; no method switch is generated.
-func RegisterEchoService(s *server.Server, impl EchoServiceServer) error {
-	return s.Register(EchoServiceDesc, map[string]filter.Handler{
+// EchoServiceHandlers returns handler map for Register(EchoServiceDesc, ...).
+func EchoServiceHandlers(impl EchoServiceServer) map[string]filter.Handler {
+	return map[string]filter.Handler{
 		"Echo": func(ctx context.Context, _ descriptor.Method, st stream.Stream) error {
 			in := new(EchoRequest)
 			if err := st.Recv(in); err != nil {
@@ -59,7 +58,7 @@ func RegisterEchoService(s *server.Server, impl EchoServiceServer) error {
 			}
 			return impl.Watch(ctx, in, &echoServiceWatchServer{Stream: st})
 		},
-	})
+	}
 }
 
 type echoServiceWatchServer struct {
@@ -74,8 +73,6 @@ func (s *echoServiceWatchServer) Send(msg *Event) error {
 type EchoServiceClient interface {
 	Echo(context.Context, *EchoRequest) (*EchoResponse, error)
 	Watch(context.Context, *WatchRequest) (EchoService_WatchClient, error)
-	// Close closes the Client this stub built, releasing its session pool.
-	Close() error
 }
 
 // EchoService_WatchClient sends and receives messages for a Watch call.
@@ -88,7 +85,7 @@ type EchoService_WatchClient interface {
 
 // NewEchoServiceClient builds a Client for echo.v1.EchoService. The service
 // name is built in; an explicit argos.WithServiceName overrides it because
-// later options win. Close closes the Client this stub built.
+// later options win.
 func NewEchoServiceClient(opts ...argos.ClientOption) (EchoServiceClient, error) {
 	c, err := client.New(append([]argos.ClientOption{argos.WithServiceName("echo.v1.EchoService")}, opts...)...)
 	if err != nil {
@@ -99,10 +96,6 @@ func NewEchoServiceClient(opts ...argos.ClientOption) (EchoServiceClient, error)
 
 type echoServiceClient struct {
 	c *client.Client
-}
-
-func (c *echoServiceClient) Close() error {
-	return c.c.Close()
 }
 
 func (c *echoServiceClient) Echo(ctx context.Context, req *EchoRequest) (rsp *EchoResponse, err error) {

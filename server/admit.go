@@ -16,7 +16,7 @@ type admitGate struct {
 
 	mu       sync.Mutex
 	buffered int64
-	closed   bool // Server.Close: reject further admits
+	closed   bool // Server.Shutdown: reject further admits
 }
 
 func newAdmitGate(maxCalls int, maxBuffered, perCall int64) *admitGate {

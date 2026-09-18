@@ -39,8 +39,8 @@ func TestRecvKeepsBufferedResponseWhenLoopAlreadyFinished(t *testing.T) {
 			return nil
 		},
 	}
-	addr, _, _, _ := startSynthServer(t, handlers)
-	cli := newSynthClient(t, addr, ClientTCP())
+	h := startSynthServer(t, handlers)
+	cli := newSynthClient(t, h)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

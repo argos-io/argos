@@ -3,7 +3,6 @@ package resp
 import (
 	"context"
 	"net"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,12 +10,11 @@ import (
 	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
-	"github.com/argos-io/argos/framing"
+	"github.com/argos-io/argos/internal/teststack"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/stream"
-	"github.com/argos-io/argos/transport"
 
 	_ "github.com/argos-io/argos/resolver/ip"
 )
@@ -34,19 +32,21 @@ type hasAddr interface {
 	Addr() net.Addr
 }
 
-// baseConfig is the tuning both halves of a RESP test share. It is a Config
+// baseOptions is the tuning both halves of a RESP test share. It is an Options
 // rather than an option list because the knobs below are split across the two
-// sides now — MaxIdleSessions and MaxSessionsPerEndpoint are client-only,
-// ListenAddress is server-only — so no single option slice reaches both
-// constructors, while one Config named by argos.WithConfig does.
-func baseConfig() *argos.Config {
-	return &argos.Config{
-		MaxConcurrentCalls:     16,
-		MaxBufferedBytes:       16 * 16 * 1024 * 1024,
-		MaxIdleSessions:        8,
-		MaxSessionsPerEndpoint: 8,
-		HandshakeTimeout:       5 * time.Second,
-		ListenAddress:          testListenAddr,
+// sides now — HandshakeTimeout is read by the server, ListenAddress is
+// server-only — so no single option slice reaches both constructors, while one
+// Options named by argos.WithClientOptions / WithServerOptions does.
+//
+// What is not here is the pool: an axis fixes it at construction and holds the
+// only copy, so a test that wants particular pool numbers passes them to the
+// axis instead.
+func baseOptions() *argos.Options {
+	return &argos.Options{
+		MaxConcurrentCalls: 16,
+		MaxBufferedBytes:   16 * 16 * 1024 * 1024,
+		HandshakeTimeout:   5 * time.Second,
+		ListenAddress:      testListenAddr,
 	}
 }
 
@@ -63,22 +63,12 @@ func waitAddr(t *testing.T, a hasAddr) string {
 	return ""
 }
 
-// dialCounter wraps a Transport to count Dial calls (TCP connections).
-type dialCounter struct {
-	transport.Transport
-	dials *atomic.Int64
-}
-
-func (d *dialCounter) Dial(ctx context.Context, spec transport.DialSpec, opts ...transport.ClientOption) (transport.Conn, error) {
-	d.dials.Add(1)
-	return d.Transport.Dial(ctx, spec, opts...)
-}
-
+// The axis counts dials and HELLOs itself: it owns connectivity, so nothing
+// outside it can wrap the transport to observe reuse.
 type harness struct {
 	cli   *client.Client
-	fr    *Framing
+	ax    *Transport
 	store *Store
-	dials *atomic.Int64
 }
 
 func startRESP(t *testing.T, register func(*server.Server, *Store) error, frOpts ...Option) *harness {
@@ -87,75 +77,44 @@ func startRESP(t *testing.T, register func(*server.Server, *Store) error, frOpts
 		register = Register
 	}
 
+	cfg := baseOptions()
 	store := NewStore()
-	var clientFr *Framing
-	var dials atomic.Int64
-	var addrTr hasAddr
-	bound := make(chan struct{})
+	// A bare axis is what most of these tests want: the pool limits live on the
+	// axis alone, so there is nothing for Options to agree with. A test that
+	// cares about pool behaviour names the numbers in frOpts.
+	srvAxis := New(frOpts...)
+	cliAxis := New(frOpts...)
+	srvTr := teststack.TransportName(t, srvAxis)
+	cliTr := teststack.TransportName(t, cliAxis)
 
-	baseT, baseF, baseC := BindingAxes(frOpts...)
-
-	cfg := baseConfig()
-	srv := server.New(argos.WithConfig(cfg), argos.WithService(svcName,
-		argos.JoinService(
-			argos.ServiceTransport(func() (transport.Transport, error) {
-				tr, err := baseT()
-				if err != nil {
-					return nil, err
-				}
-				if a, ok := tr.(hasAddr); ok {
-					addrTr = a
-					select {
-					case <-bound:
-					default:
-						close(bound)
-					}
-				}
-				return tr, nil
-			}),
-			argos.ServiceFraming(baseF),
-			argos.ServiceCodec(baseC),
-		),
+	srv := server.New(argos.WithServerOptions(cfg), argos.WithServerService(svcName,
+		argos.ServiceTransport(srvTr), argos.ServiceCodec("raw"),
 		argos.ServiceListenAddress(testListenAddr),
 	))
 	if err := register(srv, store); err != nil {
 		t.Fatal(err)
 	}
-	go func() { _ = srv.Run(context.Background()) }()
-	select {
-	case <-bound:
-	case <-time.After(3 * time.Second):
-		t.Fatal("server protocol not assembled")
-	}
-	addr := waitAddr(t, addrTr)
-	t.Cleanup(func() { _ = srv.Close() })
+	// The ctx given to Run is the server's only stop signal: there is no
+	// Server.Close, so canceling it is how the test stops the server.
+	runCtx, stopServer := context.WithCancel(context.Background())
+	go func() { _ = srv.Run(runCtx) }()
+	addr := waitAddr(t, srvAxis)
+	t.Cleanup(stopServer)
 
 	cli, err := client.New(
-		argos.WithConfig(cfg),
+		argos.WithClientOptions(cfg),
 		argos.WithServiceName(svcName),
-		argos.JoinClient(
-			argos.WithTransport(func() (transport.Transport, error) {
-				tr, err := baseT()
-				if err != nil {
-					return nil, err
-				}
-				return &dialCounter{Transport: tr, dials: &dials}, nil
-			}),
-			argos.WithFraming(func() (framing.Framing, error) {
-				fr := New(frOpts...)
-				clientFr = fr
-				return fr, nil
-			}),
-			argos.WithCodec(baseC),
-		),
+		argos.WithTransport(cliTr), argos.WithCodec("raw"),
 		argos.WithTarget("ip://"+addr),
 	)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
-	t.Cleanup(func() { _ = cli.Close() })
+	// The Client does not close the axis: an axis may be shared, so whoever
+	// built it releases it. The Client itself owns nothing to release.
+	t.Cleanup(func() { _ = cliAxis.Close() })
 
-	return &harness{cli: cli, fr: clientFr, store: store, dials: &dials}
+	return &harness{cli: cli, ax: cliAxis, store: store}
 }
 
 func doCall(t *testing.T, h *harness, m descriptor.Method, args []byte) []byte {
@@ -194,10 +153,10 @@ func TestHELLOOncePerSession(t *testing.T) {
 		t.Fatalf("GET reply = %q, want bulk v1", out)
 	}
 
-	if got := h.dials.Load(); got != 1 {
+	if got := h.ax.Dials(); got != 1 {
 		t.Fatalf("TCP dials = %d, want 1 (Sequential reuse)", got)
 	}
-	if got := h.fr.ClientHellos(); got != 1 {
+	if got := h.ax.ClientHellos(); got != 1 {
 		t.Fatalf("HELLO count = %d, want 1 (once in NewClientSession)", got)
 	}
 }
@@ -215,8 +174,8 @@ func TestSetGetSameConnection(t *testing.T) {
 	if v, ok := h.store.Get(key); !ok || v != val {
 		t.Fatalf("store[%q]=%q ok=%v", key, v, ok)
 	}
-	if h.dials.Load() != 1 {
-		t.Fatalf("dials=%d, want 1", h.dials.Load())
+	if h.ax.Dials() != 1 {
+		t.Fatalf("dials=%d, want 1", h.ax.Dials())
 	}
 }
 
@@ -291,8 +250,8 @@ func TestSendHeadersUnimplementedNextCallWorks(t *testing.T) {
 	if string(out) != string(EncodeSimple("OK")) {
 		t.Fatalf("SET after SendHeaders path: %q", out)
 	}
-	if h.dials.Load() != 1 {
-		t.Fatalf("dials=%d, want 1", h.dials.Load())
+	if h.ax.Dials() != 1 {
+		t.Fatalf("dials=%d, want 1", h.ax.Dials())
 	}
 }
 
@@ -323,10 +282,10 @@ func TestSUBSCRIBEServerStreamingExclusive(t *testing.T) {
 		t.Fatalf("ack = %q, want %q", ack, wantAck)
 	}
 
-	if got := h.dials.Load(); got != 1 {
+	if got := h.ax.Dials(); got != 1 {
 		t.Fatalf("dials during SUBSCRIBE = %d, want 1", got)
 	}
-	if got := h.fr.ClientHellos(); got != 1 {
+	if got := h.ax.ClientHellos(); got != 1 {
 		t.Fatalf("HELLO during SUBSCRIBE = %d, want 1", got)
 	}
 
@@ -355,10 +314,10 @@ func TestSUBSCRIBEServerStreamingExclusive(t *testing.T) {
 	if string(out) != string(EncodeSimple("PONG")) {
 		t.Fatalf("PING after SUBSCRIBE: %q", out)
 	}
-	if got := h.fr.ClientHellos(); got != 2 {
+	if got := h.ax.ClientHellos(); got != 2 {
 		t.Fatalf("HELLO after SUBSCRIBE end = %d, want 2 (connection not pooled)", got)
 	}
-	if got := h.dials.Load(); got != 2 {
+	if got := h.ax.Dials(); got != 2 {
 		t.Fatalf("dials after SUBSCRIBE end = %d, want 2", got)
 	}
 }

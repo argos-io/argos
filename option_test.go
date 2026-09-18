@@ -3,6 +3,9 @@ package argos
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/argos-io/argos/codec"
@@ -13,16 +16,14 @@ import (
 
 func TestWithFilterAndOpenFilterStored(t *testing.T) {
 	t.Parallel()
-	// One per side: Filter is server-side, OpenFilter client-side, and the
-	// option types now say so.
-	server, err := ServerConfig(WithConfig(&Config{}), WithFilter(noopFilter()))
+	server, err := ServerOptions(WithServerOptions(&Options{}), WithFilter(noopFilter()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(server.Filters) != 1 || len(server.OpenFilters) != 0 {
 		t.Fatalf("server: Filters=%d OpenFilters=%d", len(server.Filters), len(server.OpenFilters))
 	}
-	client, err := ClientConfig(WithConfig(&Config{}), WithOpenFilter(noopOpenFilter()))
+	client, err := ClientOptions(WithClientOptions(&Options{}), WithOpenFilter(noopOpenFilter()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,39 +34,36 @@ func TestWithFilterAndOpenFilterStored(t *testing.T) {
 
 func TestWithServiceStoresProtocolAndTarget(t *testing.T) {
 	t.Parallel()
-	cfg, err := ClientConfig(
-		WithConfig(&Config{}),
-		WithService("echo.v1.EchoService",
+	cfg, err := ClientOptions(
+		WithClientOptions(&Options{}),
+		WithClientService("echo.v1.EchoService",
 			markerCodec(1),
 			ServiceTarget("ip://127.0.0.1:7001")),
-		WithService("other.Svc",
+		WithClientService("other.Svc",
 			ServiceTarget("ip://127.0.0.1:7002")),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	sc, ok := cfg.Services["echo.v1.EchoService"]
-	if !ok || sc.Codec == nil || sc.Target != "ip://127.0.0.1:7001" {
+	if !ok || sc.Codec != stubCodecName(1) || sc.Target != "ip://127.0.0.1:7001" {
 		t.Fatalf("echo service: %+v ok=%v", sc, ok)
 	}
 	other, ok := cfg.Services["other.Svc"]
-	if !ok || other.Target != "ip://127.0.0.1:7002" || other.Codec != nil {
+	if !ok || other.Target != "ip://127.0.0.1:7002" || other.Codec != "" {
 		t.Fatalf("other service: %+v ok=%v", other, ok)
 	}
 }
 
-// TestWithServiceMergesIntoExistingEntry: a generated stub may name the
-// protocol and the caller only the Target, so the second WithService must not
-// wipe the half the first one filled in.
 func TestWithServiceMergesIntoExistingEntry(t *testing.T) {
 	t.Parallel()
-	cfg, err := ClientConfig(
-		WithConfig(&Config{
-			Services: map[string]ServiceConfig{
-				"echo.v1.EchoService": {Codec: stubCodecFactory(1)},
+	cfg, err := ClientOptions(
+		WithClientOptions(&Options{
+			Services: map[string]ServiceOptions{
+				"echo.v1.EchoService": {Codec: stubCodecName(1)},
 			},
 		}),
-		WithService("echo.v1.EchoService", ServiceTarget("ip://127.0.0.1:7001")),
+		WithClientService("echo.v1.EchoService", ServiceTarget("ip://127.0.0.1:7001")),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -79,18 +77,16 @@ func TestWithServiceMergesIntoExistingEntry(t *testing.T) {
 	}
 }
 
-// TestWithConfigOrderIndependent: WithConfig names the base, it does not reset
-// the fields listed before it, so a caller can put it wherever it reads best.
-func TestWithConfigOrderIndependent(t *testing.T) {
+func TestWithClientOptionsOrderIndependent(t *testing.T) {
 	t.Parallel()
-	base := &Config{MaxFrameSize: 2 * miB, MaxSessionsPerEndpoint: 7}
+	base := &Options{MaxFrameSize: 2 * miB, MaxConcurrentCalls: 7}
 	const msgSize = 1 * miB
 
-	first, err := ClientConfig(WithConfig(base), WithMaxMessageSize(msgSize))
+	first, err := ClientOptions(WithClientOptions(base), WithMaxMessageSize(msgSize))
 	if err != nil {
 		t.Fatal(err)
 	}
-	last, err := ClientConfig(WithMaxMessageSize(msgSize), WithConfig(base))
+	last, err := ClientOptions(WithMaxMessageSize(msgSize), WithClientOptions(base))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,46 +95,44 @@ func TestWithConfigOrderIndependent(t *testing.T) {
 	if first.MaxMessageSize != msgSize {
 		t.Errorf("MaxMessageSize = %d, want %d", first.MaxMessageSize, msgSize)
 	}
-	if first.MaxFrameSize != 2*miB || first.MaxSessionsPerEndpoint != 7 {
-		t.Errorf("base not carried through: MaxFrameSize=%d MaxSessionsPerEndpoint=%d",
-			first.MaxFrameSize, first.MaxSessionsPerEndpoint)
+	if first.MaxFrameSize != 2*miB || first.MaxConcurrentCalls != 7 {
+		t.Errorf("base not carried through: MaxFrameSize=%d MaxConcurrentCalls=%d",
+			first.MaxFrameSize, first.MaxConcurrentCalls)
 	}
 
-	srvFirst, err := ServerConfig(WithConfig(base), WithMaxMessageSize(msgSize))
+	srvFirst, err := ServerOptions(WithServerOptions(base), WithServerMaxMessageSize(msgSize))
 	if err != nil {
 		t.Fatal(err)
 	}
-	srvLast, err := ServerConfig(WithMaxMessageSize(msgSize), WithConfig(base))
+	srvLast, err := ServerOptions(WithServerMaxMessageSize(msgSize), WithServerOptions(base))
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertSameFields(t, *srvFirst, *srvLast)
 }
 
-func TestWithConfigNilUsesProcessDefault(t *testing.T) {
+func TestWithClientOptionsNilUsesProcessDefault(t *testing.T) {
 	t.Parallel()
-	got, err := ClientConfig(WithConfig(nil))
+	got, err := ClientOptions(WithClientOptions(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := ClientConfig()
+	want, err := ClientOptions()
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertSameFields(t, *got, *want)
 }
 
-// TestConstructorsCopyTheBaseConfig replaces the old Config.With test: the base
-// must survive both an appending Option and a later write to the returned copy.
-func TestConstructorsCopyTheBaseConfig(t *testing.T) {
+func TestConstructorsCopyTheBaseOptions(t *testing.T) {
 	t.Parallel()
-	base := &Config{
-		MaxIdleSessions: 3,
-		Filters:         []filter.Filter{noopFilter()},
-		OpenFilters:     []filter.OpenFilter{noopOpenFilter()},
+	base := &Options{
+		MaxConcurrentCalls: 3,
+		Filters:            []filter.Filter{noopFilter()},
+		OpenFilters:        []filter.OpenFilter{noopOpenFilter()},
 	}
 
-	server, err := ServerConfig(WithConfig(base), WithFilter(noopFilter()))
+	server, err := ServerOptions(WithServerOptions(base), WithFilter(noopFilter()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,10 +140,10 @@ func TestConstructorsCopyTheBaseConfig(t *testing.T) {
 		t.Fatalf("server Filters = %d, want 2", len(server.Filters))
 	}
 
-	client, err := ClientConfig(
-		WithConfig(base),
+	client, err := ClientOptions(
+		WithClientOptions(base),
 		WithOpenFilter(noopOpenFilter()),
-		WithMaxIdleSessions(Disabled),
+		WithMaxConcurrentCalls(5),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -162,34 +156,34 @@ func TestConstructorsCopyTheBaseConfig(t *testing.T) {
 		t.Fatalf("an appending Option reached the base: filters=%d openFilters=%d",
 			len(base.Filters), len(base.OpenFilters))
 	}
-	if base.MaxIdleSessions != 3 {
-		t.Fatalf("base mutated: MaxIdleSessions=%d", base.MaxIdleSessions)
+	if base.MaxConcurrentCalls != 3 {
+		t.Fatalf("base mutated: MaxConcurrentCalls=%d", base.MaxConcurrentCalls)
 	}
-	if client.MaxIdleSessions != 0 {
-		t.Fatalf("client MaxIdleSessions = %d, want 0", client.MaxIdleSessions)
+	if client.MaxConcurrentCalls != 5 {
+		t.Fatalf("client MaxConcurrentCalls = %d, want the option's 5", client.MaxConcurrentCalls)
 	}
 
-	base.MaxIdleSessions = 99
-	if client.MaxIdleSessions != 0 || server.MaxIdleSessions != 3 {
-		t.Fatalf("returned Config still tracks the base: client=%d server=%d",
-			client.MaxIdleSessions, server.MaxIdleSessions)
+	base.MaxConcurrentCalls = 99
+	if client.MaxConcurrentCalls != 5 || server.MaxConcurrentCalls != 3 {
+		t.Fatalf("returned Options still tracks the base: client=%d server=%d",
+			client.MaxConcurrentCalls, server.MaxConcurrentCalls)
 	}
 }
 
 func TestNilOptionRejected(t *testing.T) {
 	t.Parallel()
-	if _, err := ClientConfig(WithMaxMessageSize(1*miB), nil); err == nil {
-		t.Error("ClientConfig(nil): want error")
+	if _, err := ClientOptions(WithMaxMessageSize(1*miB), nil); err == nil {
+		t.Error("ClientOptions(nil): want error")
 	}
-	if _, err := ServerConfig(WithMaxMessageSize(1*miB), nil); err == nil {
-		t.Error("ServerConfig(nil): want error")
+	if _, err := ServerOptions(WithServerMaxMessageSize(1*miB), nil); err == nil {
+		t.Error("ServerOptions(nil): want error")
 	}
 }
 
 func TestSelectedServiceLayering(t *testing.T) {
 	t.Parallel()
 	const service = "echo.v1.EchoService"
-	entry := WithService(service,
+	entry := WithClientService(service,
 		markerCodec(2),
 		ServiceTarget("ip://127.0.0.1:7001"))
 
@@ -211,7 +205,7 @@ func TestSelectedServiceLayering(t *testing.T) {
 			name: "call site beats the services entry",
 			opts: []ClientOption{
 				WithServiceName(service), entry,
-				WithCodec(stubCodecFactory(3)),
+				WithCodec(stubCodecName(3)),
 				WithTarget("ip://127.0.0.1:9999"),
 			},
 			wantName:   service,
@@ -219,8 +213,6 @@ func TestSelectedServiceLayering(t *testing.T) {
 			wantTarget: "ip://127.0.0.1:9999",
 		},
 		{
-			// No WithServiceName selects no entry at all, so the entry's Target
-			// stays out of the way instead of leaking into an unnamed Client.
 			name:     "no service name selects nothing",
 			opts:     []ClientOption{entry},
 			wantName: "",
@@ -229,7 +221,7 @@ func TestSelectedServiceLayering(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cfg, err := ClientConfig(tc.opts...)
+			cfg, err := ClientOptions(tc.opts...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -247,21 +239,17 @@ func TestSelectedServiceLayering(t *testing.T) {
 	}
 }
 
-// A Config that one Client already built from carries that Client's call-site
-// selection. Reusing it as another Client's base used to hand over the service
-// name, target and protocol too, so the second Client silently opened calls for
-// the first one's service and the missing-service-name guard never fired.
-func TestSelectionNotInheritedThroughWithConfig(t *testing.T) {
+func TestSelectionNotInheritedThroughWithClientOptions(t *testing.T) {
 	t.Parallel()
-	first, err := ClientConfig(
+	first, err := ClientOptions(
 		WithServiceName("echo.v1.EchoService"),
 		WithTarget("ip://127.0.0.1:7001"),
-		WithCodec(stubCodecFactory(1)),
+		WithCodec(stubCodecName(1)),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := ClientConfig(WithConfig(first))
+	second, err := ClientOptions(WithClientOptions(first))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,20 +260,11 @@ func TestSelectionNotInheritedThroughWithConfig(t *testing.T) {
 	if sel.Target != "" {
 		t.Errorf("Target = %q, want none inherited", sel.Target)
 	}
-	if sel.Codec != nil {
-		t.Errorf("protocol id %d inherited from the other Client's call site", protocolCodecID(t, sel))
+	if sel.Codec != "" {
+		t.Errorf("codec %q inherited from the other Client's call site", sel.Codec)
 	}
 }
 
-// TestOptionSideTyping is the runtime shadow of a compile-time guarantee:
-// ClientConfig takes ClientOption and WithListenAddress only implements
-// ServerOption, so
-//
-//	ClientConfig(WithListenAddress(":0"))
-//
-// does not build ("ServerOption does not implement ClientOption"). Side misuse
-// can no longer be tested by calling the constructor and expecting an error —
-// the asserts below check the interface satisfaction that replaces it.
 func TestOptionSideTyping(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -295,8 +274,10 @@ func TestOptionSideTyping(t *testing.T) {
 	}{
 		{"WithListenAddress", WithListenAddress(":0"), false, true},
 		{"WithServiceName", WithServiceName("echo.v1.EchoService"), true, false},
-		{"WithService", WithService("echo.v1.EchoService", ServiceTarget("ip://127.0.0.1:1")), true, true},
-		{"WithMaxMessageSize", WithMaxMessageSize(1 * miB), true, true},
+		{"WithClientService", WithClientService("echo.v1.EchoService", ServiceTarget("ip://127.0.0.1:1")), true, false},
+		{"WithServerService", WithServerService("echo.v1.EchoService", ServiceListenAddress(":0")), false, true},
+		{"WithMaxMessageSize", WithMaxMessageSize(1 * miB), true, false},
+		{"WithServerMaxMessageSize", WithServerMaxMessageSize(1 * miB), false, true},
 	} {
 		if _, ok := tc.opt.(ClientOption); ok != tc.client {
 			t.Errorf("%s satisfies ClientOption = %v, want %v", tc.name, ok, tc.client)
@@ -311,9 +292,9 @@ func TestCallErrorObserverUnknownPhaseAndRecover(t *testing.T) {
 	t.Parallel()
 	var got CallInfo
 	var gotErr error
-	cfg, err := ClientConfig(
-		WithConfig(&Config{}),
-		WithCallErrorObserver(func(info CallInfo, e error) {
+	cfg, err := ClientOptions(
+		WithClientOptions(&Options{}),
+		WithClientCallErrorObserver(func(info CallInfo, e error) {
 			got = info
 			gotErr = e
 		}))
@@ -329,7 +310,7 @@ func TestCallErrorObserverUnknownPhaseAndRecover(t *testing.T) {
 		Method:    "m",
 		Peer:      "peer",
 		SessionID: "s1",
-		Phase:     Phase(99), // unknown; must still invoke
+		Phase:     Phase(99),
 	}
 	want := errors.New("boom")
 	NotifyCallError(cfg, info, want)
@@ -337,24 +318,22 @@ func TestCallErrorObserverUnknownPhaseAndRecover(t *testing.T) {
 		t.Fatalf("got=%+v err=%v", got, gotErr)
 	}
 
-	panicCfg, err := ClientConfig(
-		WithConfig(&Config{}),
-		WithCallErrorObserver(func(CallInfo, error) {
+	panicCfg, err := ClientOptions(
+		WithClientOptions(&Options{}),
+		WithClientCallErrorObserver(func(CallInfo, error) {
 			panic("observer panic")
 		}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	NotifyCallError(panicCfg, CallInfo{Phase: PhaseOpen}, want) // must not panic
+	NotifyCallError(panicCfg, CallInfo{Phase: PhaseOpen}, want)
 
-	// "Nil clears the observer" reads two ways now that the field is public and
-	// a base Config can carry one: pin the clearing reading.
-	cleared, err := ClientConfig(WithConfig(cfg), WithCallErrorObserver(nil))
+	cleared, err := ClientOptions(WithClientOptions(cfg), WithClientCallErrorObserver(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cleared.CallErrorObserver != nil {
-		t.Error("WithCallErrorObserver(nil) must clear the inherited observer")
+		t.Error("WithClientCallErrorObserver(nil) must clear the inherited observer")
 	}
 }
 
@@ -362,9 +341,9 @@ func TestConnErrorObserverInvokeOnceAndRecover(t *testing.T) {
 	t.Parallel()
 	var n int
 	var got ConnInfo
-	cfg, err := ServerConfig(
-		WithConfig(&Config{}),
-		WithConnErrorObserver(func(info ConnInfo, e error) {
+	cfg, err := ServerOptions(
+		WithServerOptions(&Options{}),
+		WithServerConnErrorObserver(func(info ConnInfo, e error) {
 			n++
 			got = info
 		}))
@@ -387,15 +366,14 @@ func TestConnErrorObserverInvokeOnceAndRecover(t *testing.T) {
 		t.Fatalf("n=%d got=%+v", n, got)
 	}
 
-	// Unknown ConnPhase still notifies.
 	NotifyConnError(cfg, ConnInfo{Phase: ConnPhase(77)}, errors.New("x"))
 	if n != 2 {
 		t.Fatalf("unknown phase: n=%d", n)
 	}
 
-	panicCfg, err := ServerConfig(
-		WithConfig(&Config{}),
-		WithConnErrorObserver(func(ConnInfo, error) {
+	panicCfg, err := ServerOptions(
+		WithServerOptions(&Options{}),
+		WithServerConnErrorObserver(func(ConnInfo, error) {
 			panic("conn observer panic")
 		}))
 	if err != nil {
@@ -416,22 +394,39 @@ func noopOpenFilter() filter.OpenFilter {
 	}
 }
 
-func stubCodecFactory(id int) CodecFunc {
-	return func() (codec.Codec, error) { return &stubCodec{id: id}, nil }
+func stubCodecName(id int) string {
+	return fmt.Sprintf("argos-test-stub-codec-%d", id)
+}
+
+func init() {
+	for id := 1; id <= 3; id++ {
+		n := id
+		codec.Register(stubCodecName(n), func() (codec.Codec, error) {
+			return &stubCodec{id: n}, nil
+		})
+	}
 }
 
 func markerCodec(id int) ServiceOption {
-	return ServiceCodec(stubCodecFactory(id))
+	return ServiceCodec(stubCodecName(id))
 }
 
-func protocolCodecID(t *testing.T, sc ServiceConfig) int {
+func protocolCodecID(t *testing.T, sc ServiceOptions) int {
 	t.Helper()
-	if sc.Codec == nil {
+	if sc.Codec == "" {
 		return 0
 	}
-	cd, err := sc.Codec()
+	const prefix = "argos-test-stub-codec-"
+	if strings.HasPrefix(sc.Codec, prefix) {
+		id, err := strconv.Atoi(sc.Codec[len(prefix):])
+		if err != nil {
+			t.Fatalf("stub codec name: %v", err)
+		}
+		return id
+	}
+	cd, err := sc.AssembleCodec()
 	if err != nil {
-		t.Fatalf("Codec factory: %v", err)
+		t.Fatalf("AssembleCodec: %v", err)
 	}
 	c, ok := cd.(*stubCodec)
 	if !ok {

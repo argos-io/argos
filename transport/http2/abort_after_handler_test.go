@@ -15,11 +15,19 @@ import (
 // after Handler finished", which takes the whole process down.
 func TestServerConnCloseAfterHandlerFinishedDoesNotPanic(t *testing.T) {
 	connCh := make(chan transport.Conn, 1)
+	// The handler must not return until the client has finished writing.
+	// Without this the two race: the handler returns immediately, net/http
+	// completes the exchange and can retire the h2 writer before the Write
+	// below lands, which fails the test with "read/write on closed pipe" for a
+	// reason that has nothing to do with what it asserts.
+	release := make(chan struct{})
 
 	_, addr := startServer(t, func(_ context.Context, c transport.Conn) {
-		// Return without writing a response: net/http sends an implicit 200
-		// when the handler returns, after which the h2 writer is retired.
+		// Wait for the write, then return without writing a response: net/http
+		// sends an implicit 200 when the handler returns, after which the h2
+		// writer is retired.
 		connCh <- c
+		<-release
 	})
 
 	_, sc := dial(t, addr)
@@ -36,6 +44,7 @@ func TestServerConnCloseAfterHandlerFinishedDoesNotPanic(t *testing.T) {
 	if err := car.(transport.SendCloser).CloseSend(); err != nil {
 		t.Fatalf("CloseSend: %v", err)
 	}
+	close(release)
 
 	status, err := car.(transport.ResponseHeaderReader).ResponseStatus()
 	if err != nil {

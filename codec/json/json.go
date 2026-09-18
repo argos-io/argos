@@ -11,6 +11,10 @@ import (
 
 type codecImpl struct{}
 
+func init() {
+	codec.Register("json", func() (codec.Codec, error) { return New(), nil })
+}
+
 // New returns a Codec that uses protobuf's JSON mapping (protojson).
 func New() codec.Codec { return codecImpl{} }
 

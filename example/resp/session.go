@@ -12,25 +12,15 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/descriptor"
-	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport"
 )
 
-var (
-	_ framing.Framing       = (*Framing)(nil)
-	_ framing.ClientSession = (*clientSession)(nil)
-	_ framing.ServerSession = (*serverSession)(nil)
-	_ framing.Call          = (*call)(nil)
-	_ framing.ServerCall    = (*serverCall)(nil)
-)
-
-// session is the shared Sequential state for one TCP connection.
+// session is the shared sequential state for one TCP connection.
 type session struct {
-	framing *Framing
+	axis    *Transport
 	conn    transport.Conn
 	carrier transport.ByteStreamCarrier
-	cfg     framing.Config
 	client  bool
 
 	openTimeout time.Duration
@@ -66,16 +56,15 @@ func assertByteStream(c transport.Conn) (transport.ByteStreamCarrier, error) {
 	return bs, nil
 }
 
-func newSession(f *Framing, conn transport.Conn, car transport.ByteStreamCarrier, cfg framing.Config, client bool) *session {
+func newSession(a *Transport, conn transport.Conn, car transport.ByteStreamCarrier, client bool) *session {
 	s := &session{
-		framing:     f,
+		axis:        a,
 		conn:        conn,
 		carrier:     car,
-		cfg:         cfg,
 		client:      client,
-		openTimeout: applyOpenTimeout(f, cfg),
-		service:     f.service,
-		password:    f.password,
+		openTimeout: a.openTimeout,
+		service:     a.service,
+		password:    a.password,
 		reusable:    true,
 		readWait:    make(chan struct{}),
 		readerDone:  make(chan struct{}),
@@ -270,42 +259,14 @@ func (s *session) readReply(ctx context.Context) (Value, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Framing session constructors
+// Handshake
 // ---------------------------------------------------------------------------
-
-// NewClientSession implements framing.Framing.
-func (f *Framing) NewClientSession(ctx context.Context, c transport.Conn, spec framing.SessionSpec) (framing.ClientSession, error) {
-	car, err := assertByteStream(c)
-	if err != nil {
-		return nil, err
-	}
-	s := newSession(f, c, car, spec.Config, true)
-	if err := s.clientHandshake(ctx); err != nil {
-		_ = s.closeSession()
-		return nil, err
-	}
-	return &clientSession{session: s}, nil
-}
-
-// NewServerSession implements framing.Framing.
-func (f *Framing) NewServerSession(ctx context.Context, c transport.Conn, spec framing.SessionSpec) (framing.ServerSession, error) {
-	car, err := assertByteStream(c)
-	if err != nil {
-		return nil, err
-	}
-	s := newSession(f, c, car, spec.Config, false)
-	if err := s.serverHandshake(ctx); err != nil {
-		_ = s.closeSession()
-		return nil, err
-	}
-	return &serverSession{session: s}, nil
-}
 
 func (s *session) clientHandshake(ctx context.Context) error {
 	if err := s.writeCommand("HELLO", "2"); err != nil {
 		return err
 	}
-	s.framing.hellos.Add(1)
+	s.axis.hellos.Add(1)
 	if _, err := s.readReply(ctx); err != nil {
 		return fmt.Errorf("resp: HELLO: %w", err)
 	}
@@ -388,11 +349,11 @@ func commandFromValue(v Value) (cmd string, args []string, err error) {
 // Client session
 // ---------------------------------------------------------------------------
 
-type clientSession struct {
+type clientConn struct {
 	*session
 }
 
-func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, _ framing.CallSpec) (framing.Call, error) {
+func (s *clientConn) OpenCall(ctx context.Context, m descriptor.Method, _ transport.CallSpec) (transport.Call, error) {
 	if m.IsZero() {
 		return nil, status.Error(status.InvalidArgument, "resp: zero Method")
 	}
@@ -408,7 +369,7 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, _ fra
 	}
 	if s.busy {
 		s.mu.Unlock()
-		return nil, framing.ErrSessionBusy
+		return nil, transport.ErrConnBusy
 	}
 	s.busy = true
 	s.mu.Unlock()
@@ -423,17 +384,40 @@ func (s *clientSession) OpenCall(ctx context.Context, m descriptor.Method, _ fra
 	return c, nil
 }
 
-func (s *clientSession) Close() error { return s.closeSession() }
+func (s *clientConn) Close() error { return s.closeSession() }
 
 // ---------------------------------------------------------------------------
 // Server session
 // ---------------------------------------------------------------------------
 
-type serverSession struct {
+// serverConn is one inbound connection. It is handed to the composition layer
+// before handshake, so Handshake is where the session (and its read loop)
+// starts.
+type serverConn struct {
+	axis *Transport
+	conn transport.Conn
 	*session
 }
 
-func (s *serverSession) AcceptCall(ctx context.Context, _ framing.CallSpec) (framing.ServerCall, error) {
+// Handshake implements transport.ServerConn.
+func (s *serverConn) Handshake(ctx context.Context) error {
+	car, err := assertByteStream(s.conn)
+	if err != nil {
+		return err
+	}
+	sess := newSession(s.axis, s.conn, car, false)
+	if err := sess.serverHandshake(ctx); err != nil {
+		_ = sess.closeSession()
+		return err
+	}
+	s.session = sess
+	return nil
+}
+
+func (s *serverConn) AcceptCall(ctx context.Context, _ transport.CallSpec) (transport.ServerCall, error) {
+	if s.session == nil {
+		return nil, fmt.Errorf("resp: AcceptCall before Handshake")
+	}
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -441,7 +425,7 @@ func (s *serverSession) AcceptCall(ctx context.Context, _ framing.CallSpec) (fra
 	}
 	if s.busy {
 		s.mu.Unlock()
-		return nil, framing.ErrSessionBusy
+		return nil, transport.ErrConnBusy
 	}
 	s.busy = true
 	s.mu.Unlock()
@@ -487,9 +471,19 @@ func (s *serverSession) AcceptCall(ctx context.Context, _ framing.CallSpec) (fra
 	case "PING", "GET", "SET", "PUBLISH", "SUBSCRIBE":
 		// ok
 	default:
-		_ = s.writeRaw(EncodeError("ERR unknown command '" + cmd + "'"))
-		return nil, fmt.Errorf("%w: %w", framing.ErrCallRejected,
-			status.Error(status.Unimplemented, "resp: unknown command "+cmd))
+		// ErrCallRejected must come back with a ServerCall the composition
+		// layer can Finish: Finish is what writes the trailing status, and it
+		// already encodes a responder's error as a RESP error. Writing the
+		// error here and returning no call would leave Finish nothing to act
+		// on, so the rejection would reach the client with no wire status.
+		c := newCall(s.session, methodFullName(s.service, cmdUp), cmdUp, false, context.Background())
+		// The returned ServerCall owns the in-flight slot from here, exactly as
+		// on the success path: Close releases it via endCall. Leaving the defer
+		// to release it as well would free the slot while the composition layer
+		// still holds a live call.
+		releaseBusy = false
+		return &serverCall{call: c}, fmt.Errorf("%w: %w", transport.ErrCallRejected,
+			status.Error(status.Unimplemented, "unknown command '"+cmd+"'"))
 	}
 
 	full := methodFullName(s.service, cmdUp)
@@ -509,7 +503,13 @@ func (s *serverSession) AcceptCall(ctx context.Context, _ framing.CallSpec) (fra
 	return &serverCall{call: c}, nil
 }
 
-func (s *serverSession) Close() error { return s.closeSession() }
+func (s *serverConn) Close() error {
+	if s.session == nil {
+		// Handshake never got far enough to own the Conn.
+		return s.conn.Close()
+	}
+	return s.closeSession()
+}
 
 // endCall releases the in-flight slot. poison marks the session non-reusable
 // (carrier hygiene: closed without reading a terminal reply). Exclusive

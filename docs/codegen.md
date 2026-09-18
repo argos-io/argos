@@ -9,10 +9,10 @@ make test-generate   # stub --check vs example/echo
 
 - 描述符字段不导出；经 `MustMethod` / `MustService` 构造。
 - 标识带服务前缀：`EchoService_Echo`、`EchoServiceDesc`。
-- 服务端：`RegisterEchoService(srv, impl)`——不生成 `switch method`。
-- 客户端：`NewEchoServiceClient(opts...)` 内置 service name 并自持 `client.Client`；`WithServiceName` 可覆盖。
-- 单次 RPC 只关 CallStream，不关 Client。
-- RPC 不得取名 `Close`（与客户端 `Close() error` 冲突）。
+- 服务端：`EchoServiceHandlers(impl)` + `srv.Register(EchoServiceDesc, ...)`——不生成 `switch method`。
+- 客户端：`NewEchoServiceClient(opts...)` 内置 service name，`WithServiceName` 可覆盖；返回的只是 `client.Client` 的句柄，不暴露 `Close`。
+- 单次 RPC 只关本次 `CallStream`；生成的客户端没有 `Close`——连接与池由调用方持有的 Transport 轴释放。
+- RPC 可取名 `Close`：客户端接口只声明 RPC，`Close() error` 只出现在每次调用的 `<Service>_<Method>Client` 包装上，与服务名派生的客户端类型不同，不冲突。
 
 ## 消息模型（message model）
 

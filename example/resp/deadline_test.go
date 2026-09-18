@@ -10,7 +10,7 @@ import (
 
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/client"
-	"github.com/argos-io/argos/framing"
+	"github.com/argos-io/argos/internal/teststack"
 )
 
 // silentRESPPeer accepts connections, answers the HELLO handshake, and then
@@ -46,30 +46,22 @@ func silentRESPPeer(t *testing.T) string {
 
 // TestCallerDeadlineEndsBlockedRecv is the caller-visible half of the deadline
 // defect: a caller that supplied a deadline must not stay blocked on a peer that
-// answers HELLO and then goes silent. (Framing-level coverage of the same
+// answers HELLO and then goes silent. (Axis-level coverage of the same
 // defect: TestCallRecvBoundedByCallerDeadline.)
 func TestCallerDeadlineEndsBlockedRecv(t *testing.T) {
 	target := silentRESPPeer(t)
 
-	var clientFr *Framing
-	baseT, _, baseC := BindingAxes()
+	axis := New()
+	t.Cleanup(func() { _ = axis.Close() })
 	cli, err := client.New(
-		argos.WithConfig(baseConfig()),
+		argos.WithClientOptions(baseOptions()),
 		argos.WithServiceName(svcName),
-		argos.JoinClient(
-			argos.WithTransport(baseT),
-			argos.WithFraming(func() (framing.Framing, error) {
-				clientFr = New()
-				return clientFr, nil
-			}),
-			argos.WithCodec(baseC),
-		),
+		argos.WithTransport(teststack.TransportName(t, axis)), argos.WithCodec("raw"),
 		argos.WithTarget("ip://"+target),
 	)
 	if err != nil {
 		t.Fatalf("client.New: %v", err)
 	}
-	t.Cleanup(func() { _ = cli.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()

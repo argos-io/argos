@@ -63,10 +63,6 @@ func Generate(file ir.File) ([]byte, error) {
 	return formatted, nil
 }
 
-// closeMethod is the single method name the generated client interface keeps
-// for itself.
-const closeMethod = "Close"
-
 // stubImports is every package the generated body may reference, in the
 // conventional grouping (standard library first).
 var stubImports = []string{
@@ -151,20 +147,16 @@ func validateMethod(svc ir.Service, method ir.Method) error {
 	if strings.Contains(method.FullName, "/") {
 		return fmt.Errorf("codegen: method FullName %q must be protobuf dotted form", method.FullName)
 	}
-	// The client stub owns Close (it releases the Client the constructor built),
-	// so an RPC of that name would be declared twice with two signatures. Failing
-	// here beats emitting a file that does not compile.
-	if method.GoName == closeMethod {
-		return fmt.Errorf("codegen: service %s has RPC %s: it collides with the generated %sClient.%s; rename the RPC",
-			svc.FullName, method.GoName, svc.GoName, closeMethod)
-	}
+	// No method name is reserved: the client interface declares only the RPCs, so
+	// an RPC named Close no longer clashes with a client-level Close. The
+	// per-call Close lives on <Service>_<Method>Client, a different type.
 	return nil
 }
 
 func writeService(b *strings.Builder, svc ir.Service) {
 	writeDescriptors(b, svc)
 	writeServerInterface(b, svc)
-	writeRegister(b, svc)
+	writeHandlers(b, svc)
 	writeStreamServers(b, svc)
 	writeClientInterface(b, svc)
 	writeClient(b, svc)
@@ -275,21 +267,19 @@ func writeServerMethod(b *strings.Builder, svc ir.Service, method ir.Method) {
 	}
 }
 
-func writeRegister(b *strings.Builder, svc ir.Service) {
-	registerName := "Register" + svc.GoName
+func writeHandlers(b *strings.Builder, svc ir.Service) {
+	handlersName := svc.GoName + "Handlers"
 	b.WriteString("// ")
-	b.WriteString(registerName)
-	b.WriteString(" registers ")
-	b.WriteString(svc.GoName)
-	b.WriteString(" handlers on s. Routing uses descriptor Methods; no method switch is generated.\n")
-	b.WriteString("func ")
-	b.WriteString(registerName)
-	b.WriteString("(s *server.Server, impl ")
-	b.WriteString(svc.GoName)
-	b.WriteString("Server) error {\n")
-	b.WriteString("\treturn s.Register(")
+	b.WriteString(handlersName)
+	b.WriteString(" returns handler map for Register(")
 	b.WriteString(serviceDescIdent(svc.GoName))
-	b.WriteString(", map[string]filter.Handler{\n")
+	b.WriteString(", ...).\n")
+	b.WriteString("func ")
+	b.WriteString(handlersName)
+	b.WriteString("(impl ")
+	b.WriteString(svc.GoName)
+	b.WriteString("Server) map[string]filter.Handler {\n")
+	b.WriteString("\treturn map[string]filter.Handler{\n")
 	for _, method := range svc.Methods {
 		b.WriteString("\t\t")
 		b.WriteString(strconvQuote(method.GoName))
@@ -297,7 +287,7 @@ func writeRegister(b *strings.Builder, svc ir.Service) {
 		writeHandlerBody(b, svc, method)
 		b.WriteString("\t\t},\n")
 	}
-	b.WriteString("\t})\n")
+	b.WriteString("\t}\n")
 	b.WriteString("}\n\n")
 }
 
@@ -391,8 +381,6 @@ func writeClientInterface(b *strings.Builder, svc ir.Service) {
 	for _, method := range svc.Methods {
 		writeClientMethod(b, svc, method)
 	}
-	b.WriteString("\t// Close closes the Client this stub built, releasing its session pool.\n")
-	b.WriteString("\tClose() error\n")
 	b.WriteString("}\n\n")
 
 	for _, method := range svc.Methods {
@@ -468,7 +456,7 @@ func writeClient(b *strings.Builder, svc ir.Service) {
 	b.WriteString(svc.FullName)
 	b.WriteString(". The service\n")
 	b.WriteString("// name is built in; an explicit argos.WithServiceName overrides it because\n")
-	b.WriteString("// later options win. Close closes the Client this stub built.\n")
+	b.WriteString("// later options win.\n")
 	b.WriteString("func ")
 	b.WriteString(constructor)
 	b.WriteString("(opts ...argos.ClientOption) (")
@@ -489,12 +477,6 @@ func writeClient(b *strings.Builder, svc ir.Service) {
 	b.WriteString(clientType)
 	b.WriteString(" struct {\n")
 	b.WriteString("\tc *client.Client\n")
-	b.WriteString("}\n\n")
-
-	b.WriteString("func (c *")
-	b.WriteString(clientType)
-	b.WriteString(") Close() error {\n")
-	b.WriteString("\treturn c.c.Close()\n")
 	b.WriteString("}\n\n")
 
 	for _, method := range svc.Methods {

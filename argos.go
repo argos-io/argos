@@ -1,9 +1,9 @@
-// Package argos holds Config, the Option sets that layer over it, and the
+// Package argos holds Options, the Option sets that layer over it, and the
 // Transport / Framing / Codec factory types that make up a protocol.
 //
-// Config is a plain struct with a process-wide default behind DefaultConfig.
+// Options is a plain struct with a process-wide default behind DefaultOptions.
 // Per-service settings (Transport / Framing / Codec, client target, server
-// listen address) live in Config.Services. Application code registers
+// listen address) live in Options.Services. Application code registers
 // implementations with server.Register; generated stubs call client.New with
 // WithServiceName.
 //
