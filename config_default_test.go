@@ -1,9 +1,7 @@
-package argos_test
+package argos
 
 import (
 	"testing"
-
-	"github.com/argos-io/argos"
 )
 
 // The process default is shared mutable state, so nothing in this file calls
@@ -13,11 +11,11 @@ import (
 // would break that and make the whole package flaky.
 
 // tempDefault hands back the live process default with a restore registered.
-func tempDefault(t *testing.T) *argos.Config {
+func tempDefault(t *testing.T) *Config {
 	t.Helper()
-	old := *argos.DefaultConfig()
-	t.Cleanup(func() { *argos.DefaultConfig() = old })
-	return argos.DefaultConfig()
+	old := *DefaultConfig()
+	t.Cleanup(func() { *DefaultConfig() = old })
+	return DefaultConfig()
 }
 
 // TestDefaultConfigIsLive is the point of handing out a pointer: a program
@@ -27,14 +25,14 @@ func TestDefaultConfigIsLive(t *testing.T) {
 	const tuned = 2 * miB
 	tempDefault(t).MaxMessageSize = tuned
 
-	client, err := argos.ClientConfig()
+	client, err := ClientConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if client.MaxMessageSize != tuned {
 		t.Errorf("ClientConfig MaxMessageSize = %d, want %d", client.MaxMessageSize, tuned)
 	}
-	server, err := argos.ServerConfig()
+	server, err := ServerConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +41,7 @@ func TestDefaultConfigIsLive(t *testing.T) {
 	}
 
 	// Defaults is the built-in floor, not a view of the tuned default.
-	if got := argos.Defaults().MaxMessageSize; got == tuned {
+	if got := Defaults().MaxMessageSize; got == tuned {
 		t.Errorf("Defaults moved with the process default: MaxMessageSize = %d", got)
 	}
 }
@@ -55,7 +53,7 @@ func TestConstructorsCopyTheProcessDefault(t *testing.T) {
 	d := tempDefault(t)
 	d.MaxMessageSize = 2 * miB
 
-	cfg, err := argos.ClientConfig()
+	cfg, err := ClientConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,11 +68,11 @@ func TestConstructorsCopyTheProcessDefault(t *testing.T) {
 func TestWithConfigBeatsProcessDefault(t *testing.T) {
 	tempDefault(t).MaxMessageSize = 2 * miB
 
-	cfg, err := argos.ClientConfig(argos.WithConfig(&argos.Config{}))
+	cfg, err := ClientConfig(WithConfig(&Config{}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := argos.Defaults().MaxMessageSize; cfg.MaxMessageSize != want {
+	if want := Defaults().MaxMessageSize; cfg.MaxMessageSize != want {
 		t.Errorf("MaxMessageSize = %d, want the built-in %d", cfg.MaxMessageSize, want)
 	}
 }

@@ -1,4 +1,4 @@
-package ws_test
+package ws
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/transport"
-	"github.com/argos-io/argos/transport/ws"
 )
 
 // A peer that connects and never sends a request never reaches onConn, so the
@@ -15,7 +14,7 @@ import (
 // the HTTP-level timeouts bound it.
 func TestHalfOpenConnectionIsClosedByReadHeaderTimeout(t *testing.T) {
 	t.Parallel()
-	tr := ws.New()
+	tr := New()
 	t.Cleanup(func() { _ = tr.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())

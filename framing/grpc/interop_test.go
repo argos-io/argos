@@ -1,4 +1,4 @@
-package grpc_test
+package grpc
 
 import (
 	"context"
@@ -962,7 +962,7 @@ func TestInteropDetailsAdoptMessage(t *testing.T) {
 func TestInteropGzipSmoke(t *testing.T) {
 	compOpts := []composeOpt{
 		WithCompressor(gzip.New()),
-		WithSendCompressor(gzip.Name),
+		composeWithSendCompressor(gzip.Name),
 	}
 
 	t.Run("argos_server_grpcgo_client", func(t *testing.T) {

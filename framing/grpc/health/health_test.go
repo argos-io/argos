@@ -1,4 +1,4 @@
-package health_test
+package health
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"github.com/argos-io/argos/codec/protobuf"
 	"github.com/argos-io/argos/framing"
 	grpcframing "github.com/argos-io/argos/framing/grpc"
-	"github.com/argos-io/argos/framing/grpc/health"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/transport"
 	argoshttp2 "github.com/argos-io/argos/transport/http2"
@@ -21,7 +20,7 @@ import (
 	grpcstatus "google.golang.org/grpc/status"
 )
 
-func startArgosHealth(t *testing.T, hs *health.Server) string {
+func startArgosHealth(t *testing.T, hs *Server) string {
 	t.Helper()
 	cfg := &argos.Config{
 		MaxConcurrentCalls: 64,
@@ -31,7 +30,7 @@ func startArgosHealth(t *testing.T, hs *health.Server) string {
 	bound := make(chan struct{})
 	srv := server.New(
 		argos.WithConfig(cfg),
-		argos.WithService(health.ServiceName,
+		argos.WithService(ServiceName,
 			argos.ServiceTransport(func() (transport.Transport, error) {
 				tr := argoshttp2.New()
 				srvTr = tr.(*argoshttp2.Transport)
@@ -47,7 +46,7 @@ func startArgosHealth(t *testing.T, hs *health.Server) string {
 			argos.ServiceListenAddress(cfg.ListenAddress),
 		),
 	)
-	if err := health.Register(srv, hs); err != nil {
+	if err := Register(srv, hs); err != nil {
 		t.Fatal(err)
 	}
 	go func() { _ = srv.Run(context.Background()) }()
@@ -71,7 +70,7 @@ func startArgosHealth(t *testing.T, hs *health.Server) string {
 }
 
 func TestCheckInteropGRPCGoClient(t *testing.T) {
-	hs := health.NewServer()
+	hs := NewServer()
 	addr := startArgosHealth(t, hs)
 
 	cc, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -111,7 +110,7 @@ func TestCheckInteropGRPCGoClient(t *testing.T) {
 }
 
 func TestListInteropGRPCGoClient(t *testing.T) {
-	hs := health.NewServer()
+	hs := NewServer()
 	addr := startArgosHealth(t, hs)
 
 	cc, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))

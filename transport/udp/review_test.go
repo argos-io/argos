@@ -1,4 +1,4 @@
-package udp_test
+package udp
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/transport"
-	"github.com/argos-io/argos/transport/udp"
 )
 
 // The client read path reuses one MaxDatagramSize landing buffer instead of
@@ -19,7 +18,7 @@ func TestClientRecvDatagramPayloadSurvivesNextRead(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	clientTr := udp.New()
+	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })
 	conn, err := clientTr.Dial(ctx, transport.DialSpec{Endpoint: addr})
 	if err != nil {

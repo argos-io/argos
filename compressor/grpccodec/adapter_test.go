@@ -1,4 +1,4 @@
-package grpccodec_test
+package grpccodec
 
 import (
 	"bytes"
@@ -6,14 +6,13 @@ import (
 	"testing"
 
 	"github.com/argos-io/argos/compressor"
-	"github.com/argos-io/argos/compressor/grpccodec"
 	"github.com/argos-io/argos/compressor/gzip"
 	"google.golang.org/grpc/encoding"
 )
 
 func TestFromRoundTrip(t *testing.T) {
 	t.Parallel()
-	gc := grpccodec.From(gzip.New())
+	gc := From(gzip.New())
 	if gc == nil {
 		t.Fatal("From returned nil")
 	}
@@ -27,8 +26,8 @@ func TestToRoundTrip(t *testing.T) {
 	t.Parallel()
 	// Wrap our compressor through From then To to exercise the reverse path
 	// without depending on grpc-go's process-level gzip registry.
-	gc := grpccodec.From(gzip.New())
-	c := grpccodec.To(gc)
+	gc := From(gzip.New())
+	c := To(gc)
 	if c == nil {
 		t.Fatal("To returned nil")
 	}
@@ -40,7 +39,7 @@ func TestToRoundTrip(t *testing.T) {
 
 func TestToWrapsNonCloser(t *testing.T) {
 	t.Parallel()
-	c := grpccodec.To(readerOnlyCompressor{})
+	c := To(readerOnlyCompressor{})
 	rc, err := c.Decompress(bytes.NewReader([]byte("plain")))
 	if err != nil {
 		t.Fatalf("Decompress: %v", err)
@@ -59,7 +58,7 @@ func TestToWrapsNonCloser(t *testing.T) {
 
 func TestFromToIdentity(t *testing.T) {
 	t.Parallel()
-	c := grpccodec.To(grpccodec.From(compressor.Identity))
+	c := To(From(compressor.Identity))
 	roundTripArgos(t, c, []byte("passthrough"))
 }
 

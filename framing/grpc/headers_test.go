@@ -1,4 +1,4 @@
-package grpc_test
+package grpc
 
 import (
 	"encoding/base64"
@@ -11,14 +11,13 @@ import (
 
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
-	grpcframing "github.com/argos-io/argos/framing/grpc"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/transport"
 )
 
 func TestReuseConcurrent(t *testing.T) {
 	t.Parallel()
-	f, err := grpcframing.New()
+	f, err := New()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +29,7 @@ func TestReuseConcurrent(t *testing.T) {
 func TestMethodPath(t *testing.T) {
 	t.Parallel()
 	m := descriptor.MustMethod("echo.v1.EchoService.Echo", descriptor.Unary)
-	got := grpcframing.MethodPath(m)
+	got := MethodPath(m)
 	want := "/echo.v1.EchoService/Echo"
 	if got != want {
 		t.Fatalf("MethodPath = %q, want %q", got, want)
@@ -53,7 +52,7 @@ func TestParseMethodPath(t *testing.T) {
 		{"//Echo", "", "", true},
 		{"/svc/", "", "", true},
 	} {
-		svc, meth, err := grpcframing.ParseMethodPath(tc.path)
+		svc, meth, err := ParseMethodPath(tc.path)
 		if tc.wantErr {
 			if err == nil {
 				t.Errorf("ParseMethodPath(%q) err=nil, want error", tc.path)
@@ -81,21 +80,21 @@ func TestContentTypeAndSubtype(t *testing.T) {
 		{"proto", "application/grpc+proto"},
 		{"json", "application/grpc+json"},
 	} {
-		if got := grpcframing.ContentType(tc.subtype); got != tc.wantCT {
+		if got := ContentType(tc.subtype); got != tc.wantCT {
 			t.Errorf("ContentType(%q) = %q, want %q", tc.subtype, got, tc.wantCT)
 		}
-		gotSub, ok := grpcframing.ContentSubtype(tc.wantCT)
+		gotSub, ok := ContentSubtype(tc.wantCT)
 		if !ok || gotSub != tc.subtype {
 			t.Errorf("ContentSubtype(%q) = (%q,%v), want (%q,true)", tc.wantCT, gotSub, ok, tc.subtype)
 		}
 	}
-	if _, ok := grpcframing.ContentSubtype("application/json"); ok {
+	if _, ok := ContentSubtype("application/json"); ok {
 		t.Fatal("ContentSubtype(application/json) should be invalid")
 	}
-	if _, ok := grpcframing.ContentSubtype("application/grpc-web"); ok {
+	if _, ok := ContentSubtype("application/grpc-web"); ok {
 		t.Fatal("ContentSubtype(application/grpc-web) should be invalid")
 	}
-	sub, ok := grpcframing.ContentSubtype("application/grpc;charset=utf-8")
+	sub, ok := ContentSubtype("application/grpc;charset=utf-8")
 	if !ok || sub != "charset=utf-8" {
 		t.Fatalf("ContentSubtype(; form) = (%q,%v)", sub, ok)
 	}
@@ -113,7 +112,7 @@ func TestCodecContentSubtype(t *testing.T) {
 		{"JSON", "json"},
 		{"custom", "custom"},
 	} {
-		if got := grpcframing.CodecContentSubtype(tc.in); got != tc.want {
+		if got := CodecContentSubtype(tc.in); got != tc.want {
 			t.Errorf("CodecContentSubtype(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
@@ -141,15 +140,15 @@ func TestEncodeDecodeTimeout(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseDuration(%s): %v", tc.in, err)
 		}
-		got := grpcframing.EncodeTimeout(d)
+		got := EncodeTimeout(d)
 		if got != tc.out {
 			t.Errorf("EncodeTimeout(%s) = %q, want %q", tc.in, got, tc.out)
 		}
 	}
-	if got := grpcframing.EncodeTimeout(0); got != "0n" {
+	if got := EncodeTimeout(0); got != "0n" {
 		t.Errorf("EncodeTimeout(0) = %q, want 0n", got)
 	}
-	if got := grpcframing.EncodeTimeout(-time.Second); got != "0n" {
+	if got := EncodeTimeout(-time.Second); got != "0n" {
 		t.Errorf("EncodeTimeout(-1s) = %q, want 0n", got)
 	}
 
@@ -181,7 +180,7 @@ func TestEncodeDecodeTimeout(t *testing.T) {
 		{"00000000S", 0, false},
 		{"000000000S", 0, true},
 	} {
-		d, err := grpcframing.DecodeTimeout(tc.s)
+		d, err := DecodeTimeout(tc.s)
 		gotErr := err != nil
 		if d != tc.d || gotErr != tc.wantErr {
 			t.Errorf("DecodeTimeout(%q) = %d, err=%v; want %d, wantErr=%v",
@@ -199,7 +198,7 @@ func TestReservedHeaders(t *testing.T) {
 		"grpc-encoding", "grpc-message-type",
 	}
 	for _, h := range reserved {
-		if !grpcframing.IsReservedHeader(h) {
+		if !IsReservedHeader(h) {
 			t.Errorf("IsReservedHeader(%q) = false, want true", h)
 		}
 	}
@@ -212,14 +211,14 @@ func TestReservedHeaders(t *testing.T) {
 		"authorization",
 	}
 	for _, h := range notReserved {
-		if grpcframing.IsReservedHeader(h) {
+		if IsReservedHeader(h) {
 			t.Errorf("IsReservedHeader(%q) = true, want false", h)
 		}
 	}
-	if !grpcframing.IsWhitelistedHeader(":authority") || !grpcframing.IsWhitelistedHeader("user-agent") {
+	if !IsWhitelistedHeader(":authority") || !IsWhitelistedHeader("user-agent") {
 		t.Fatal("whitelist missing :authority or user-agent")
 	}
-	if grpcframing.IsWhitelistedHeader("content-type") {
+	if IsWhitelistedHeader("content-type") {
 		t.Fatal("content-type must not be whitelisted into user metadata")
 	}
 }
@@ -231,7 +230,7 @@ func TestBinaryMetadataEncodeDecode(t *testing.T) {
 		"x-trace-bin": {raw},
 		"x-ascii":     {"hello"},
 	}
-	hs := grpcframing.EncodeMetadata(md)
+	hs := EncodeMetadata(md)
 	byName := headersByName(hs)
 	if len(byName["x-trace-bin"]) != 1 {
 		t.Fatalf("x-trace-bin headers = %v", byName["x-trace-bin"])
@@ -249,7 +248,7 @@ func TestBinaryMetadataEncodeDecode(t *testing.T) {
 		t.Fatalf("x-ascii = %q", byName["x-ascii"])
 	}
 
-	got, err := grpcframing.DecodeMetadata(hs)
+	got, err := DecodeMetadata(hs)
 	if err != nil {
 		t.Fatalf("DecodeMetadata: %v", err)
 	}
@@ -259,7 +258,7 @@ func TestBinaryMetadataEncodeDecode(t *testing.T) {
 
 	// Padded accept on decode.
 	padded := base64.StdEncoding.EncodeToString([]byte(raw))
-	got2, err := grpcframing.DecodeMetadata(transport.Headers{
+	got2, err := DecodeMetadata(transport.Headers{
 		{Name: "x-trace-bin", Value: padded},
 	})
 	if err != nil {
@@ -272,7 +271,7 @@ func TestBinaryMetadataEncodeDecode(t *testing.T) {
 	// Comma-joined -bin values split on decode (§7.4).
 	a := base64.RawStdEncoding.EncodeToString([]byte("one"))
 	b := base64.RawStdEncoding.EncodeToString([]byte("two"))
-	got3, err := grpcframing.DecodeMetadata(transport.Headers{
+	got3, err := DecodeMetadata(transport.Headers{
 		{Name: "x-multi-bin", Value: a + "," + b},
 	})
 	if err != nil {
@@ -294,7 +293,7 @@ func TestReservedKeysStrippedOnEncode(t *testing.T) {
 		"x-ok":          {"1"},
 		"Authorization": {"Bearer t"}, // mixed case → lower
 	}
-	hs := grpcframing.EncodeMetadata(md)
+	hs := EncodeMetadata(md)
 	byName := headersByName(hs)
 	for _, bad := range []string{"content-type", "te", "grpc-timeout", "grpc-status", ":authority"} {
 		if _, ok := byName[bad]; ok {
@@ -319,7 +318,7 @@ func TestReservedKeysSkippedOnDecode(t *testing.T) {
 		{Name: ":authority", Value: "example.com"},
 		{Name: "x-custom", Value: "v"},
 	}
-	got, err := grpcframing.DecodeMetadata(hs)
+	got, err := DecodeMetadata(hs)
 	if err != nil {
 		t.Fatalf("DecodeMetadata: %v", err)
 	}
@@ -344,7 +343,7 @@ func TestBuildAndParseRequestPreface(t *testing.T) {
 	t.Parallel()
 	m := descriptor.MustMethod("echo.v1.EchoService.Echo", descriptor.Unary)
 	raw := string([]byte{0x01, 0x02, 0xff})
-	preface := grpcframing.BuildRequestPreface(grpcframing.PrefaceOptions{
+	preface := BuildRequestPreface(PrefaceOptions{
 		Method:            m,
 		Outgoing:          metadata.Metadata{"x-trace-bin": {raw}, "x-id": {"42"}, "content-type": {"evil"}},
 		Timeout:           1500 * time.Millisecond,
@@ -362,7 +361,7 @@ func TestBuildAndParseRequestPreface(t *testing.T) {
 	if byName["te"][0] != "trailers" {
 		t.Fatalf("te = %v", byName["te"])
 	}
-	if byName["grpc-timeout"][0] != grpcframing.EncodeTimeout(1500*time.Millisecond) {
+	if byName["grpc-timeout"][0] != EncodeTimeout(1500*time.Millisecond) {
 		t.Fatalf("grpc-timeout = %v", byName["grpc-timeout"])
 	}
 	if byName["grpc-encoding"][0] != "gzip" {
@@ -387,7 +386,7 @@ func TestBuildAndParseRequestPreface(t *testing.T) {
 		t.Fatalf("x-trace-bin wire decode = %q err=%v", decodedBin, err)
 	}
 
-	info, err := grpcframing.ParseRequestHeaders(preface.RequestTarget, preface.Headers)
+	info, err := ParseRequestHeaders(preface.RequestTarget, preface.Headers)
 	if err != nil {
 		t.Fatalf("ParseRequestHeaders: %v", err)
 	}
@@ -399,7 +398,7 @@ func TestBuildAndParseRequestPreface(t *testing.T) {
 	}
 	if !info.HasTimeout || info.Timeout != 1500*time.Millisecond {
 		// EncodeTimeout may round; compare via re-decode of wire value.
-		want, _ := grpcframing.DecodeTimeout(byName["grpc-timeout"][0])
+		want, _ := DecodeTimeout(byName["grpc-timeout"][0])
 		if info.Timeout != want {
 			t.Fatalf("Timeout = %v, want %v", info.Timeout, want)
 		}
@@ -426,24 +425,24 @@ func TestBuildAndParseRequestPreface(t *testing.T) {
 
 func TestParseRequestHeadersErrors(t *testing.T) {
 	t.Parallel()
-	_, err := grpcframing.ParseRequestHeaders("/svc/m", nil)
+	_, err := ParseRequestHeaders("/svc/m", nil)
 	if err == nil || !strings.Contains(err.Error(), "content-type") {
 		t.Fatalf("missing content-type err = %v", err)
 	}
-	_, err = grpcframing.ParseRequestHeaders("/svc/m", transport.Headers{
+	_, err = ParseRequestHeaders("/svc/m", transport.Headers{
 		{Name: "content-type", Value: "text/plain"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "content-type") {
 		t.Fatalf("bad content-type err = %v", err)
 	}
-	_, err = grpcframing.ParseRequestHeaders("/svc/m", transport.Headers{
+	_, err = ParseRequestHeaders("/svc/m", transport.Headers{
 		{Name: "content-type", Value: "application/grpc"},
 		{Name: "grpc-timeout", Value: "bogus"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "grpc-timeout") {
 		t.Fatalf("bad timeout err = %v", err)
 	}
-	_, err = grpcframing.ParseRequestHeaders("bad", transport.Headers{
+	_, err = ParseRequestHeaders("bad", transport.Headers{
 		{Name: "content-type", Value: "application/grpc"},
 	})
 	if err == nil {
@@ -458,7 +457,7 @@ func TestEncodeDecodeResponseHeadersAndTrailers(t *testing.T) {
 		"x-bin-bin":   {string([]byte{0xde, 0xad})},
 		"grpc-status": {"0"}, // stripped
 	}
-	hs := grpcframing.EncodeResponseHeaders("json", md, "")
+	hs := EncodeResponseHeaders("json", md, "")
 	byName := headersByName(hs)
 	if byName["content-type"][0] != "application/grpc+json" {
 		t.Fatalf("content-type = %v", byName["content-type"])
@@ -466,7 +465,7 @@ func TestEncodeDecodeResponseHeadersAndTrailers(t *testing.T) {
 	if _, ok := byName["grpc-status"]; ok {
 		t.Fatal("grpc-status must not appear in response headers from EncodeResponseHeaders")
 	}
-	gotMD, subtype, enc, err := grpcframing.DecodeResponseHeaders(hs)
+	gotMD, subtype, enc, err := DecodeResponseHeaders(hs)
 	if err != nil {
 		t.Fatalf("DecodeResponseHeaders: %v", err)
 	}
@@ -480,11 +479,11 @@ func TestEncodeDecodeResponseHeadersAndTrailers(t *testing.T) {
 		t.Fatalf("x-bin-bin = %q", gotMD["x-bin-bin"][0])
 	}
 
-	tr := grpcframing.EncodeTrailers(metadata.Metadata{
+	tr := EncodeTrailers(metadata.Metadata{
 		"x-trailer": {"t"},
 		"te":        {"nope"},
 	})
-	trMD, err := grpcframing.DecodeTrailers(tr)
+	trMD, err := DecodeTrailers(tr)
 	if err != nil {
 		t.Fatalf("DecodeTrailers: %v", err)
 	}
@@ -499,7 +498,7 @@ func TestEncodeDecodeResponseHeadersAndTrailers(t *testing.T) {
 func TestBuildRequestPrefaceOmitsZeroTimeout(t *testing.T) {
 	t.Parallel()
 	m := descriptor.MustMethod("svc.M", descriptor.Unary)
-	p := grpcframing.BuildRequestPreface(grpcframing.PrefaceOptions{
+	p := BuildRequestPreface(PrefaceOptions{
 		Method:         m,
 		ContentSubtype: "proto",
 	})

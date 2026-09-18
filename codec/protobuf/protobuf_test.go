@@ -1,18 +1,17 @@
-package protobuf_test
+package protobuf
 
 import (
 	"bytes"
 	"strings"
 	"testing"
 
-	"github.com/argos-io/argos/codec/protobuf"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 func TestRoundTrip(t *testing.T) {
 	t.Parallel()
-	c := protobuf.New()
+	c := New()
 	in := wrapperspb.String("hello")
 	b, err := c.Marshal(in)
 	if err != nil {
@@ -36,7 +35,7 @@ func TestRoundTrip(t *testing.T) {
 
 func TestRejectNonProto(t *testing.T) {
 	t.Parallel()
-	c := protobuf.New()
+	c := New()
 	if _, err := c.Marshal("not a proto"); err == nil {
 		t.Fatal("Marshal accepted non-proto")
 	}
@@ -47,7 +46,7 @@ func TestRejectNonProto(t *testing.T) {
 
 func TestUnmarshalBytesFieldDoesNotRetainAlias(t *testing.T) {
 	t.Parallel()
-	c := protobuf.New()
+	c := New()
 	in := wrapperspb.Bytes([]byte("secret-payload"))
 	b, err := c.Marshal(in)
 	if err != nil {
@@ -70,7 +69,7 @@ func TestUnmarshalBytesFieldDoesNotRetainAlias(t *testing.T) {
 
 func TestNamed(t *testing.T) {
 	t.Parallel()
-	c := protobuf.New()
+	c := New()
 	n, ok := c.(interface{ CodecName() string })
 	if !ok {
 		t.Fatal("codec does not implement Named")

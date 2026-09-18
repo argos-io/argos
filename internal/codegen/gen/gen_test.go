@@ -1,4 +1,4 @@
-package gen_test
+package gen
 
 import (
 	"os"
@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/argos-io/argos/internal/codegen/frontend/proto"
-	"github.com/argos-io/argos/internal/codegen/gen"
 )
 
 func TestGenerateMatchesHandwrittenEcho(t *testing.T) {
@@ -27,7 +26,7 @@ func TestGenerateMatchesHandwrittenEcho(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("files = %d, want 1", len(files))
 	}
-	got, err := gen.Generate(files[0])
+	got, err := Generate(files[0])
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}

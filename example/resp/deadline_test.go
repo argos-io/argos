@@ -1,4 +1,4 @@
-package resp_test
+package resp
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/client"
-	"github.com/argos-io/argos/example/resp"
 	"github.com/argos-io/argos/framing"
 )
 
@@ -52,15 +51,15 @@ func silentRESPPeer(t *testing.T) string {
 func TestCallerDeadlineEndsBlockedRecv(t *testing.T) {
 	target := silentRESPPeer(t)
 
-	var clientFr *resp.Framing
-	baseT, _, baseC := resp.BindingAxes()
+	var clientFr *Framing
+	baseT, _, baseC := BindingAxes()
 	cli, err := client.New(
 		argos.WithConfig(baseConfig()),
 		argos.WithServiceName(svcName),
 		argos.JoinClient(
 			argos.WithTransport(baseT),
 			argos.WithFraming(func() (framing.Framing, error) {
-				clientFr = resp.New()
+				clientFr = New()
 				return clientFr, nil
 			}),
 			argos.WithCodec(baseC),
@@ -74,13 +73,13 @@ func TestCallerDeadlineEndsBlockedRecv(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	st, err := cli.Open(ctx, resp.MethodPING)
+	st, err := cli.Open(ctx, MethodPING)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 
-	if err := st.Send(resp.EncodeArgs()); err != nil {
+	if err := st.Send(EncodeArgs()); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	_ = st.HalfClose()

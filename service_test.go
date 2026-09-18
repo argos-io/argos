@@ -1,11 +1,10 @@
-package argos_test
+package argos
 
 import (
 	"context"
 	"sync/atomic"
 	"testing"
 
-	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/transport"
@@ -27,13 +26,13 @@ func TestServiceConfigAssembleReturnsIndependentInstances(t *testing.T) {
 		return &stubCodec{id: id}, nil
 	}
 
-	cfg, err := argos.ClientConfig(
-		argos.WithConfig(&argos.Config{}),
-		argos.WithServiceName("echo.v1.EchoService"),
-		argos.JoinClient(
-			argos.WithTransport(transportFn),
-			argos.WithFraming(framingFn),
-			argos.WithCodec(codecFn),
+	cfg, err := ClientConfig(
+		WithConfig(&Config{}),
+		WithServiceName("echo.v1.EchoService"),
+		JoinClient(
+			WithTransport(transportFn),
+			WithFraming(framingFn),
+			WithCodec(codecFn),
 		),
 	)
 	if err != nil {
@@ -73,7 +72,7 @@ func TestServiceConfigAssembleReturnsIndependentInstances(t *testing.T) {
 func TestServiceConfigAssembleClosesPartialBuild(t *testing.T) {
 	t.Parallel()
 	tr := &stubTransport{id: 1}
-	sc := argos.ServiceConfig{
+	sc := ServiceConfig{
 		Transport: func() (transport.Transport, error) { return tr, nil },
 		Framing:   func() (framing.Framing, error) { return &stubFraming{id: 2}, nil },
 		Codec:     func() (codec.Codec, error) { return nil, nil },

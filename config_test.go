@@ -1,4 +1,4 @@
-package argos_test
+package argos
 
 import (
 	"go/ast"
@@ -11,21 +11,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/filter"
-)
-
-const (
-	kiB = 1024
-	miB = 1024 * kiB
-	giB = 1024 * miB
 )
 
 func TestDefaultsMatchSection61(t *testing.T) {
 	t.Parallel()
 	// Defaults, not DefaultConfig: §6.1 pins the built-in numbers, which a
 	// process-wide tune elsewhere must not be able to move.
-	d := argos.Defaults()
+	d := Defaults()
 
 	checks := []struct {
 		name string
@@ -75,23 +68,23 @@ func TestDefaultsMatchSection61(t *testing.T) {
 // Defaults value, on both sides.
 func TestZeroFieldsFilledWithDefaults(t *testing.T) {
 	t.Parallel()
-	want := argos.Defaults()
+	want := Defaults()
 	want.MaxMessageSize = 1 << 20
 
 	for _, tc := range []struct {
 		side  string
-		build func(*argos.Config) (*argos.Config, error)
+		build func(*Config) (*Config, error)
 	}{
-		{"client", func(c *argos.Config) (*argos.Config, error) {
-			return argos.ClientConfig(argos.WithConfig(c))
+		{"client", func(c *Config) (*Config, error) {
+			return ClientConfig(WithConfig(c))
 		}},
-		{"server", func(c *argos.Config) (*argos.Config, error) {
-			return argos.ServerConfig(argos.WithConfig(c))
+		{"server", func(c *Config) (*Config, error) {
+			return ServerConfig(WithConfig(c))
 		}},
 	} {
 		t.Run(tc.side, func(t *testing.T) {
 			t.Parallel()
-			got, err := tc.build(&argos.Config{MaxMessageSize: 1 << 20})
+			got, err := tc.build(&Config{MaxMessageSize: 1 << 20})
 			if err != nil {
 				t.Fatalf("%sConfig: %v", tc.side, err)
 			}
@@ -105,10 +98,10 @@ func TestZeroFieldsFilledWithDefaults(t *testing.T) {
 // not Disabled is still an error, and the error must name the field.
 func TestNegativeValuesRejected(t *testing.T) {
 	t.Parallel()
-	forEachNumericField(t, func(t *testing.T, name string, set func(*argos.Config, int64)) {
-		cfg := &argos.Config{}
+	forEachNumericField(t, func(t *testing.T, name string, set func(*Config, int64)) {
+		cfg := &Config{}
 		set(cfg, -5)
-		_, err := argos.ServerConfig(argos.WithConfig(cfg))
+		_, err := ServerConfig(WithConfig(cfg))
 		if err == nil {
 			t.Fatalf("%s = -5: want error", name)
 		}
@@ -123,13 +116,13 @@ func TestNegativeValuesRejected(t *testing.T) {
 // so the rest must say so instead of reporting a generic "must be > 0".
 func TestDisabledRejectedOnFieldsWithNoOffState(t *testing.T) {
 	t.Parallel()
-	forEachNumericField(t, func(t *testing.T, name string, set func(*argos.Config, int64)) {
+	forEachNumericField(t, func(t *testing.T, name string, set func(*Config, int64)) {
 		if offStateFields[name] {
 			return
 		}
-		cfg := &argos.Config{}
-		set(cfg, argos.Disabled)
-		_, err := argos.ServerConfig(argos.WithConfig(cfg))
+		cfg := &Config{}
+		set(cfg, Disabled)
+		_, err := ServerConfig(WithConfig(cfg))
 		if err == nil {
 			t.Fatalf("%s = Disabled: want error", name)
 		}
@@ -144,11 +137,11 @@ func TestDisabledRejectedOnFieldsWithNoOffState(t *testing.T) {
 // reading when 0 became "use the default".
 func TestDisabledTurnsOffOptionalClientLimits(t *testing.T) {
 	t.Parallel()
-	cfg, err := argos.ClientConfig(
-		argos.WithConfig(&argos.Config{}),
-		argos.WithMaxIdleSessions(argos.Disabled),
-		argos.WithSessionIdleTimeout(argos.Disabled),
-		argos.WithMaxSessionLifetime(argos.Disabled),
+	cfg, err := ClientConfig(
+		WithConfig(&Config{}),
+		WithMaxIdleSessions(Disabled),
+		WithSessionIdleTimeout(Disabled),
+		WithMaxSessionLifetime(Disabled),
 	)
 	if err != nil {
 		t.Fatalf("ClientConfig with Disabled: %v", err)
@@ -158,16 +151,16 @@ func TestDisabledTurnsOffOptionalClientLimits(t *testing.T) {
 			cfg.MaxIdleSessions, cfg.SessionIdleTimeout, cfg.MaxSessionLifetime)
 	}
 
-	zeroed, err := argos.ClientConfig(
-		argos.WithConfig(&argos.Config{}),
-		argos.WithMaxIdleSessions(0),
-		argos.WithSessionIdleTimeout(0),
-		argos.WithMaxSessionLifetime(0),
+	zeroed, err := ClientConfig(
+		WithConfig(&Config{}),
+		WithMaxIdleSessions(0),
+		WithSessionIdleTimeout(0),
+		WithMaxSessionLifetime(0),
 	)
 	if err != nil {
 		t.Fatalf("ClientConfig with zeros: %v", err)
 	}
-	d := argos.Defaults()
+	d := Defaults()
 	if zeroed.MaxIdleSessions != d.MaxIdleSessions ||
 		zeroed.SessionIdleTimeout != d.SessionIdleTimeout ||
 		zeroed.MaxSessionLifetime != d.MaxSessionLifetime {
@@ -180,14 +173,14 @@ func TestDisabledTurnsOffOptionalClientLimits(t *testing.T) {
 // server-only fields share one Config. Options are typed per side now, so the
 // mix can only be written as a Config literal — and neither constructor
 // rejects it.
-func sideOwnershipDoc(t *testing.T) *argos.Config {
+func sideOwnershipDoc(t *testing.T) *Config {
 	t.Helper()
-	return &argos.Config{
+	return &Config{
 		// client-only
 		MaxSessionsPerEndpoint: 16,
-		MaxIdleSessions:        argos.Disabled,
-		SessionIdleTimeout:     argos.Disabled,
-		MaxSessionLifetime:     argos.Disabled,
+		MaxIdleSessions:        Disabled,
+		SessionIdleTimeout:     Disabled,
+		MaxSessionLifetime:     Disabled,
 		// server-only
 		MaxInboundConns:    32,
 		MaxInboundConnIdle: time.Minute,
@@ -201,17 +194,17 @@ func TestSideOwnershipCoexistsOnOneConfig(t *testing.T) {
 	t.Parallel()
 	mixed := sideOwnershipDoc(t)
 
-	client, err := argos.ClientConfig(argos.WithConfig(mixed))
+	client, err := ClientConfig(WithConfig(mixed))
 	if err != nil {
 		t.Fatalf("ClientConfig must accept a mixed Config: %v", err)
 	}
-	server, err := argos.ServerConfig(argos.WithConfig(mixed))
+	server, err := ServerConfig(WithConfig(mixed))
 	if err != nil {
 		t.Fatalf("ServerConfig must accept a mixed Config: %v", err)
 	}
 	for _, c := range []struct {
 		side string
-		cfg  *argos.Config
+		cfg  *Config
 	}{{"client", client}, {"server", server}} {
 		if c.cfg.MaxSessionsPerEndpoint != 16 {
 			t.Errorf("%s: MaxSessionsPerEndpoint = %d", c.side, c.cfg.MaxSessionsPerEndpoint)
@@ -227,10 +220,10 @@ func TestSideOwnershipCoexistsOnOneConfig(t *testing.T) {
 
 func TestBudgetProductConflict(t *testing.T) {
 	t.Parallel()
-	_, err := argos.ClientConfig(
-		argos.WithConfig(&argos.Config{}),
-		argos.WithMaxConcurrentCalls(64),
-		argos.WithMaxBufferedBytes(1<<20), // 1 MiB, far below 64×16MiB
+	_, err := ClientConfig(
+		WithConfig(&Config{}),
+		WithMaxConcurrentCalls(64),
+		WithMaxBufferedBytes(1<<20), // 1 MiB, far below 64×16MiB
 	)
 	if err == nil {
 		t.Fatal("want budget product conflict error")
@@ -250,11 +243,11 @@ func TestBudgetProductConflict(t *testing.T) {
 
 func TestClientConfigReturnsIndependentSnapshots(t *testing.T) {
 	t.Parallel()
-	cfg1, err := argos.ClientConfig(argos.WithConfig(&argos.Config{}), argos.WithMaxMessageSize(1<<20))
+	cfg1, err := ClientConfig(WithConfig(&Config{}), WithMaxMessageSize(1<<20))
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg2, err := argos.ClientConfig(argos.WithConfig(&argos.Config{}), argos.WithMaxMessageSize(2<<20))
+	cfg2, err := ClientConfig(WithConfig(&Config{}), WithMaxMessageSize(2<<20))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,10 +267,10 @@ func TestClientConfigReturnsIndependentSnapshots(t *testing.T) {
 // without it, WithFilter on a derived Config would reach the shared base.
 func TestCloneDoesNotAliasSliceOrMapFields(t *testing.T) {
 	t.Parallel()
-	base := &argos.Config{
+	base := &Config{
 		Filters:     []filter.Filter{noopFilter()},
 		OpenFilters: []filter.OpenFilter{noopOpenFilter()},
-		Services:    map[string]argos.ServiceConfig{"echo.v1.Echo": {Target: "ip://127.0.0.1:7001"}},
+		Services:    map[string]ServiceConfig{"echo.v1.Echo": {Target: "ip://127.0.0.1:7001"}},
 	}
 
 	// Overwrite rather than append: appending to the copy cannot change the
@@ -286,7 +279,7 @@ func TestCloneDoesNotAliasSliceOrMapFields(t *testing.T) {
 	clone := base.Clone()
 	clone.Filters[0] = nil
 	clone.OpenFilters[0] = nil
-	clone.Services["other.Svc"] = argos.ServiceConfig{Target: "ip://127.0.0.1:7002"}
+	clone.Services["other.Svc"] = ServiceConfig{Target: "ip://127.0.0.1:7002"}
 
 	if base.Filters[0] == nil || base.OpenFilters[0] == nil {
 		t.Error("clone shares the base's slice backing array")
@@ -296,23 +289,23 @@ func TestCloneDoesNotAliasSliceOrMapFields(t *testing.T) {
 	}
 
 	// A nil receiver is the documented shorthand for "start from the defaults".
-	var nilCfg *argos.Config
+	var nilCfg *Config
 	got := nilCfg.Clone()
 	if got == nil {
 		t.Fatal("(*Config)(nil).Clone() = nil, want Defaults()")
 	}
-	assertSameFields(t, *got, argos.Defaults())
+	assertSameFields(t, *got, Defaults())
 }
 
 func TestPerCallRejectsNilConfigAndZeroReadAhead(t *testing.T) {
 	t.Parallel()
-	var nilCfg *argos.Config
+	var nilCfg *Config
 	if _, err := nilCfg.PerCall(); err == nil {
 		t.Error("PerCall on nil Config: want error")
 	}
 	// A raw literal is not run through ClientConfig, so PerCall has to defend
 	// itself against the unfilled zero rather than trust fillDefaults.
-	raw := &argos.Config{MaxFrameSize: 1 << 20, MaxMessageSize: 1 << 20}
+	raw := &Config{MaxFrameSize: 1 << 20, MaxMessageSize: 1 << 20}
 	if _, err := raw.PerCall(); err == nil {
 		t.Error("PerCall with ReadAheadMessages=0: want error")
 	}
@@ -382,9 +375,9 @@ var offStateFields = map[string]bool{
 // forEachNumericField runs fn as a subtest per exported int-kind Config field.
 // Walking the struct rather than listing names means a field added later is
 // held to the same validation contract from the day it appears.
-func forEachNumericField(t *testing.T, fn func(t *testing.T, name string, set func(*argos.Config, int64))) {
+func forEachNumericField(t *testing.T, fn func(t *testing.T, name string, set func(*Config, int64))) {
 	t.Helper()
-	typ := reflect.TypeOf(argos.Config{})
+	typ := reflect.TypeOf(Config{})
 	for i := 0; i < typ.NumField(); i++ {
 		f := typ.Field(i)
 		if !f.IsExported() {
@@ -397,7 +390,7 @@ func forEachNumericField(t *testing.T, fn func(t *testing.T, name string, set fu
 		}
 		t.Run(f.Name, func(t *testing.T) {
 			t.Parallel()
-			fn(t, f.Name, func(c *argos.Config, v int64) {
+			fn(t, f.Name, func(c *Config, v int64) {
 				reflect.ValueOf(c).Elem().Field(i).SetInt(v)
 			})
 		})
@@ -406,7 +399,7 @@ func forEachNumericField(t *testing.T, fn func(t *testing.T, name string, set fu
 
 // assertSameFields compares the exported fields of two Configs one by one so a
 // mismatch names the field instead of dumping two structs.
-func assertSameFields(t *testing.T, got, want argos.Config) {
+func assertSameFields(t *testing.T, got, want Config) {
 	t.Helper()
 	gv, wv := reflect.ValueOf(got), reflect.ValueOf(want)
 	typ := gv.Type()

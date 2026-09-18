@@ -1,4 +1,4 @@
-package httpunary_test
+package httpunary
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
-	"github.com/argos-io/argos/framing/httpunary"
 	"github.com/argos-io/argos/internal/httpstatus"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/status"
@@ -82,7 +81,7 @@ func dialStream(t *testing.T, addr string) transport.StreamConn {
 }
 
 func TestReuseConcurrent(t *testing.T) {
-	if got := httpunary.NewRPC().Reuse(); got != framing.Concurrent {
+	if got := NewRPC().Reuse(); got != framing.Concurrent {
 		t.Fatalf("Reuse() = %v, want Concurrent", got)
 	}
 }
@@ -90,7 +89,7 @@ func TestReuseConcurrent(t *testing.T) {
 // Test 1: unary echo over http1 transport (client + server).
 func TestUnaryEchoHTTP1(t *testing.T) {
 	method := descriptor.MustMethod("echo.v1.EchoService.Echo", descriptor.Unary)
-	fr := httpunary.NewRPC()
+	fr := NewRPC()
 	spec := framing.SessionSpec{CodecName: "json", Config: testCfg()}
 
 	addr := startHTTP1(t, func(ctx context.Context, c transport.Conn) {
@@ -169,8 +168,8 @@ func TestUnaryEchoHTTP1(t *testing.T) {
 
 func TestRESTPostHTTP1(t *testing.T) {
 	method := descriptor.MustMethod("echo.v1.EchoService.Echo", descriptor.Unary)
-	fr, err := httpunary.NewREST(httpunary.RESTConfig{
-		Bindings: []httpunary.Binding{
+	fr, err := NewREST(RESTConfig{
+		Bindings: []Binding{
 			{Method: method, Verb: "POST", Pattern: "/v1/echo"},
 		},
 	})
@@ -238,7 +237,7 @@ func TestRESTPostHTTP1(t *testing.T) {
 // AcceptCall must return a finishable ServerCall alongside ErrCallRejected so
 // the composition layer can write the HTTP error (server.handleRejected).
 func TestAcceptCallRejectReturnsFinishableCall(t *testing.T) {
-	fr := httpunary.NewRPC()
+	fr := NewRPC()
 	spec := framing.SessionSpec{CodecName: "json", Config: testCfg()}
 
 	addr := startHTTP1(t, func(ctx context.Context, c transport.Conn) {
@@ -293,7 +292,7 @@ func TestAcceptCallRejectReturnsFinishableCall(t *testing.T) {
 func TestAcceptRejectsNonUnary(t *testing.T) {
 	unary := descriptor.MustMethod("echo.v1.EchoService.Echo", descriptor.Unary)
 	stream := descriptor.MustMethod("echo.v1.EchoService.Watch", descriptor.ServerStreaming)
-	fr := httpunary.NewRPC()
+	fr := NewRPC()
 	spec := framing.SessionSpec{CodecName: "json", Config: testCfg()}
 
 	var handlerCalled atomic.Bool
@@ -365,7 +364,7 @@ func TestAcceptRejectsNonUnary(t *testing.T) {
 // metadata is not frozen.
 func TestSendHeadersUnimplementedNoCommit(t *testing.T) {
 	method := descriptor.MustMethod("echo.v1.EchoService.Echo", descriptor.Unary)
-	fr := httpunary.NewRPC()
+	fr := NewRPC()
 	spec := framing.SessionSpec{CodecName: "json", Config: testCfg()}
 
 	hold := make(chan struct{})
@@ -480,7 +479,7 @@ func TestSendHeadersUnimplementedNoCommit(t *testing.T) {
 // Test 4: handler Send then return error → client sees error status, not 200.
 func TestFinishAfterSendCommitsErrorNot200(t *testing.T) {
 	method := descriptor.MustMethod("echo.v1.EchoService.Echo", descriptor.Unary)
-	fr := httpunary.NewRPC()
+	fr := NewRPC()
 	spec := framing.SessionSpec{CodecName: "json", Config: testCfg()}
 
 	const successBody = `{"result":"ok"}`

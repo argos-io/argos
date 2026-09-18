@@ -1,4 +1,4 @@
-package cmd_test
+package cmd
 
 import (
 	"bytes"
@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/argos-io/argos/internal/cmd"
 )
 
 func chdirRepoRoot(t *testing.T) {
@@ -61,7 +59,7 @@ func captureStdout(t *testing.T, fn func() error) string {
 
 func TestFrontendList(t *testing.T) {
 	out := captureStdout(t, func() error {
-		return cmd.App().Run(context.Background(), []string{"argos", "frontend", "list"})
+		return App().Run(context.Background(), []string{"argos", "frontend", "list"})
 	})
 	for _, want := range []string{"Built-in frontends:", "proto", "ir", "emit-ir"} {
 		if !strings.Contains(out, want) {
@@ -73,7 +71,7 @@ func TestFrontendList(t *testing.T) {
 func TestGenerateStubEchoProto(t *testing.T) {
 	chdirRepoRoot(t)
 	dir := t.TempDir()
-	err := cmd.App().Run(context.Background(), []string{
+	err := App().Run(context.Background(), []string{
 		"argos", "generate", "stub",
 		"--from", "proto",
 		"--proto-path", "example/echo",
@@ -119,12 +117,12 @@ func TestGenerateStubCheckIsAGate(t *testing.T) {
 		"--out", dir,
 		"example/echo/echo.proto",
 	}
-	if err := cmd.App().Run(t.Context(), args); err != nil {
+	if err := App().Run(t.Context(), args); err != nil {
 		t.Fatalf("generate stub: %v", err)
 	}
 	stubPath := filepath.Join(dir, "echo.argos.go")
 	checkArgs := append([]string{"argos", "generate", "stub", "--check", stubPath}, args[3:]...)
-	if err := cmd.App().Run(t.Context(), checkArgs); err != nil {
+	if err := App().Run(t.Context(), checkArgs); err != nil {
 		t.Fatalf("check of freshly generated stub: %v", err)
 	}
 
@@ -135,7 +133,7 @@ func TestGenerateStubCheckIsAGate(t *testing.T) {
 	if err := os.WriteFile(stubPath, append(data, []byte("\n// drift\n")...), 0o644); err != nil {
 		t.Fatalf("drift stub: %v", err)
 	}
-	err = cmd.App().Run(t.Context(), checkArgs)
+	err = App().Run(t.Context(), checkArgs)
 	if err == nil || !strings.Contains(err.Error(), stubPath) {
 		t.Fatalf("check error = %v, want a diff naming %s", err, stubPath)
 	}
@@ -147,14 +145,14 @@ func TestGenerateStubCheckIsAGate(t *testing.T) {
 		t.Fatalf("write decoy: %v", err)
 	}
 	decoyArgs := append([]string{"argos", "generate", "stub", "--check", filepath.Join(decoy, "echo.argos.go")}, args[3:]...)
-	if err := cmd.App().Run(t.Context(), decoyArgs); err == nil {
+	if err := App().Run(t.Context(), decoyArgs); err == nil {
 		t.Fatal("check passed against a copy while the generated stub is stale")
 	}
 }
 
 func TestGenerateStubRejectsPluginAndFrom(t *testing.T) {
 	chdirRepoRoot(t)
-	err := cmd.App().Run(context.Background(), []string{
+	err := App().Run(context.Background(), []string{
 		"argos", "generate", "stub",
 		"--plugin", "fake-plugin",
 		"--from", "proto",

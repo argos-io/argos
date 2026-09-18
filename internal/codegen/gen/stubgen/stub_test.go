@@ -1,4 +1,4 @@
-package stubgen_test
+package stubgen
 
 import (
 	"go/parser"
@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/argos-io/argos/internal/codegen/gen/stubgen"
 	"github.com/argos-io/argos/internal/codegen/ir"
 )
 
@@ -27,7 +26,7 @@ func TestGenerateAllStreamingShapes(t *testing.T) {
 		}},
 	}
 
-	got, err := stubgen.Generate(file)
+	got, err := Generate(file)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -105,7 +104,7 @@ func TestGenerateSameMethodNameAcrossServicesCompiles(t *testing.T) {
 		},
 	}
 
-	got, err := stubgen.Generate(file)
+	got, err := Generate(file)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -130,7 +129,7 @@ func TestGenerateSameMethodNameAcrossServicesCompiles(t *testing.T) {
 // The constructor carries the service name so a caller never has to repeat it,
 // and it owns the Client it built, which Close has to reach.
 func TestGenerateClientConstructorCarriesServiceName(t *testing.T) {
-	got, err := stubgen.Generate(oneUnaryService("OwnerService", "Do"))
+	got, err := Generate(oneUnaryService("OwnerService", "Do"))
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -164,7 +163,7 @@ func TestGenerateClientConstructorCarriesServiceName(t *testing.T) {
 // interface and on the struct. The generator must say so instead of writing a
 // file that no compiler accepts.
 func TestGenerateRejectsRPCNamedClose(t *testing.T) {
-	_, err := stubgen.Generate(oneUnaryService("LifecycleService", "Close"))
+	_, err := Generate(oneUnaryService("LifecycleService", "Close"))
 	if err == nil {
 		t.Fatal("Generate accepted an RPC named Close")
 	}

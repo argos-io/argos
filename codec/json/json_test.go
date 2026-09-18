@@ -1,17 +1,16 @@
-package json_test
+package json
 
 import (
 	"strings"
 	"testing"
 
-	"github.com/argos-io/argos/codec/json"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 func TestMarshalInt64AsJSONString(t *testing.T) {
 	t.Parallel()
-	c := json.New()
+	c := New()
 	b, err := c.Marshal(wrapperspb.Int64(123))
 	if err != nil {
 		t.Fatal(err)
@@ -27,7 +26,7 @@ func TestMarshalInt64AsJSONString(t *testing.T) {
 
 func TestRoundTrip(t *testing.T) {
 	t.Parallel()
-	c := json.New()
+	c := New()
 	in := wrapperspb.Int64(1 << 40)
 	b, err := c.Marshal(in)
 	if err != nil {
@@ -44,7 +43,7 @@ func TestRoundTrip(t *testing.T) {
 
 func TestRejectNonProto(t *testing.T) {
 	t.Parallel()
-	c := json.New()
+	c := New()
 	if _, err := c.Marshal("not a proto"); err == nil {
 		t.Fatal("Marshal accepted non-proto")
 	}
@@ -55,7 +54,7 @@ func TestRejectNonProto(t *testing.T) {
 
 func TestNamed(t *testing.T) {
 	t.Parallel()
-	c := json.New()
+	c := New()
 	n, ok := c.(interface{ CodecName() string })
 	if !ok {
 		t.Fatal("codec does not implement Named")

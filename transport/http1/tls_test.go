@@ -1,4 +1,4 @@
-package http1_test
+package http1
 
 import (
 	"context"
@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/transport"
-	argoshttp1 "github.com/argos-io/argos/transport/http1"
 )
 
 func selfSignedHTTP1(t *testing.T) (srv, cli *tls.Config) {
@@ -58,10 +57,10 @@ func selfSignedHTTP1(t *testing.T) (srv, cli *tls.Config) {
 	return srv, cli
 }
 
-func startTLSServer(t *testing.T, srvTLS *tls.Config, onConn func(context.Context, transport.Conn)) (*argoshttp1.Transport, string) {
+func startTLSServer(t *testing.T, srvTLS *tls.Config, onConn func(context.Context, transport.Conn)) (*Transport, string) {
 	t.Helper()
-	raw := argoshttp1.New(argoshttp1.WithServerTLS(srvTLS))
-	tr := raw.(*argoshttp1.Transport)
+	raw := New(WithServerTLS(srvTLS))
+	tr := raw.(*Transport)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
@@ -84,7 +83,7 @@ func startTLSServer(t *testing.T, srvTLS *tls.Config, onConn func(context.Contex
 
 func dialTLS(t *testing.T, addr string, cliTLS *tls.Config) transport.StreamConn {
 	t.Helper()
-	clientTr := argoshttp1.New(argoshttp1.WithClientTLS(cliTLS))
+	clientTr := New(WithClientTLS(cliTLS))
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

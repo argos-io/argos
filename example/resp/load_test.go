@@ -1,4 +1,4 @@
-package resp_test
+package resp
 
 import (
 	"context"
@@ -14,7 +14,6 @@ import (
 
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/client"
-	"github.com/argos-io/argos/example/resp"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/status"
@@ -39,14 +38,14 @@ type loadEnv struct {
 func startLoadRESP(t *testing.T, tune func(*argos.Config)) *loadEnv {
 	t.Helper()
 
-	store := resp.NewStore()
-	var clientFr *resp.Framing
+	store := NewStore()
+	var clientFr *Framing
 	var dials atomic.Int64
 	var admitRejects atomic.Int64
 	var addrTr hasAddr
 	bound := make(chan struct{})
 
-	baseT, baseF, baseC := resp.BindingAxes()
+	baseT, baseF, baseC := BindingAxes()
 
 	cfg := &argos.Config{
 		MaxConcurrentCalls: 64,
@@ -85,7 +84,7 @@ func startLoadRESP(t *testing.T, tune func(*argos.Config)) *loadEnv {
 		),
 		argos.ServiceListenAddress(testListenAddr),
 	))
-	if err := resp.Register(srv, store); err != nil {
+	if err := Register(srv, store); err != nil {
 		t.Fatal(err)
 	}
 	serveDone := make(chan error, 1)
@@ -110,7 +109,7 @@ func startLoadRESP(t *testing.T, tune func(*argos.Config)) *loadEnv {
 				return &dialCounter{Transport: tr, dials: &dials}, nil
 			}),
 			argos.WithFraming(func() (framing.Framing, error) {
-				fr := resp.New()
+				fr := New()
 				clientFr = fr
 				return fr, nil
 			}),
@@ -136,12 +135,12 @@ func onePING(t *testing.T, h *harness) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	st, err := h.cli.Open(ctx, resp.MethodPING)
+	st, err := h.cli.Open(ctx, MethodPING)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if err := st.Send(resp.EncodeArgs()); err != nil {
+	if err := st.Send(EncodeArgs()); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.HalfClose(); err != nil {
@@ -184,13 +183,13 @@ func holdWave(t *testing.T, h *harness, n int) time.Duration {
 		go func() {
 			defer wg.Done()
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			st, err := h.cli.Open(ctx, resp.MethodPING)
+			st, err := h.cli.Open(ctx, MethodPING)
 			if err != nil {
 				cancel()
 				fails.Add(1)
 				return
 			}
-			if err := st.Send(resp.EncodeArgs()); err != nil {
+			if err := st.Send(EncodeArgs()); err != nil {
 				_ = st.Close()
 				cancel()
 				fails.Add(1)
@@ -396,11 +395,11 @@ func TestMaxSessionLifetimeNonReusable(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	st, err := h.cli.Open(ctx, resp.MethodPING)
+	st, err := h.cli.Open(ctx, MethodPING)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Send(resp.EncodeArgs()); err != nil {
+	if err := st.Send(EncodeArgs()); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.HalfClose(); err != nil {

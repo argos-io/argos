@@ -1,4 +1,4 @@
-package tcp_test
+package tcp
 
 import (
 	"context"
@@ -9,10 +9,9 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/transport"
-	"github.com/argos-io/argos/transport/tcp"
 )
 
-func waitAddr(t *testing.T, tr *tcp.Transport) net.Addr {
+func waitAddr(t *testing.T, tr *Transport) net.Addr {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -25,10 +24,10 @@ func waitAddr(t *testing.T, tr *tcp.Transport) net.Addr {
 	return nil
 }
 
-func startEchoServer(t *testing.T) (tr *tcp.Transport, addr string, cancel context.CancelFunc) {
+func startEchoServer(t *testing.T) (tr *Transport, addr string, cancel context.CancelFunc) {
 	t.Helper()
-	raw := tcp.New()
-	tr = raw.(*tcp.Transport)
+	raw := New()
+	tr = raw.(*Transport)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
@@ -62,7 +61,7 @@ func startEchoServer(t *testing.T) (tr *tcp.Transport, addr string, cancel conte
 func TestDialServeEcho(t *testing.T) {
 	_, addr, _ := startEchoServer(t)
 
-	clientTr := tcp.New()
+	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -105,8 +104,8 @@ func TestDialServeEcho(t *testing.T) {
 }
 
 func TestCloseSendEOF(t *testing.T) {
-	raw := tcp.New()
-	tr := raw.(*tcp.Transport)
+	raw := New()
+	tr := raw.(*Transport)
 
 	serverReady := make(chan transport.Conn, 1)
 	release := make(chan struct{})
@@ -129,7 +128,7 @@ func TestCloseSendEOF(t *testing.T) {
 
 	addr := waitAddr(t, tr).String()
 
-	clientTr := tcp.New()
+	clientTr := New()
 	defer clientTr.Close()
 
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -162,8 +161,8 @@ func TestCloseSendEOF(t *testing.T) {
 }
 
 func TestAddrAfterServe(t *testing.T) {
-	raw := tcp.New()
-	tr := raw.(*tcp.Transport)
+	raw := New()
+	tr := raw.(*Transport)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -189,7 +188,7 @@ func TestAddrAfterServe(t *testing.T) {
 	}
 
 	// Dial and check Conn.Addr is set.
-	clientTr := tcp.New()
+	clientTr := New()
 	defer clientTr.Close()
 	conn, err := clientTr.Dial(ctx, transport.DialSpec{Endpoint: a.String()})
 	if err != nil {
@@ -197,9 +196,9 @@ func TestAddrAfterServe(t *testing.T) {
 	}
 	defer conn.Close()
 
-	tc, ok := conn.(*tcp.Conn)
+	tc, ok := conn.(*Conn)
 	if !ok {
-		t.Fatalf("conn type %T, want *tcp.Conn", conn)
+		t.Fatalf("conn type %T, want *Conn", conn)
 	}
 	if tc.Addr() == nil {
 		t.Fatal("Conn.Addr() is nil")
@@ -207,8 +206,8 @@ func TestAddrAfterServe(t *testing.T) {
 }
 
 func TestShutdownStopsAccepts(t *testing.T) {
-	raw := tcp.New()
-	tr := raw.(*tcp.Transport)
+	raw := New()
+	tr := raw.(*Transport)
 
 	var mu sync.Mutex
 	accepted := 0
@@ -229,7 +228,7 @@ func TestShutdownStopsAccepts(t *testing.T) {
 
 	addr := waitAddr(t, tr).String()
 
-	clientTr := tcp.New()
+	clientTr := New()
 	defer clientTr.Close()
 
 	c1, err := clientTr.Dial(ctx, transport.DialSpec{Endpoint: addr})

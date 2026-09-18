@@ -1,4 +1,4 @@
-package client_test
+package client
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
-	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/stream"
@@ -33,7 +32,7 @@ func TestHeaderWaitsAfterNonStatusRecvError(t *testing.T) {
 		}
 		return &recvFailStream{Stream: st, recvErr: recvErr}, nil
 	})
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithTarget(testTarget),
 		sequentialLoopback(t, nil),
@@ -78,7 +77,7 @@ func TestHeaderWaitsAfterNonStatusRecvError(t *testing.T) {
 	}
 	select {
 	case err := <-headerDone:
-		if !errors.Is(err, client.ErrCallClosed) {
+		if !errors.Is(err, ErrCallClosed) {
 			t.Fatalf("Header after Close = %v, want ErrCallClosed", err)
 		}
 	case <-time.After(time.Second):
@@ -88,7 +87,7 @@ func TestHeaderWaitsAfterNonStatusRecvError(t *testing.T) {
 
 func TestHeaderAfterCloseReturnsErrCallClosed(t *testing.T) {
 	t.Parallel()
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithTarget(testTarget),
 		sequentialLoopback(t, nil),
@@ -105,7 +104,7 @@ func TestHeaderAfterCloseReturnsErrCallClosed(t *testing.T) {
 	if err := cs.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if _, err := cs.Header(); !errors.Is(err, client.ErrCallClosed) {
+	if _, err := cs.Header(); !errors.Is(err, ErrCallClosed) {
 		t.Fatalf("Header after Close = %v, want ErrCallClosed", err)
 	}
 	if cs.Trailer() != nil {

@@ -1,4 +1,4 @@
-package sessionpool_test
+package sessionpool
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/internal/fake"
-	"github.com/argos-io/argos/internal/sessionpool"
 	"github.com/argos-io/argos/transport"
 )
 
@@ -47,7 +46,7 @@ func TestConcurrentColdStartHonoursSessionCap(t *testing.T) {
 
 	// Many rounds: the window is narrow, so one attempt proves little.
 	for round := 0; round < 200; round++ {
-		p := sessionpool.New(f, dial, sessionpool.Config{
+		p := New(f, dial, Config{
 			MaxSessionsPerEndpoint: 1,
 			MaxIdleSessions:        1,
 			SessionIdleTimeout:     time.Minute,
@@ -105,7 +104,7 @@ func TestConcurrentDialFailureDoesNotRetryUnbounded(t *testing.T) {
 		return nil, dialErr
 	}
 
-	p := sessionpool.New(fake.NewFraming(framing.Concurrent), dial, sessionpool.Config{
+	p := New(fake.NewFraming(framing.Concurrent), dial, Config{
 		MaxSessionsPerEndpoint: 4,
 		MaxIdleSessions:        4,
 		SessionIdleTimeout:     time.Minute,
@@ -154,7 +153,7 @@ func TestConcurrentDialFailureDoesNotRetryUnbounded(t *testing.T) {
 // lend saw one session under two identities.
 func TestDoubleReleaseDoesNotDuplicateIdleEntry(t *testing.T) {
 	t.Parallel()
-	p := sessionpool.New(fake.NewFraming(framing.Concurrent), concurrentDial(nil), sessionpool.Config{
+	p := New(fake.NewFraming(framing.Concurrent), concurrentDial(nil), Config{
 		MaxSessionsPerEndpoint: 1,
 		MaxIdleSessions:        1,
 		SessionIdleTimeout:     time.Minute,

@@ -1,4 +1,4 @@
-package grpc_test
+package grpc
 
 import (
 	"context"
@@ -9,16 +9,15 @@ import (
 
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
-	grpcframing "github.com/argos-io/argos/framing/grpc"
 	"github.com/argos-io/argos/internal/fake"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport"
 )
 
-func newTestFraming(t *testing.T, opts ...grpcframing.Option) framing.Framing {
+func newTestFraming(t *testing.T, opts ...Option) framing.Framing {
 	t.Helper()
-	f, err := grpcframing.New(opts...)
+	f, err := New(opts...)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,9 +2,9 @@ package http1
 
 import "github.com/argos-io/argos/transport"
 
-// TrackedCarrierCount reports how many OpenStream carriers are still tracked
+// trackedCarrierCount reports how many OpenStream carriers are still tracked
 // on a client StreamConn. Used by tests to detect carrier-map leaks.
-func TrackedCarrierCount(c transport.Conn) int {
+func trackedCarrierCount(c transport.Conn) int {
 	sc, ok := c.(*streamConn)
 	if !ok {
 		return -1
@@ -12,9 +12,9 @@ func TrackedCarrierCount(c transport.Conn) int {
 	return sc.trackedCarrierCount()
 }
 
-// TrackedStreamConnCount reports how many Dial endpoint handles the Transport
+// trackedStreamConnCount reports how many Dial endpoint handles the Transport
 // still tracks. Used by tests to detect tracking-map leaks.
-func TrackedStreamConnCount(tr transport.Transport) int {
+func trackedStreamConnCount(tr transport.Transport) int {
 	t, ok := tr.(*Transport)
 	if !ok {
 		return -1

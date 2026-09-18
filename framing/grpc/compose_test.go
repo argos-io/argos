@@ -1,4 +1,4 @@
-package grpc_test
+package grpc
 
 import (
 	"context"
@@ -24,7 +24,6 @@ import (
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/framing"
-	grpcframing "github.com/argos-io/argos/framing/grpc"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/stream"
 	"github.com/argos-io/argos/transport"
@@ -74,7 +73,7 @@ func WithCompressor(cs ...compressor.Compressor) composeOpt {
 	})
 }
 
-func WithSendCompressor(name string) composeOpt {
+func composeWithSendCompressor(name string) composeOpt {
 	return composeOptionFunc(func(o *composeOpts) { o.sendName = name })
 }
 
@@ -109,18 +108,18 @@ func axesFrom(opts ...composeOpt) (argos.TransportFunc, argos.FramingFunc, argos
 	if cliTLS != nil {
 		http2Opts = append(http2Opts, argoshttp2.WithClientTLS(cliTLS))
 	}
-	var frOpts []grpcframing.Option
+	var frOpts []Option
 	if len(o.compressors) > 0 {
-		frOpts = append(frOpts, grpcframing.WithCompressors(o.compressors...))
+		frOpts = append(frOpts, WithCompressors(o.compressors...))
 	}
 	if o.sendName != "" {
-		frOpts = append(frOpts, grpcframing.WithSendCompressor(o.sendName))
+		frOpts = append(frOpts, WithSendCompressor(o.sendName))
 	}
 	return argos.TransportFunc(func() (transport.Transport, error) {
 			return argoshttp2.New(http2Opts...), nil
 		}),
 		argos.FramingFunc(func() (framing.Framing, error) {
-			return grpcframing.New(frOpts...)
+			return New(frOpts...)
 		}),
 		argos.CodecFunc(func() (codec.Codec, error) {
 			cd := o.codec
@@ -362,7 +361,7 @@ func TestTLSALPNUnaryEcho(t *testing.T) {
 func TestCompressorGzipSmoke(t *testing.T) {
 	compOpts := []composeOpt{
 		WithCompressor(gzip.New()),
-		WithSendCompressor(gzip.Name),
+		composeWithSendCompressor(gzip.Name),
 	}
 	h := startEcho(t, compOpts, compOpts)
 	got := unaryEcho(t, h.cli, h.method, "gzip-path")
@@ -393,7 +392,7 @@ func TestAxesAssembleIndependentInstances(t *testing.T) {
 }
 
 func TestSendCompressorRequiresInjection(t *testing.T) {
-	_, fFn, _ := axesFrom(WithSendCompressor(gzip.Name))
+	_, fFn, _ := axesFrom(composeWithSendCompressor(gzip.Name))
 	_, err := fFn()
 	if err == nil {
 		t.Fatal("expected error when send compressor is not configured")

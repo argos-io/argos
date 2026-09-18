@@ -1,4 +1,4 @@
-package client_test
+package client
 
 import (
 	"context"
@@ -7,20 +7,19 @@ import (
 	"testing"
 
 	"github.com/argos-io/argos"
-	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/stream"
 )
 
-func openFilterClient(t *testing.T, dials *atomic.Int64, f filter.OpenFilter) *client.Client {
+func openFilterClient(t *testing.T, dials *atomic.Int64, f filter.OpenFilter) *Client {
 	t.Helper()
 	return openFilterClientWith(t, dials, 8, f)
 }
 
-func openFilterClientWith(t *testing.T, dials *atomic.Int64, maxSessions int, f filter.OpenFilter) *client.Client {
+func openFilterClientWith(t *testing.T, dials *atomic.Int64, maxSessions int, f filter.OpenFilter) *Client {
 	t.Helper()
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
@@ -30,7 +29,7 @@ func openFilterClientWith(t *testing.T, dials *atomic.Int64, maxSessions int, f 
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
-		t.Fatalf("client.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { _ = cli.Close() })
 	return cli

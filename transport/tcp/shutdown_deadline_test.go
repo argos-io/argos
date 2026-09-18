@@ -1,4 +1,4 @@
-package tcp_test
+package tcp
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/transport"
-	"github.com/argos-io/argos/transport/tcp"
 )
 
 // Shutdown promises to interrupt unfinished connections on its deadline. A
@@ -16,8 +15,8 @@ func TestShutdownBoundedByDeadlineWhenCallbackBlocks(t *testing.T) {
 	started := make(chan struct{})
 	hold := make(chan struct{})
 
-	raw := tcp.New()
-	tr := raw.(*tcp.Transport)
+	raw := New()
+	tr := raw.(*Transport)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
@@ -40,7 +39,7 @@ func TestShutdownBoundedByDeadlineWhenCallbackBlocks(t *testing.T) {
 
 	addr := waitAddr(t, tr).String()
 
-	clientTr := tcp.New()
+	clientTr := New()
 	defer clientTr.Close()
 	dialCtx, dialCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer dialCancel()

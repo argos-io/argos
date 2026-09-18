@@ -1,11 +1,9 @@
-package resp_test
+package resp
 
 import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/argos-io/argos/example/resp"
 )
 
 // The gate review found a panic reachable from a real server: Store.Publish
@@ -23,8 +21,8 @@ import (
 // the send it was captured for.
 func TestStorePublishWhileUnsubscribing(t *testing.T) {
 	const subs = 32
-	store := resp.NewStore()
-	chs := make([]chan resp.PubMessage, subs)
+	store := NewStore()
+	chs := make([]chan PubMessage, subs)
 	for i := range chs {
 		chs[i] = store.Subscribe("news")
 	}
@@ -72,14 +70,14 @@ func TestStorePublishWhileUnsubscribing(t *testing.T) {
 // unsubscribing a channel this Store never handed out — panicked with "close of
 // closed channel".
 func TestStoreUnsubscribeIsIdempotent(t *testing.T) {
-	store := resp.NewStore()
+	store := NewStore()
 	ch := store.Subscribe("news")
 
 	store.Unsubscribe(ch)
 	store.Unsubscribe(ch)         // second call: no-op
 	store.Unsubscribe(ch, "news") // partial repeat after full removal: no-op
 
-	foreign := make(chan resp.PubMessage, 1)
+	foreign := make(chan PubMessage, 1)
 	store.Unsubscribe(foreign) // never registered with this Store: no-op
 
 	if n := store.Publish("news", "payload"); n != 0 {
@@ -94,7 +92,7 @@ func TestStoreUnsubscribeIsIdempotent(t *testing.T) {
 // blocking the publisher. Receivers stop through their own ctx (see
 // handleSUBSCRIBE), not through a closed channel.
 func TestStorePublishAfterUnsubscribeIsSafe(t *testing.T) {
-	store := resp.NewStore()
+	store := NewStore()
 	ch := store.Subscribe("news")
 	store.Unsubscribe(ch)
 
@@ -106,7 +104,7 @@ func TestStorePublishAfterUnsubscribeIsSafe(t *testing.T) {
 
 // sendStale performs the send a publisher would make from a snapshot taken just
 // before Unsubscribe ran.
-func sendStale(t *testing.T, ch chan resp.PubMessage) {
+func sendStale(t *testing.T, ch chan PubMessage) {
 	t.Helper()
 	defer func() {
 		if r := recover(); r != nil {
@@ -114,7 +112,7 @@ func sendStale(t *testing.T, ch chan resp.PubMessage) {
 		}
 	}()
 	select {
-	case ch <- resp.PubMessage{Channel: "news", Payload: "stale snapshot"}:
+	case ch <- PubMessage{Channel: "news", Payload: "stale snapshot"}:
 	default:
 		t.Fatal("subscriber channel refused the stale-snapshot send")
 	}

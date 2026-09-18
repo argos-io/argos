@@ -1,4 +1,4 @@
-package sessionpool_test
+package sessionpool
 
 import (
 	"context"
@@ -12,7 +12,6 @@ import (
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/internal/fake"
-	"github.com/argos-io/argos/internal/sessionpool"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport"
 )
@@ -42,7 +41,7 @@ func TestSequentialReuseKeepsConnUntilPoolClose(t *testing.T) {
 	}
 
 	f := fake.NewFraming(framing.Sequential)
-	p := sessionpool.New(f, dial, sessionpool.Config{
+	p := New(f, dial, Config{
 		MaxSessionsPerEndpoint: 8,
 		MaxIdleSessions:        8,
 	})
@@ -107,7 +106,7 @@ func TestConcurrentSingleflightOneDial(t *testing.T) {
 		return cli, nil
 	}
 
-	p := sessionpool.New(f, dial, sessionpool.Config{
+	p := New(f, dial, Config{
 		MaxSessionsPerEndpoint: 64,
 		MaxIdleSessions:        8,
 		HandshakeTimeout:       5 * time.Second,
@@ -186,7 +185,7 @@ func TestConcurrentCloseDuringDial(t *testing.T) {
 		return cli, nil
 	}
 
-	p := sessionpool.New(f, dial, sessionpool.Config{
+	p := New(f, dial, Config{
 		MaxSessionsPerEndpoint: 64,
 		MaxIdleSessions:        8,
 		HandshakeTimeout:       5 * time.Second,
@@ -247,7 +246,7 @@ func TestSequentialConcurrentAcquireDistinct(t *testing.T) {
 		return cli, nil
 	}
 
-	p := sessionpool.New(f, dial, sessionpool.Config{
+	p := New(f, dial, Config{
 		MaxSessionsPerEndpoint: 16,
 		MaxIdleSessions:        16,
 		HandshakeTimeout:       5 * time.Second,
@@ -308,7 +307,7 @@ func TestCapExhaustedNonBlocking(t *testing.T) {
 		return cli, nil
 	}
 	f := fake.NewFraming(framing.Sequential)
-	p := sessionpool.New(f, dial, sessionpool.Config{
+	p := New(f, dial, Config{
 		MaxSessionsPerEndpoint: 1,
 		MaxIdleSessions:        1,
 	})
@@ -352,7 +351,7 @@ func TestNotReusableOnReleaseClosedNotRelent(t *testing.T) {
 	}
 
 	f := fake.NewFraming(framing.Sequential)
-	p := sessionpool.New(f, dial, sessionpool.Config{
+	p := New(f, dial, Config{
 		MaxSessionsPerEndpoint: 8,
 		MaxIdleSessions:        8,
 	})
@@ -405,7 +404,7 @@ func TestReusableRaceWithMarkBad(t *testing.T) {
 		return cli, nil
 	}
 	f := fake.NewFraming(framing.Sequential)
-	p := sessionpool.New(f, dial, sessionpool.Config{
+	p := New(f, dial, Config{
 		MaxSessionsPerEndpoint: 64,
 		MaxIdleSessions:        64,
 	})
@@ -466,7 +465,7 @@ func TestIdleFullClosesOnReturn(t *testing.T) {
 		return cli, nil
 	}
 	f := fake.NewFraming(framing.Sequential)
-	p := sessionpool.New(f, dial, sessionpool.Config{
+	p := New(f, dial, Config{
 		MaxSessionsPerEndpoint: 4,
 		MaxIdleSessions:        0, // no idle keep
 	})
@@ -502,7 +501,7 @@ func TestMaxSessionLifetimeClosesWhenIdle(t *testing.T) {
 		return cli, nil
 	}
 	f := fake.NewFraming(framing.Sequential)
-	p := sessionpool.New(f, dial, sessionpool.Config{
+	p := New(f, dial, Config{
 		MaxSessionsPerEndpoint: 4,
 		MaxIdleSessions:        4,
 		MaxSessionLifetime:     30 * time.Millisecond,
@@ -552,7 +551,7 @@ func TestConcurrentKeepAliveUntilLastRelease(t *testing.T) {
 	}
 
 	f := fake.NewFraming(framing.Concurrent)
-	p := sessionpool.New(f, dial, sessionpool.Config{
+	p := New(f, dial, Config{
 		MaxSessionsPerEndpoint: 4,
 		MaxIdleSessions:        4,
 	})
@@ -612,7 +611,7 @@ func TestOpenCallBusyThenSucceeds(t *testing.T) {
 		return nil
 	}
 
-	p := sessionpool.New(f, dial, sessionpool.Config{
+	p := New(f, dial, Config{
 		MaxSessionsPerEndpoint: 8,
 		MaxIdleSessions:        8,
 	})
@@ -655,7 +654,7 @@ func TestOpenCallAlwaysBusyExhausted(t *testing.T) {
 		return framing.ErrSessionBusy
 	}
 
-	p := sessionpool.New(f, dial, sessionpool.Config{
+	p := New(f, dial, Config{
 		MaxSessionsPerEndpoint: max,
 		MaxIdleSessions:        max,
 	})
@@ -709,7 +708,7 @@ func TestOpenCallConcurrentEmptyPoolSingleflight(t *testing.T) {
 		return cli, nil
 	}
 
-	p := sessionpool.New(f, dial, sessionpool.Config{
+	p := New(f, dial, Config{
 		MaxSessionsPerEndpoint: 64,
 		MaxIdleSessions:        8,
 		HandshakeTimeout:       5 * time.Second,
@@ -785,7 +784,7 @@ func TestOpenCallSequentialEmptyPoolOwnDial(t *testing.T) {
 		return cli, nil
 	}
 
-	p := sessionpool.New(f, dial, sessionpool.Config{
+	p := New(f, dial, Config{
 		MaxSessionsPerEndpoint: 16,
 		MaxIdleSessions:        16,
 		HandshakeTimeout:       5 * time.Second,

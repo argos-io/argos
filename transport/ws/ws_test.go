@@ -1,4 +1,4 @@
-package ws_test
+package ws
 
 import (
 	"context"
@@ -8,10 +8,9 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/transport"
-	"github.com/argos-io/argos/transport/ws"
 )
 
-func waitAddr(t *testing.T, tr *ws.Transport) net.Addr {
+func waitAddr(t *testing.T, tr *Transport) net.Addr {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -24,10 +23,10 @@ func waitAddr(t *testing.T, tr *ws.Transport) net.Addr {
 	return nil
 }
 
-func startEchoServer(t *testing.T) (tr *ws.Transport, addr string) {
+func startEchoServer(t *testing.T) (tr *Transport, addr string) {
 	t.Helper()
-	raw := ws.New()
-	tr = raw.(*ws.Transport)
+	raw := New()
+	tr = raw.(*Transport)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
@@ -65,7 +64,7 @@ func startEchoServer(t *testing.T) (tr *ws.Transport, addr string) {
 func TestDialServeEcho(t *testing.T) {
 	_, addr := startEchoServer(t)
 
-	clientTr := ws.New()
+	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -106,8 +105,8 @@ func TestDialServeEcho(t *testing.T) {
 }
 
 func TestAddrAfterServe(t *testing.T) {
-	raw := ws.New()
-	tr := raw.(*ws.Transport)
+	raw := New()
+	tr := raw.(*Transport)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -134,8 +133,8 @@ func TestAddrAfterServe(t *testing.T) {
 }
 
 func TestShutdownStopsAccepts(t *testing.T) {
-	raw := ws.New()
-	tr := raw.(*ws.Transport)
+	raw := New()
+	tr := raw.(*Transport)
 
 	var mu sync.Mutex
 	accepted := 0
@@ -156,7 +155,7 @@ func TestShutdownStopsAccepts(t *testing.T) {
 
 	addr := waitAddr(t, tr).String()
 
-	clientTr := ws.New()
+	clientTr := New()
 	defer clientTr.Close()
 
 	c1, err := clientTr.Dial(ctx, transport.DialSpec{Endpoint: addr})

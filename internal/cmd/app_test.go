@@ -1,13 +1,11 @@
-package cmd_test
+package cmd
 
 import (
 	"testing"
-
-	"github.com/argos-io/argos/internal/cmd"
 )
 
 func TestAppRootCommand(t *testing.T) {
-	app := cmd.App()
+	app := App()
 	if app.Name != "argos" {
 		t.Fatalf("Name = %q", app.Name)
 	}

@@ -1,4 +1,4 @@
-package argos_test
+package argos
 
 import (
 	"bytes"

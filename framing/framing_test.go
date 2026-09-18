@@ -1,26 +1,24 @@
-package framing_test
+package framing
 
 import (
 	"errors"
 	"reflect"
 	"regexp"
 	"testing"
-
-	"github.com/argos-io/argos/framing"
 )
 
 // Compile-time: ServerCall embeds Call.
-var _ framing.Call = (framing.ServerCall)(nil)
+var _ Call = (ServerCall)(nil)
 
 var compressField = regexp.MustCompile(`(?i)compress`)
 
 func TestConfigHasNoCompressionFields(t *testing.T) {
 	t.Parallel()
-	typ := reflect.TypeOf(framing.Config{})
+	typ := reflect.TypeOf(Config{})
 	for i := 0; i < typ.NumField(); i++ {
 		name := typ.Field(i).Name
 		if compressField.MatchString(name) {
-			t.Fatalf("Config field %q matches (?i)compress; §3.1-10 forbids compression in framing.Config", name)
+			t.Fatalf("Config field %q matches (?i)compress; §3.1-10 forbids compression in Config", name)
 		}
 	}
 }
@@ -28,9 +26,9 @@ func TestConfigHasNoCompressionFields(t *testing.T) {
 func TestSentinelsDistinguishable(t *testing.T) {
 	t.Parallel()
 	sentinels := []error{
-		framing.ErrSessionBusy,
-		framing.ErrSessionSpent,
-		framing.ErrCallRejected,
+		ErrSessionBusy,
+		ErrSessionSpent,
+		ErrCallRejected,
 	}
 	for i, a := range sentinels {
 		if a == nil {
@@ -52,8 +50,8 @@ func TestSentinelsDistinguishable(t *testing.T) {
 
 func TestReuseModelValues(t *testing.T) {
 	t.Parallel()
-	if framing.OneCallPerConn != 0 || framing.Sequential != 1 || framing.Concurrent != 2 {
+	if OneCallPerConn != 0 || Sequential != 1 || Concurrent != 2 {
 		t.Fatalf("ReuseModel iota: OneCallPerConn=%d Sequential=%d Concurrent=%d",
-			framing.OneCallPerConn, framing.Sequential, framing.Concurrent)
+			OneCallPerConn, Sequential, Concurrent)
 	}
 }

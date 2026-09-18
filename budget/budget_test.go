@@ -1,4 +1,4 @@
-package budget_test
+package budget
 
 import (
 	"context"
@@ -6,13 +6,12 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/argos-io/argos/budget"
 	"github.com/argos-io/argos/status"
 )
 
-func asSlice(t *testing.T, b budget.Budget) budget.SliceBudget {
+func asSlice(t *testing.T, b Budget) SliceBudget {
 	t.Helper()
-	sb, ok := b.(budget.SliceBudget)
+	sb, ok := b.(SliceBudget)
 	if !ok {
 		t.Fatalf("New must return SliceBudget, got %T", b)
 	}
@@ -20,7 +19,7 @@ func asSlice(t *testing.T, b budget.Budget) budget.SliceBudget {
 }
 
 func TestTryAcquireRelease(t *testing.T) {
-	b := budget.New(100)
+	b := New(100)
 	r1, err := b.TryAcquire(40)
 	if err != nil {
 		t.Fatalf("TryAcquire(40): %v", err)
@@ -51,7 +50,7 @@ func TestTryAcquireRelease(t *testing.T) {
 }
 
 func TestTryAcquireNonPositive(t *testing.T) {
-	b := budget.New(10)
+	b := New(10)
 	for _, n := range []int64{0, -1, -100} {
 		r, err := b.TryAcquire(n)
 		if err != nil {
@@ -67,7 +66,7 @@ func TestTryAcquireNonPositive(t *testing.T) {
 }
 
 func TestTryAcquireExhaust(t *testing.T) {
-	b := budget.New(8)
+	b := New(8)
 	r, err := b.TryAcquire(8)
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +82,7 @@ func TestTryAcquireExhaust(t *testing.T) {
 }
 
 func TestSliceAliasNoDoubleCharge(t *testing.T) {
-	sb := asSlice(t, budget.New(1024))
+	sb := asSlice(t, New(1024))
 	a := make([]byte, 0, 1024)
 	r1, err := sb.TryAcquireSlice(a)
 	if err != nil {
@@ -111,7 +110,7 @@ func TestSliceAliasNoDoubleCharge(t *testing.T) {
 }
 
 func TestTryAcquireSliceNonPositive(t *testing.T) {
-	sb := asSlice(t, budget.New(10))
+	sb := asSlice(t, New(10))
 	r, err := sb.TryAcquireSlice(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -129,12 +128,12 @@ func TestTryAcquireSliceNonPositive(t *testing.T) {
 
 func TestFromContext(t *testing.T) {
 	ctx := context.Background()
-	if _, ok := budget.FromContext(ctx); ok {
+	if _, ok := FromContext(ctx); ok {
 		t.Fatal("empty ctx should miss")
 	}
-	b := budget.New(1)
-	ctx = budget.ContextWith(ctx, b)
-	got, ok := budget.FromContext(ctx)
+	b := New(1)
+	ctx = ContextWith(ctx, b)
+	got, ok := FromContext(ctx)
 	if !ok || got != b {
 		t.Fatalf("FromContext = (%v, %v), want (%v, true)", got, ok, b)
 	}
@@ -146,7 +145,7 @@ func TestConcurrentAcquireRelease(t *testing.T) {
 		workers  = 32
 		iters    = 200
 	)
-	b := budget.New(capacity)
+	b := New(capacity)
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
@@ -175,7 +174,7 @@ func TestConcurrentAcquireRelease(t *testing.T) {
 }
 
 func TestConcurrentSliceAlias(t *testing.T) {
-	sb := asSlice(t, budget.New(1024))
+	sb := asSlice(t, New(1024))
 	a := make([]byte, 0, 1024)
 	var wg sync.WaitGroup
 	const workers = 16

@@ -1,4 +1,4 @@
-package client_test
+package client
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
-	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
@@ -169,7 +168,7 @@ func handleEchoCall(sc framing.ServerCall) {
 	_ = sc.Finish(nil)
 }
 
-func newTestClient(t *testing.T, opts ...argos.ClientOption) *client.Client {
+func newTestClient(t *testing.T, opts ...argos.ClientOption) *Client {
 	t.Helper()
 	// opts come last so a test can retune any of these.
 	base := []argos.ClientOption{
@@ -180,9 +179,9 @@ func newTestClient(t *testing.T, opts ...argos.ClientOption) *client.Client {
 		sequentialLoopback(t, nil),
 		argos.WithTarget(testTarget),
 	}
-	cli, err := client.New(append(base, opts...)...)
+	cli, err := New(append(base, opts...)...)
 	if err != nil {
-		t.Fatalf("client.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { _ = cli.Close() })
 	return cli
@@ -261,9 +260,9 @@ func TestNewWithoutServiceNameFails(t *testing.T) {
 				sequentialLoopback(t, nil),
 				argos.WithTarget(testTarget),
 			)
-			_, err := client.New(opts...)
+			_, err := New(opts...)
 			if err == nil {
-				t.Fatal("client.New built a Client that has no service to open calls for")
+				t.Fatal("New built a Client that has no service to open calls for")
 			}
 			if !strings.Contains(err.Error(), "missing service name") {
 				t.Fatalf("error %q, want a missing service name report", err)
@@ -276,7 +275,7 @@ func TestNewFailsWhenConcurrentTimesPerCallExceedsBuffered(t *testing.T) {
 	t.Parallel()
 	// Force conflict via options: 128 × 16MiB >> 1GiB default buffered after
 	// raising concurrent without raising MaxBufferedBytes.
-	_, err := client.New(
+	_, err := New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(128),
 		sequentialLoopback(t, nil),
@@ -287,7 +286,7 @@ func TestNewFailsWhenConcurrentTimesPerCallExceedsBuffered(t *testing.T) {
 	}
 	msg := err.Error()
 	// The cross-check is the root package's now, so the message says "argos:";
-	// client.New no longer keeps a copy of it.
+	// New no longer keeps a copy of it.
 	if !strings.HasPrefix(msg, "argos:") {
 		t.Fatalf("error %q, want the root-package validation message", msg)
 	}
@@ -303,7 +302,7 @@ func TestNewFailsWhenConcurrentTimesPerCallExceedsBuffered(t *testing.T) {
 func TestSessionReusableAfterCall(t *testing.T) {
 	t.Parallel()
 	var dials atomic.Int64
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
@@ -313,7 +312,7 @@ func TestSessionReusableAfterCall(t *testing.T) {
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
-		t.Fatalf("client.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	defer cli.Close()
 	m := testMethod(t)
@@ -378,7 +377,7 @@ func TestCallerCancelAbortsCall(t *testing.T) {
 			return cli, nil
 		},
 	}
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
@@ -386,7 +385,7 @@ func TestCallerCancelAbortsCall(t *testing.T) {
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
-		t.Fatalf("client.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	defer cli.Close()
 	defer close(holdRecv)
@@ -428,7 +427,7 @@ func TestOpenFilterShortCircuitNeverDials(t *testing.T) {
 	t.Parallel()
 	var dials atomic.Int64
 	want := errors.New("auth denied")
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
@@ -439,7 +438,7 @@ func TestOpenFilterShortCircuitNeverDials(t *testing.T) {
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
-		t.Fatalf("client.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	defer cli.Close()
 
@@ -461,7 +460,7 @@ func TestDialFailureMapsUnavailable(t *testing.T) {
 			return nil, root
 		},
 	}
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
@@ -469,7 +468,7 @@ func TestDialFailureMapsUnavailable(t *testing.T) {
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
-		t.Fatalf("client.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	defer cli.Close()
 
@@ -497,7 +496,7 @@ func TestHandshakeTimeoutMapsDeadlineExceeded(t *testing.T) {
 			return cli, nil
 		},
 	}
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
@@ -506,7 +505,7 @@ func TestHandshakeTimeoutMapsDeadlineExceeded(t *testing.T) {
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
-		t.Fatalf("client.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	defer cli.Close()
 
@@ -537,7 +536,7 @@ func TestHandshakeTimeoutBeforeOpenFilterNext(t *testing.T) {
 			return cli, nil
 		},
 	}
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
@@ -555,7 +554,7 @@ func TestHandshakeTimeoutBeforeOpenFilterNext(t *testing.T) {
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
-		t.Fatalf("client.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	defer cli.Close()
 
@@ -580,7 +579,7 @@ func TestNarrowInterfaceAssertStaysConfigError(t *testing.T) {
 			return cli, nil
 		},
 	}
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(2),
 		argos.WithMaxBufferedBytes(2*16*1024*1024),
@@ -588,7 +587,7 @@ func TestNarrowInterfaceAssertStaysConfigError(t *testing.T) {
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
-		t.Fatalf("client.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	defer cli.Close()
 
@@ -614,7 +613,7 @@ func TestCloseIdempotentAndRejectsOpen(t *testing.T) {
 		t.Fatalf("second Close: %v", err)
 	}
 	_, err := cli.Open(context.Background(), testMethod(t))
-	if !errors.Is(err, client.ErrClosed) {
+	if !errors.Is(err, ErrClosed) {
 		t.Fatalf("Open after Close: %v, want ErrClosed", err)
 	}
 }

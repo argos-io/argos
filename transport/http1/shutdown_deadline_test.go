@@ -1,4 +1,4 @@
-package http1_test
+package http1
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/transport"
-	argoshttp1 "github.com/argos-io/argos/transport/http1"
 )
 
 // Shutdown promises to interrupt unfinished connections on its deadline. A
@@ -16,8 +15,8 @@ func TestShutdownBoundedByDeadlineWhenCallbackBlocks(t *testing.T) {
 	started := make(chan struct{})
 	hold := make(chan struct{})
 
-	raw := argoshttp1.New()
-	tr := raw.(*argoshttp1.Transport)
+	raw := New()
+	tr := raw.(*Transport)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
@@ -40,7 +39,7 @@ func TestShutdownBoundedByDeadlineWhenCallbackBlocks(t *testing.T) {
 
 	addr := waitAddr(t, tr).String()
 
-	clientTr := argoshttp1.New()
+	clientTr := New()
 	defer clientTr.Close()
 	conn, err := clientTr.Dial(context.Background(), transport.DialSpec{Endpoint: addr})
 	if err != nil {

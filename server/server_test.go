@@ -1,4 +1,4 @@
-package server_test
+package server
 
 import (
 	"context"
@@ -22,7 +22,6 @@ import (
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/internal/fake"
-	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/stream"
 	"github.com/argos-io/argos/transport"
@@ -189,7 +188,7 @@ func testServiceAxes(tr transport.Transport, fr framing.Framing) argos.ServiceOp
 	)
 }
 
-func startServer(t *testing.T, tr *testTransport, fr framing.Framing, h filter.Handler, opts ...argos.ServerOption) *server.Server {
+func startServer(t *testing.T, tr *testTransport, fr framing.Framing, h filter.Handler, opts ...argos.ServerOption) *Server {
 	t.Helper()
 	base := append([]argos.ServerOption{
 		argos.WithService(svcName,
@@ -197,7 +196,7 @@ func startServer(t *testing.T, tr *testTransport, fr framing.Framing, h filter.H
 			argos.ServiceListenAddress("127.0.0.1:0"),
 		),
 	}, opts...)
-	srv := server.New(base...)
+	srv := New(base...)
 	if err := srv.Register(echoService(), map[string]filter.Handler{
 		methodEcho: h,
 	}); err != nil {
@@ -320,7 +319,7 @@ func TestServiceListenFilterChain(t *testing.T) {
 		return st.Send([]byte("pong:" + string(req)))
 	}
 
-	srv := server.New(
+	srv := New(
 		argos.WithFilter(count(&serverLevel)),
 		argos.WithService(svcName,
 			testServiceAxes(tr, srvFr),
@@ -468,7 +467,7 @@ func TestShutdownIdleConnExitsQuickly(t *testing.T) {
 		drainRecv(st)
 		return st.Send(req)
 	}
-	srv := server.New(
+	srv := New(
 		argos.WithMaxInboundConnIdle(30*time.Second),
 		argos.WithService(svcName,
 			testServiceAxes(tr, fr),
@@ -637,21 +636,21 @@ func exprString(e ast.Expr) string {
 func TestCauseSentinelsExported(t *testing.T) {
 	// 1.14b: causes are distinct and detectable with errors.Is / context.Cause.
 	ctx, cancel := context.WithCancelCause(context.Background())
-	cancel(server.ErrServerShutdown)
-	if !errors.Is(context.Cause(ctx), server.ErrServerShutdown) {
+	cancel(ErrServerShutdown)
+	if !errors.Is(context.Cause(ctx), ErrServerShutdown) {
 		t.Fatal("ErrServerShutdown not recoverable via Cause")
 	}
 	ctx2, cancel2 := context.WithCancelCause(context.Background())
-	cancel2(server.ErrPeerGone)
-	if !errors.Is(context.Cause(ctx2), server.ErrPeerGone) {
+	cancel2(ErrPeerGone)
+	if !errors.Is(context.Cause(ctx2), ErrPeerGone) {
 		t.Fatal("ErrPeerGone not recoverable via Cause")
 	}
 	ctx3, cancel3 := context.WithCancelCause(context.Background())
-	cancel3(server.ErrSessionExpired)
-	if !errors.Is(context.Cause(ctx3), server.ErrSessionExpired) {
+	cancel3(ErrSessionExpired)
+	if !errors.Is(context.Cause(ctx3), ErrSessionExpired) {
 		t.Fatal("ErrSessionExpired not recoverable via Cause")
 	}
-	if errors.Is(server.ErrServerShutdown, server.ErrPeerGone) {
+	if errors.Is(ErrServerShutdown, ErrPeerGone) {
 		t.Fatal("causes must be distinct")
 	}
 }

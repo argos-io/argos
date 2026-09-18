@@ -1,4 +1,4 @@
-package message_test
+package message
 
 import (
 	"fmt"
@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/argos-io/argos/internal/codegen/frontend/proto"
-	"github.com/argos-io/argos/internal/codegen/gen/message"
 	"github.com/argos-io/argos/internal/codegen/gogenrun"
 )
 
@@ -128,7 +127,7 @@ func TestGeneratedNestedDescriptorsBindAtRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse nested proto: %v", err)
 	}
-	generated, err := message.Generate(files[0])
+	generated, err := Generate(files[0])
 	if err != nil {
 		t.Fatalf("generate nested messages: %v", err)
 	}

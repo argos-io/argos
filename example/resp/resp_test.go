@@ -1,4 +1,4 @@
-package resp_test
+package resp
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/descriptor"
-	"github.com/argos-io/argos/example/resp"
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/metadata"
@@ -77,24 +76,24 @@ func (d *dialCounter) Dial(ctx context.Context, spec transport.DialSpec, opts ..
 
 type harness struct {
 	cli   *client.Client
-	fr    *resp.Framing
-	store *resp.Store
+	fr    *Framing
+	store *Store
 	dials *atomic.Int64
 }
 
-func startRESP(t *testing.T, register func(*server.Server, *resp.Store) error, frOpts ...resp.Option) *harness {
+func startRESP(t *testing.T, register func(*server.Server, *Store) error, frOpts ...Option) *harness {
 	t.Helper()
 	if register == nil {
-		register = resp.Register
+		register = Register
 	}
 
-	store := resp.NewStore()
-	var clientFr *resp.Framing
+	store := NewStore()
+	var clientFr *Framing
 	var dials atomic.Int64
 	var addrTr hasAddr
 	bound := make(chan struct{})
 
-	baseT, baseF, baseC := resp.BindingAxes(frOpts...)
+	baseT, baseF, baseC := BindingAxes(frOpts...)
 
 	cfg := baseConfig()
 	srv := server.New(argos.WithConfig(cfg), argos.WithService(svcName,
@@ -143,7 +142,7 @@ func startRESP(t *testing.T, register func(*server.Server, *resp.Store) error, f
 				return &dialCounter{Transport: tr, dials: &dials}, nil
 			}),
 			argos.WithFraming(func() (framing.Framing, error) {
-				fr := resp.New(frOpts...)
+				fr := New(frOpts...)
 				clientFr = fr
 				return fr, nil
 			}),
@@ -186,12 +185,12 @@ func doCall(t *testing.T, h *harness, m descriptor.Method, args []byte) []byte {
 func TestHELLOOncePerSession(t *testing.T) {
 	h := startRESP(t, nil)
 
-	out := doCall(t, h, resp.MethodSET, resp.EncodeArgs("k", "v1"))
-	if string(out) != string(resp.EncodeSimple("OK")) {
+	out := doCall(t, h, MethodSET, EncodeArgs("k", "v1"))
+	if string(out) != string(EncodeSimple("OK")) {
 		t.Fatalf("SET reply = %q", out)
 	}
-	out = doCall(t, h, resp.MethodGET, resp.EncodeArgs("k"))
-	if string(out) != string(resp.EncodeBulk("v1")) {
+	out = doCall(t, h, MethodGET, EncodeArgs("k"))
+	if string(out) != string(EncodeBulk("v1")) {
 		t.Fatalf("GET reply = %q, want bulk v1", out)
 	}
 
@@ -207,10 +206,10 @@ func TestSetGetSameConnection(t *testing.T) {
 	h := startRESP(t, nil)
 
 	const key, val = "foo", "bar-value"
-	if out := doCall(t, h, resp.MethodSET, resp.EncodeArgs(key, val)); string(out) != string(resp.EncodeSimple("OK")) {
+	if out := doCall(t, h, MethodSET, EncodeArgs(key, val)); string(out) != string(EncodeSimple("OK")) {
 		t.Fatalf("SET: %q", out)
 	}
-	if out := doCall(t, h, resp.MethodGET, resp.EncodeArgs(key)); string(out) != string(resp.EncodeBulk(val)) {
+	if out := doCall(t, h, MethodGET, EncodeArgs(key)); string(out) != string(EncodeBulk(val)) {
 		t.Fatalf("GET: %q", out)
 	}
 	if v, ok := h.store.Get(key); !ok || v != val {
@@ -222,7 +221,7 @@ func TestSetGetSameConnection(t *testing.T) {
 }
 
 func TestSendHeadersUnimplementedNextCallWorks(t *testing.T) {
-	register := func(srv *server.Server, store *resp.Store) error {
+	register := func(srv *server.Server, store *Store) error {
 		get := func(ctx context.Context, _ descriptor.Method, st stream.Stream) error {
 			md, ok := metadata.FromContext(ctx)
 			if !ok {
@@ -241,7 +240,7 @@ func TestSendHeadersUnimplementedNextCallWorks(t *testing.T) {
 			if err := st.Recv(&raw); err != nil {
 				return err
 			}
-			args, err := resp.DecodeArgs(raw)
+			args, err := DecodeArgs(raw)
 			if err != nil {
 				return err
 			}
@@ -249,17 +248,17 @@ func TestSendHeadersUnimplementedNextCallWorks(t *testing.T) {
 				return status.Error(status.InvalidArgument, "GET needs 1 arg")
 			}
 			if v, ok := store.Get(args[0]); ok {
-				return st.Send(resp.EncodeBulk(v))
+				return st.Send(EncodeBulk(v))
 			}
-			return st.Send(resp.EncodeBulkNull())
+			return st.Send(EncodeBulkNull())
 		}
 		return srv.Register(descriptor.MustService(svcName,
-			resp.MethodPING, resp.MethodGET, resp.MethodSET,
+			MethodPING, MethodGET, MethodSET,
 		), map[string]filter.Handler{
 			"PING": func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
 				var raw []byte
 				_ = st.Recv(&raw)
-				return st.Send(resp.EncodeSimple("PONG"))
+				return st.Send(EncodeSimple("PONG"))
 			},
 			"GET": get,
 			"SET": func(ctx context.Context, m descriptor.Method, st stream.Stream) error {
@@ -267,7 +266,7 @@ func TestSendHeadersUnimplementedNextCallWorks(t *testing.T) {
 				if err := st.Recv(&raw); err != nil {
 					return err
 				}
-				args, err := resp.DecodeArgs(raw)
+				args, err := DecodeArgs(raw)
 				if err != nil {
 					return err
 				}
@@ -275,7 +274,7 @@ func TestSendHeadersUnimplementedNextCallWorks(t *testing.T) {
 					return status.Error(status.InvalidArgument, "SET needs 2 args")
 				}
 				store.Set(args[0], args[1])
-				return st.Send(resp.EncodeSimple("OK"))
+				return st.Send(EncodeSimple("OK"))
 			},
 		})
 	}
@@ -283,13 +282,13 @@ func TestSendHeadersUnimplementedNextCallWorks(t *testing.T) {
 	h := startRESP(t, register)
 	h.store.Set("x", "1")
 
-	out := doCall(t, h, resp.MethodGET, resp.EncodeArgs("x"))
-	if string(out) != string(resp.EncodeBulk("1")) {
+	out := doCall(t, h, MethodGET, EncodeArgs("x"))
+	if string(out) != string(EncodeBulk("1")) {
 		t.Fatalf("GET after SendHeaders: %q", out)
 	}
 	// Next call on the same Sequential session still works.
-	out = doCall(t, h, resp.MethodSET, resp.EncodeArgs("y", "2"))
-	if string(out) != string(resp.EncodeSimple("OK")) {
+	out = doCall(t, h, MethodSET, EncodeArgs("y", "2"))
+	if string(out) != string(EncodeSimple("OK")) {
 		t.Fatalf("SET after SendHeaders path: %q", out)
 	}
 	if h.dials.Load() != 1 {
@@ -303,12 +302,12 @@ func TestSUBSCRIBEServerStreamingExclusive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
-	st, err := h.cli.Open(ctx, resp.MethodSUBSCRIBE)
+	st, err := h.cli.Open(ctx, MethodSUBSCRIBE)
 	if err != nil {
 		t.Fatalf("Open(SUBSCRIBE): %v", err)
 	}
 
-	if err := st.Send(resp.EncodeArgs("news")); err != nil {
+	if err := st.Send(EncodeArgs("news")); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if err := st.HalfClose(); err != nil {
@@ -319,7 +318,7 @@ func TestSUBSCRIBEServerStreamingExclusive(t *testing.T) {
 	if err := st.Recv(&ack); err != nil {
 		t.Fatalf("Recv ack: %v", err)
 	}
-	wantAck := resp.EncodeSubscribeAck("news", 1)
+	wantAck := EncodeSubscribeAck("news", 1)
 	if string(ack) != string(wantAck) {
 		t.Fatalf("ack = %q, want %q", ack, wantAck)
 	}
@@ -341,7 +340,7 @@ func TestSUBSCRIBEServerStreamingExclusive(t *testing.T) {
 	if err := st.Recv(&push); err != nil {
 		t.Fatalf("Recv push: %v", err)
 	}
-	wantPush := resp.EncodePushMessage("news", "hello-push")
+	wantPush := EncodePushMessage("news", "hello-push")
 	if string(push) != string(wantPush) {
 		t.Fatalf("push = %q, want %q", push, wantPush)
 	}
@@ -352,8 +351,8 @@ func TestSUBSCRIBEServerStreamingExclusive(t *testing.T) {
 
 	// After the exclusive call ends the connection is closed, not returned:
 	// the next unary call must HELLO again on a fresh dial.
-	out := doCall(t, h, resp.MethodPING, resp.EncodeArgs())
-	if string(out) != string(resp.EncodeSimple("PONG")) {
+	out := doCall(t, h, MethodPING, EncodeArgs())
+	if string(out) != string(EncodeSimple("PONG")) {
 		t.Fatalf("PING after SUBSCRIBE: %q", out)
 	}
 	if got := h.fr.ClientHellos(); got != 2 {
@@ -366,15 +365,15 @@ func TestSUBSCRIBEServerStreamingExclusive(t *testing.T) {
 
 func TestPING(t *testing.T) {
 	h := startRESP(t, nil)
-	out := doCall(t, h, resp.MethodPING, resp.EncodeArgs())
-	if string(out) != string(resp.EncodeSimple("PONG")) {
+	out := doCall(t, h, MethodPING, EncodeArgs())
+	if string(out) != string(EncodeSimple("PONG")) {
 		t.Fatalf("PING: %q", out)
 	}
 }
 
 func TestWireRoundTrip(t *testing.T) {
-	raw := resp.EncodeArgs("a", "b")
-	args, err := resp.DecodeArgs(raw)
+	raw := EncodeArgs("a", "b")
+	args, err := DecodeArgs(raw)
 	if err != nil {
 		t.Fatal(err)
 	}

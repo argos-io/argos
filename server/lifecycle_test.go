@@ -1,4 +1,4 @@
-package server_test
+package server
 
 import (
 	"context"
@@ -14,7 +14,6 @@ import (
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/internal/fake"
-	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/stream"
 	"github.com/argos-io/argos/transport"
 )
@@ -32,7 +31,7 @@ func TestProtocolAssembleOncePerServerStart(t *testing.T) {
 		return st.Send(req)
 	}
 
-	srv := server.New(argos.WithService(svcName,
+	srv := New(argos.WithService(svcName,
 		argos.JoinService(
 			argos.ServiceTransport(func() (transport.Transport, error) {
 				calls.Add(1)
@@ -164,7 +163,7 @@ func TestFactoryIsolationAcrossListeners(t *testing.T) {
 			argos.ServiceCodec(func() (codec.Codec, error) { return rawCodec{}, nil }),
 		)
 	}
-	srv := server.New(argos.WithService(svcName,
+	srv := New(argos.WithService(svcName,
 		argos.ServiceListener("127.0.0.1:1", listenerAxes(tr1, fr1)),
 		argos.ServiceListener("127.0.0.1:2", listenerAxes(tr2, fr2)),
 	))
@@ -189,11 +188,11 @@ var errAxisFactory = errors.New("transport factory refused")
 // newAbortingServer returns a Server whose second listen surface cannot
 // assemble, so Run aborts after the first surface is already built, plus that
 // first surface's Transport.
-func newAbortingServer(t *testing.T) (*server.Server, *testTransport) {
+func newAbortingServer(t *testing.T) (*Server, *testTransport) {
 	t.Helper()
 	tr := newTestTransport()
 	fr := fake.NewFraming(framing.Sequential)
-	srv := server.New(argos.WithService(svcName,
+	srv := New(argos.WithService(svcName,
 		argos.ServiceListener("127.0.0.1:1", testServiceAxes(tr, fr)),
 		argos.ServiceListener("127.0.0.1:2",
 			argos.ServiceTransport(func() (transport.Transport, error) { return nil, errAxisFactory }),
@@ -247,7 +246,7 @@ func TestCloseDuringStartClosesAssembledTransports(t *testing.T) {
 	assembling := make(chan struct{})
 	resume := make(chan struct{})
 
-	srv := server.New(argos.WithService(svcName,
+	srv := New(argos.WithService(svcName,
 		argos.ServiceListener("127.0.0.1:1", testServiceAxes(tr1, fr)),
 		// Holds the start inside the assembly loop until the test has closed
 		// the Server, so Close snapshots the live surfaces while there are none.
@@ -294,7 +293,7 @@ func TestCloseDuringStartClosesAssembledTransports(t *testing.T) {
 func TestRejectedOptionsSurfaceFromRun(t *testing.T) {
 	tr := newTestTransport()
 	fr := fake.NewFraming(framing.Sequential)
-	srv := server.New(
+	srv := New(
 		argos.WithMaxConcurrentCalls(-5),
 		argos.WithService(svcName, testServiceAxes(tr, fr), argos.ServiceListenAddress("127.0.0.1:0")),
 	)

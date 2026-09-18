@@ -1,4 +1,4 @@
-package grpc_test
+package grpc
 
 import (
 	"bytes"
@@ -6,7 +6,6 @@ import (
 	"io"
 	"testing"
 
-	grpcframing "github.com/argos-io/argos/framing/grpc"
 	"github.com/argos-io/argos/status"
 )
 
@@ -23,10 +22,10 @@ func TestLPMRoundTrip(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := grpcframing.WriteLPM(&buf, false, tc.payload); err != nil {
+			if err := WriteLPM(&buf, false, tc.payload); err != nil {
 				t.Fatalf("WriteLPM: %v", err)
 			}
-			compressed, got, err := grpcframing.ReadLPM(&buf)
+			compressed, got, err := ReadLPM(&buf)
 			if err != nil {
 				t.Fatalf("ReadLPM: %v", err)
 			}
@@ -42,7 +41,7 @@ func TestLPMRoundTrip(t *testing.T) {
 			}
 			// Empty message must not be treated as EOF: a second read on empty
 			// buffer is EOF only because the stream ended, not because of LPM.
-			_, _, err = grpcframing.ReadLPM(&buf)
+			_, _, err = ReadLPM(&buf)
 			if err != io.EOF {
 				t.Fatalf("second ReadLPM err = %v, want EOF (stream ended)", err)
 			}
@@ -53,20 +52,20 @@ func TestLPMRoundTrip(t *testing.T) {
 func TestLPMEmptyNotEOF(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if err := grpcframing.WriteLPM(&buf, false, []byte{}); err != nil {
+	if err := WriteLPM(&buf, false, []byte{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := grpcframing.WriteLPM(&buf, false, []byte("next")); err != nil {
+	if err := WriteLPM(&buf, false, []byte("next")); err != nil {
 		t.Fatal(err)
 	}
-	_, p1, err := grpcframing.ReadLPM(&buf)
+	_, p1, err := ReadLPM(&buf)
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
 	if len(p1) != 0 {
 		t.Fatalf("first payload len = %d, want 0", len(p1))
 	}
-	_, p2, err := grpcframing.ReadLPM(&buf)
+	_, p2, err := ReadLPM(&buf)
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -78,10 +77,10 @@ func TestLPMEmptyNotEOF(t *testing.T) {
 func TestLPMRejectsCompressed(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	if err := grpcframing.WriteLPM(&buf, true, []byte("x")); err != nil {
+	if err := WriteLPM(&buf, true, []byte("x")); err != nil {
 		t.Fatal(err)
 	}
-	compressed, payload, err := grpcframing.ReadLPM(&buf)
+	compressed, payload, err := ReadLPM(&buf)
 	if err != nil {
 		t.Fatalf("ReadLPM: %v", err)
 	}
@@ -99,7 +98,7 @@ func TestReadLPMLimitedRejectsOversizeWithoutAlloc(t *testing.T) {
 	var hdr [5]byte
 	hdr[0] = 0
 	binary.BigEndian.PutUint32(hdr[1:], 1<<30)
-	_, payload, err := grpcframing.ReadLPMLimited(bytes.NewReader(hdr[:]), 1024)
+	_, payload, err := ReadLPMLimited(bytes.NewReader(hdr[:]), 1024)
 	if err == nil {
 		t.Fatal("want error for oversize LPM length")
 	}
@@ -115,10 +114,10 @@ func TestReadLPMLimitedAllowsExactMax(t *testing.T) {
 	t.Parallel()
 	payload := []byte("abcd")
 	var buf bytes.Buffer
-	if err := grpcframing.WriteLPM(&buf, false, payload); err != nil {
+	if err := WriteLPM(&buf, false, payload); err != nil {
 		t.Fatal(err)
 	}
-	_, got, err := grpcframing.ReadLPMLimited(&buf, int64(len(payload)))
+	_, got, err := ReadLPMLimited(&buf, int64(len(payload)))
 	if err != nil {
 		t.Fatal(err)
 	}

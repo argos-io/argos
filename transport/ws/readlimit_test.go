@@ -1,4 +1,4 @@
-package ws_test
+package ws
 
 import (
 	"bytes"
@@ -10,7 +10,6 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/argos-io/argos/transport"
-	"github.com/argos-io/argos/transport/ws"
 )
 
 // coder/websocket caps inbound messages at 32 KiB unless the transport raises
@@ -19,7 +18,7 @@ import (
 func TestMessageLargerThanReadLimitIsDelivered(t *testing.T) {
 	_, addr := startEchoServer(t)
 
-	clientTr := ws.New()
+	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -65,8 +64,8 @@ func TestMessageLargerThanReadLimitIsDelivered(t *testing.T) {
 // message produced, then closes the connection.
 func startLimitedServer(t *testing.T, limit int64, recvErr chan<- error) string {
 	t.Helper()
-	raw := ws.New(ws.WithMaxReadBytes(limit))
-	tr := raw.(*ws.Transport)
+	raw := New(WithMaxReadBytes(limit))
+	tr := raw.(*Transport)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
@@ -97,7 +96,7 @@ func TestWithMaxReadBytesAppliesToAccept(t *testing.T) {
 	recvErr := make(chan error, 1)
 	addr := startLimitedServer(t, limit, recvErr)
 
-	clientTr := ws.New()
+	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -127,7 +126,7 @@ func TestWithMaxReadBytesAppliesToDial(t *testing.T) {
 	const limit = 1024
 	_, addr := startEchoServer(t)
 
-	clientTr := ws.New(ws.WithMaxReadBytes(limit))
+	clientTr := New(WithMaxReadBytes(limit))
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

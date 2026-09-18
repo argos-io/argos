@@ -1,4 +1,4 @@
-package status_test
+package status
 
 import (
 	"errors"
@@ -10,33 +10,32 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/argos-io/argos/status"
 	"google.golang.org/grpc/codes"
 )
 
 func TestCodeValuesMatchGRPC(t *testing.T) {
 	cases := []struct {
 		name string
-		got  status.Code
+		got  Code
 		want codes.Code
 	}{
-		{"OK", status.OK, codes.OK},
-		{"Canceled", status.Canceled, codes.Canceled},
-		{"Unknown", status.Unknown, codes.Unknown},
-		{"InvalidArgument", status.InvalidArgument, codes.InvalidArgument},
-		{"DeadlineExceeded", status.DeadlineExceeded, codes.DeadlineExceeded},
-		{"NotFound", status.NotFound, codes.NotFound},
-		{"AlreadyExists", status.AlreadyExists, codes.AlreadyExists},
-		{"PermissionDenied", status.PermissionDenied, codes.PermissionDenied},
-		{"ResourceExhausted", status.ResourceExhausted, codes.ResourceExhausted},
-		{"FailedPrecondition", status.FailedPrecondition, codes.FailedPrecondition},
-		{"Aborted", status.Aborted, codes.Aborted},
-		{"OutOfRange", status.OutOfRange, codes.OutOfRange},
-		{"Unimplemented", status.Unimplemented, codes.Unimplemented},
-		{"Internal", status.Internal, codes.Internal},
-		{"Unavailable", status.Unavailable, codes.Unavailable},
-		{"DataLoss", status.DataLoss, codes.DataLoss},
-		{"Unauthenticated", status.Unauthenticated, codes.Unauthenticated},
+		{"OK", OK, codes.OK},
+		{"Canceled", Canceled, codes.Canceled},
+		{"Unknown", Unknown, codes.Unknown},
+		{"InvalidArgument", InvalidArgument, codes.InvalidArgument},
+		{"DeadlineExceeded", DeadlineExceeded, codes.DeadlineExceeded},
+		{"NotFound", NotFound, codes.NotFound},
+		{"AlreadyExists", AlreadyExists, codes.AlreadyExists},
+		{"PermissionDenied", PermissionDenied, codes.PermissionDenied},
+		{"ResourceExhausted", ResourceExhausted, codes.ResourceExhausted},
+		{"FailedPrecondition", FailedPrecondition, codes.FailedPrecondition},
+		{"Aborted", Aborted, codes.Aborted},
+		{"OutOfRange", OutOfRange, codes.OutOfRange},
+		{"Unimplemented", Unimplemented, codes.Unimplemented},
+		{"Internal", Internal, codes.Internal},
+		{"Unavailable", Unavailable, codes.Unavailable},
+		{"DataLoss", DataLoss, codes.DataLoss},
+		{"Unauthenticated", Unauthenticated, codes.Unauthenticated},
 	}
 	if len(cases) != 17 {
 		t.Fatalf("want 17 codes, got %d", len(cases))
@@ -44,7 +43,7 @@ func TestCodeValuesMatchGRPC(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if uint32(tc.got) != uint32(tc.want) {
-				t.Fatalf("status.%s = %d, grpc codes.%s = %d", tc.name, tc.got, tc.name, tc.want)
+				t.Fatalf("%s = %d, grpc codes.%s = %d", tc.name, tc.got, tc.name, tc.want)
 			}
 		})
 	}
@@ -102,36 +101,36 @@ func TestNoProtobufImport(t *testing.T) {
 }
 
 func TestCodeOf(t *testing.T) {
-	if status.CodeOf(nil) != status.OK {
-		t.Fatalf("CodeOf(nil) = %v, want OK", status.CodeOf(nil))
+	if CodeOf(nil) != OK {
+		t.Fatalf("CodeOf(nil) = %v, want OK", CodeOf(nil))
 	}
-	err := status.Error(status.NotFound, "no such echo")
-	if status.CodeOf(err) != status.NotFound {
-		t.Fatalf("got %v", status.CodeOf(err))
+	err := Error(NotFound, "no such echo")
+	if CodeOf(err) != NotFound {
+		t.Fatalf("got %v", CodeOf(err))
 	}
-	if status.CodeOf(errors.New("x")) != status.Unknown {
+	if CodeOf(errors.New("x")) != Unknown {
 		t.Fatal("plain error must be Unknown")
 	}
 	wrapped := errors.Join(errors.New("outer"), err)
-	if status.CodeOf(wrapped) != status.NotFound {
-		t.Fatalf("CodeOf(wrapped) = %v, want NotFound", status.CodeOf(wrapped))
+	if CodeOf(wrapped) != NotFound {
+		t.Fatalf("CodeOf(wrapped) = %v, want NotFound", CodeOf(wrapped))
 	}
 }
 
 func TestErrorMessage(t *testing.T) {
-	err := status.Error(status.Internal, "boom")
+	err := Error(Internal, "boom")
 	if err.Error() != "boom" {
 		t.Fatalf("Error() = %q", err.Error())
 	}
 }
 
 func TestErrorAs(t *testing.T) {
-	err := status.Error(status.Aborted, "stop")
-	var se *status.StatusError
+	err := Error(Aborted, "stop")
+	var se *StatusError
 	if !errors.As(err, &se) {
-		t.Fatal("errors.As to *status.StatusError failed")
+		t.Fatal("errors.As to *StatusError failed")
 	}
-	if se.Code() != status.Aborted {
+	if se.Code() != Aborted {
 		t.Fatalf("Code() = %v", se.Code())
 	}
 	if se.Message() != "stop" {
@@ -140,12 +139,12 @@ func TestErrorAs(t *testing.T) {
 }
 
 func TestErrorIsSameCode(t *testing.T) {
-	a := status.Error(status.NotFound, "a")
-	b := status.Error(status.NotFound, "b")
+	a := Error(NotFound, "a")
+	b := Error(NotFound, "b")
 	if !errors.Is(a, b) {
 		t.Fatal("same code errors should match with errors.Is")
 	}
-	if errors.Is(a, status.Error(status.Unauthenticated, "c")) {
+	if errors.Is(a, Error(Unauthenticated, "c")) {
 		t.Fatal("different code errors must not match")
 	}
 	if errors.Is(a, errors.New("plain")) {
@@ -154,78 +153,73 @@ func TestErrorIsSameCode(t *testing.T) {
 }
 
 func TestErrCardinality(t *testing.T) {
-	if !errors.Is(status.ErrCardinality, status.ErrCardinality) {
+	if !errors.Is(ErrCardinality, ErrCardinality) {
 		t.Fatal("ErrCardinality must match itself")
 	}
-	if status.CodeOf(status.ErrCardinality) != status.Internal {
-		t.Fatalf("CodeOf(ErrCardinality) = %v, want Internal", status.CodeOf(status.ErrCardinality))
+	if CodeOf(ErrCardinality) != Internal {
+		t.Fatalf("CodeOf(ErrCardinality) = %v, want Internal", CodeOf(ErrCardinality))
 	}
-	plain := status.Error(status.Internal, "x")
-	if errors.Is(plain, status.ErrCardinality) {
+	plain := Error(Internal, "x")
+	if errors.Is(plain, ErrCardinality) {
 		t.Fatal("plain Internal must not match ErrCardinality")
 	}
-	//lint:ignore SA1032 deliberate reverse-direction check: matching must not
-	// be symmetric here, so both orders are asserted.
-	if errors.Is(status.ErrCardinality, plain) {
+	if errors.Is(ErrCardinality, plain) {
 		t.Fatal("ErrCardinality must not match plain Internal")
 	}
-	wrapped := errors.Join(errors.New("wrap"), status.ErrCardinality)
-	if !errors.Is(wrapped, status.ErrCardinality) {
+	wrapped := errors.Join(errors.New("wrap"), ErrCardinality)
+	if !errors.Is(wrapped, ErrCardinality) {
 		t.Fatal("wrapped ErrCardinality must still match")
 	}
-	if status.CodeOf(wrapped) != status.Internal {
-		t.Fatalf("CodeOf(wrapped ErrCardinality) = %v", status.CodeOf(wrapped))
+	if CodeOf(wrapped) != Internal {
+		t.Fatalf("CodeOf(wrapped ErrCardinality) = %v", CodeOf(wrapped))
 	}
 }
 
 func TestExhaustedSentinels(t *testing.T) {
-	if status.CodeOf(status.ErrSessionsExhausted) != status.ResourceExhausted {
-		t.Fatalf("CodeOf(ErrSessionsExhausted) = %v", status.CodeOf(status.ErrSessionsExhausted))
+	if CodeOf(ErrSessionsExhausted) != ResourceExhausted {
+		t.Fatalf("CodeOf(ErrSessionsExhausted) = %v", CodeOf(ErrSessionsExhausted))
 	}
-	if status.CodeOf(status.ErrCallsExhausted) != status.ResourceExhausted {
-		t.Fatalf("CodeOf(ErrCallsExhausted) = %v", status.CodeOf(status.ErrCallsExhausted))
+	if CodeOf(ErrCallsExhausted) != ResourceExhausted {
+		t.Fatalf("CodeOf(ErrCallsExhausted) = %v", CodeOf(ErrCallsExhausted))
 	}
-	if errors.Is(status.ErrSessionsExhausted, status.ErrCallsExhausted) {
+	if errors.Is(ErrSessionsExhausted, ErrCallsExhausted) {
 		t.Fatal("sessions and calls exhausted must be distinguishable")
 	}
-	if errors.Is(status.ErrCallsExhausted, status.ErrSessionsExhausted) {
+	if errors.Is(ErrCallsExhausted, ErrSessionsExhausted) {
 		t.Fatal("calls and sessions exhausted must be distinguishable")
 	}
-	plain := status.Error(status.ResourceExhausted, "x")
-	//lint:ignore SA1032 deliberate reverse-direction checks: both orders are
-	// asserted because matching must not be symmetric here.
-	if errors.Is(plain, status.ErrSessionsExhausted) || errors.Is(status.ErrSessionsExhausted, plain) {
+	plain := Error(ResourceExhausted, "x")
+	if errors.Is(plain, ErrSessionsExhausted) || errors.Is(ErrSessionsExhausted, plain) {
 		t.Fatal("plain ResourceExhausted must not match ErrSessionsExhausted")
 	}
-	//lint:ignore SA1032 see above.
-	if errors.Is(plain, status.ErrCallsExhausted) || errors.Is(status.ErrCallsExhausted, plain) {
+	if errors.Is(plain, ErrCallsExhausted) || errors.Is(ErrCallsExhausted, plain) {
 		t.Fatal("plain ResourceExhausted must not match ErrCallsExhausted")
 	}
-	if !errors.Is(status.ErrSessionsExhausted, status.ErrSessionsExhausted) {
+	if !errors.Is(ErrSessionsExhausted, ErrSessionsExhausted) {
 		t.Fatal("ErrSessionsExhausted must match itself")
 	}
-	if !errors.Is(status.ErrCallsExhausted, status.ErrCallsExhausted) {
+	if !errors.Is(ErrCallsExhausted, ErrCallsExhausted) {
 		t.Fatal("ErrCallsExhausted must match itself")
 	}
 }
 
 func TestWithDetailsNil(t *testing.T) {
-	err := status.WithDetails(nil, status.Detail{TypeURL: "t", Value: []byte("v")})
+	err := WithDetails(nil, Detail{TypeURL: "t", Value: []byte("v")})
 	if err == nil {
 		t.Fatal("WithDetails(nil) must return an error")
 	}
-	if status.CodeOf(err) == status.OK {
+	if CodeOf(err) == OK {
 		t.Fatal("WithDetails(nil) must not yield OK")
 	}
 }
 
 func TestDetailsDeepCopy(t *testing.T) {
 	val := []byte("payload")
-	base := status.Error(status.Internal, "boom")
-	with := status.WithDetails(base, status.Detail{TypeURL: "type.googleapis.com/x", Value: val})
+	base := Error(Internal, "boom")
+	with := WithDetails(base, Detail{TypeURL: "type.googleapis.com/x", Value: val})
 
 	val[0] = 'X'
-	got := status.DetailsOf(with)
+	got := DetailsOf(with)
 	if len(got) != 1 {
 		t.Fatalf("len(DetailsOf) = %d", len(got))
 	}
@@ -234,26 +228,26 @@ func TestDetailsDeepCopy(t *testing.T) {
 	}
 
 	got[0].Value[0] = 'Y'
-	got2 := status.DetailsOf(with)
+	got2 := DetailsOf(with)
 	if string(got2[0].Value) != "payload" {
 		t.Fatalf("DetailsOf did not deep-copy Value: %q", got2[0].Value)
 	}
 }
 
 func TestWithDetailsPreservesSentinel(t *testing.T) {
-	with := status.WithDetails(status.ErrCardinality, status.Detail{TypeURL: "t", Value: []byte("v")})
-	if !errors.Is(with, status.ErrCardinality) {
+	with := WithDetails(ErrCardinality, Detail{TypeURL: "t", Value: []byte("v")})
+	if !errors.Is(with, ErrCardinality) {
 		t.Fatal("WithDetails must preserve ErrCardinality for errors.Is")
 	}
-	if status.CodeOf(with) != status.Internal {
-		t.Fatalf("CodeOf = %v", status.CodeOf(with))
+	if CodeOf(with) != Internal {
+		t.Fatalf("CodeOf = %v", CodeOf(with))
 	}
-	if len(status.DetailsOf(with)) != 1 {
+	if len(DetailsOf(with)) != 1 {
 		t.Fatal("details missing")
 	}
 }
 
 func TestPackageName(t *testing.T) {
-	// Compile-time: imported as status. Also assert via source in TestNoProtobufImport.
-	_ = status.OK
+	// Compile-time: imported as  Also assert via source in TestNoProtobufImport.
+	_ = OK
 }

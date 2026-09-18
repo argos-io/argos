@@ -1,4 +1,4 @@
-package httpunary_test
+package httpunary
 
 import (
 	"context"
@@ -9,7 +9,6 @@ import (
 
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
-	"github.com/argos-io/argos/framing/httpunary"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/transport"
@@ -38,7 +37,7 @@ func openLimitedCall(t *testing.T, cfg framing.Config, body []byte, hdr map[stri
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	cs, err := httpunary.NewRPC().NewClientSession(ctx, conn,
+	cs, err := NewRPC().NewClientSession(ctx, conn,
 		framing.SessionSpec{CodecName: "bytes", Config: cfg})
 	if err != nil {
 		t.Fatalf("NewClientSession: %v", err)

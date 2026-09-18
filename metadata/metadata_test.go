@@ -1,4 +1,4 @@
-package metadata_test
+package metadata
 
 import (
 	"context"
@@ -6,13 +6,12 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/status"
 )
 
 func TestCloneIndependent(t *testing.T) {
-	src := metadata.Metadata{"k": {"v"}}
-	cp := metadata.Clone(src)
+	src := Metadata{"k": {"v"}}
+	cp := Clone(src)
 	cp["k"][0] = "mutated"
 	cp["k"] = append(cp["k"], "x")
 	cp["n"] = []string{"y"}
@@ -22,27 +21,27 @@ func TestCloneIndependent(t *testing.T) {
 	if _, ok := src["n"]; ok {
 		t.Fatal("Clone leaked new key into source")
 	}
-	if metadata.Clone(nil) != nil {
+	if Clone(nil) != nil {
 		t.Fatal("Clone(nil) must be nil")
 	}
 }
 
 func TestGettersReturnDefensiveCopies(t *testing.T) {
-	md := metadata.New(metadata.RoleResponder, func(metadata.Metadata) error { return nil })
+	md := New(RoleResponder, func(Metadata) error { return nil })
 	if err := md.AddOutgoingHeader("oh", "1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := md.AddOutgoingTrailer("ot", "2"); err != nil {
 		t.Fatal(err)
 	}
-	if err := metadata.SetIncomingHeaders(md, metadata.Metadata{"ih": {"3"}}); err != nil {
+	if err := SetIncomingHeaders(md, Metadata{"ih": {"3"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := metadata.SetIncomingTrailers(md, metadata.Metadata{"it": {"4"}}); err != nil {
+	if err := SetIncomingTrailers(md, Metadata{"it": {"4"}}); err != nil {
 		t.Fatal(err)
 	}
 
-	mutate := func(got metadata.Metadata, key string) {
+	mutate := func(got Metadata, key string) {
 		got[key][0] = "mutated"
 		got[key] = append(got[key], "extra")
 		got["injected"] = []string{"x"}
@@ -52,7 +51,7 @@ func TestGettersReturnDefensiveCopies(t *testing.T) {
 	mutate(md.IncomingHeaders(), "ih")
 	mutate(md.IncomingTrailers(), "it")
 
-	assertOne := func(name string, got metadata.Metadata, key, want string) {
+	assertOne := func(name string, got Metadata, key, want string) {
 		t.Helper()
 		if got[key][0] != want || len(got[key]) != 1 {
 			t.Fatalf("%s: internal leaked; got %v", name, got)
@@ -68,15 +67,15 @@ func TestGettersReturnDefensiveCopies(t *testing.T) {
 }
 
 func TestAddAfterFreezeClearError(t *testing.T) {
-	md := metadata.New(metadata.RoleResponder, func(metadata.Metadata) error { return nil })
+	md := New(RoleResponder, func(Metadata) error { return nil })
 	if err := md.AddOutgoingHeader("a", "1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := metadata.FreezeOutgoingHeaders(md); err != nil {
+	if err := FreezeOutgoingHeaders(md); err != nil {
 		t.Fatal(err)
 	}
 	err := md.AddOutgoingHeader("a", "2")
-	if !errors.Is(err, metadata.ErrOutgoingHeadersFrozen) {
+	if !errors.Is(err, ErrOutgoingHeadersFrozen) {
 		t.Fatalf("AddOutgoingHeader after freeze: %v", err)
 	}
 	got := md.OutgoingHeaders()
@@ -86,9 +85,9 @@ func TestAddAfterFreezeClearError(t *testing.T) {
 }
 
 func TestSendHeadersFreezesAndSecondIsAlreadySent(t *testing.T) {
-	var submitted metadata.Metadata
-	md := metadata.New(metadata.RoleResponder, func(h metadata.Metadata) error {
-		submitted = metadata.Clone(h)
+	var submitted Metadata
+	md := New(RoleResponder, func(h Metadata) error {
+		submitted = Clone(h)
 		return nil
 	})
 	if err := md.AddOutgoingHeader("h", "v"); err != nil {
@@ -100,17 +99,17 @@ func TestSendHeadersFreezesAndSecondIsAlreadySent(t *testing.T) {
 	if submitted["h"][0] != "v" {
 		t.Fatalf("submitted = %v", submitted)
 	}
-	if err := md.AddOutgoingHeader("h", "again"); !errors.Is(err, metadata.ErrOutgoingHeadersFrozen) {
+	if err := md.AddOutgoingHeader("h", "again"); !errors.Is(err, ErrOutgoingHeadersFrozen) {
 		t.Fatalf("Add after SendHeaders: %v", err)
 	}
 	err := md.SendHeaders()
-	if !errors.Is(err, metadata.ErrHeadersAlreadySent) {
+	if !errors.Is(err, ErrHeadersAlreadySent) {
 		t.Fatalf("second SendHeaders: %v", err)
 	}
 }
 
 func TestSendHeadersNilCallbackUnimplementedNoFreeze(t *testing.T) {
-	md := metadata.New(metadata.RoleResponder, nil)
+	md := New(RoleResponder, nil)
 	if err := md.AddOutgoingHeader("h", "v"); err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +127,7 @@ func TestSendHeadersNilCallbackUnimplementedNoFreeze(t *testing.T) {
 }
 
 func TestSendHeadersReturnsUnimplementedNoFreeze(t *testing.T) {
-	md := metadata.New(metadata.RoleResponder, func(metadata.Metadata) error {
+	md := New(RoleResponder, func(Metadata) error {
 		return status.Error(status.Unimplemented, "carrier: no headers")
 	})
 	if err := md.AddOutgoingHeader("h", "v"); err != nil {
@@ -144,7 +143,7 @@ func TestSendHeadersReturnsUnimplementedNoFreeze(t *testing.T) {
 }
 
 func TestRoleInitiator(t *testing.T) {
-	md := metadata.New(metadata.RoleInitiator, func(metadata.Metadata) error { return nil })
+	md := New(RoleInitiator, func(Metadata) error { return nil })
 	if err := md.AddOutgoingHeader("h", "v"); err != nil {
 		t.Fatal(err)
 	}
@@ -157,44 +156,44 @@ func TestRoleInitiator(t *testing.T) {
 		t.Fatalf("SendHeaders initiator: CodeOf=%v err=%v", status.CodeOf(err), err)
 	}
 	// Initiator freeze still works for OpenCall path.
-	if err := metadata.FreezeOutgoingHeaders(md); err != nil {
+	if err := FreezeOutgoingHeaders(md); err != nil {
 		t.Fatal(err)
 	}
-	if err := md.AddOutgoingHeader("h", "x"); !errors.Is(err, metadata.ErrOutgoingHeadersFrozen) {
+	if err := md.AddOutgoingHeader("h", "x"); !errors.Is(err, ErrOutgoingHeadersFrozen) {
 		t.Fatalf("after freeze: %v", err)
 	}
 }
 
 func TestRoleResponderTrailersFreeze(t *testing.T) {
-	md := metadata.New(metadata.RoleResponder, nil)
+	md := New(RoleResponder, nil)
 	if err := md.AddOutgoingTrailer("t", "1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := metadata.FreezeOutgoingTrailers(md); err != nil {
+	if err := FreezeOutgoingTrailers(md); err != nil {
 		t.Fatal(err)
 	}
 	err := md.AddOutgoingTrailer("t", "2")
-	if !errors.Is(err, metadata.ErrOutgoingTrailersFrozen) {
+	if !errors.Is(err, ErrOutgoingTrailersFrozen) {
 		t.Fatalf("AddOutgoingTrailer after freeze: %v", err)
 	}
 }
 
 func TestContextRoundTrip(t *testing.T) {
-	md := metadata.New(metadata.RoleResponder, nil)
-	ctx := metadata.ContextWith(context.Background(), md)
-	got, ok := metadata.FromContext(ctx)
+	md := New(RoleResponder, nil)
+	ctx := ContextWith(context.Background(), md)
+	got, ok := FromContext(ctx)
 	if !ok || got != md {
 		t.Fatalf("FromContext: ok=%v got=%v", ok, got)
 	}
-	if _, ok := metadata.FromContext(context.Background()); ok {
+	if _, ok := FromContext(context.Background()); ok {
 		t.Fatal("empty ctx must miss")
 	}
 }
 
 func TestSetIncomingCopiesInput(t *testing.T) {
-	md := metadata.New(metadata.RoleResponder, nil)
-	in := metadata.Metadata{"k": {"v"}}
-	if err := metadata.SetIncomingHeaders(md, in); err != nil {
+	md := New(RoleResponder, nil)
+	in := Metadata{"k": {"v"}}
+	if err := SetIncomingHeaders(md, in); err != nil {
 		t.Fatal(err)
 	}
 	in["k"][0] = "mut"
@@ -206,21 +205,21 @@ func TestSetIncomingCopiesInput(t *testing.T) {
 }
 
 func TestFramingHelpersRejectForeign(t *testing.T) {
-	var foreign metadata.CallMetadata = foreignMD{}
-	if err := metadata.SetIncomingHeaders(foreign, nil); err == nil {
+	var foreign CallMetadata = foreignMD{}
+	if err := SetIncomingHeaders(foreign, nil); err == nil {
 		t.Fatal("expected error for foreign CallMetadata")
 	}
-	if err := metadata.FreezeOutgoingHeaders(foreign); err == nil {
+	if err := FreezeOutgoingHeaders(foreign); err == nil {
 		t.Fatal("expected error for foreign CallMetadata")
 	}
 }
 
 type foreignMD struct{}
 
-func (foreignMD) IncomingHeaders() metadata.Metadata  { return nil }
-func (foreignMD) IncomingTrailers() metadata.Metadata { return nil }
-func (foreignMD) OutgoingHeaders() metadata.Metadata  { return nil }
-func (foreignMD) OutgoingTrailers() metadata.Metadata { return nil }
+func (foreignMD) IncomingHeaders() Metadata  { return nil }
+func (foreignMD) IncomingTrailers() Metadata { return nil }
+func (foreignMD) OutgoingHeaders() Metadata  { return nil }
+func (foreignMD) OutgoingTrailers() Metadata { return nil }
 func (foreignMD) AddOutgoingHeader(string, ...string) error {
 	return nil
 }
@@ -230,7 +229,7 @@ func (foreignMD) AddOutgoingTrailer(string, ...string) error {
 func (foreignMD) SendHeaders() error { return nil }
 
 func TestConcurrentAddAndGettersRace(t *testing.T) {
-	md := metadata.New(metadata.RoleResponder, nil)
+	md := New(RoleResponder, nil)
 	const n = 64
 	var wg sync.WaitGroup
 	wg.Add(n * 2)
@@ -260,26 +259,26 @@ func TestConcurrentAddAndGettersRace(t *testing.T) {
 }
 
 func TestFreezeOutgoingHeadersIdempotent(t *testing.T) {
-	md := metadata.New(metadata.RoleInitiator, nil)
-	if err := metadata.FreezeOutgoingHeaders(md); err != nil {
+	md := New(RoleInitiator, nil)
+	if err := FreezeOutgoingHeaders(md); err != nil {
 		t.Fatal(err)
 	}
-	if err := metadata.FreezeOutgoingHeaders(md); err != nil {
+	if err := FreezeOutgoingHeaders(md); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestSendHeadersAfterFreezeAlreadySent(t *testing.T) {
 	calls := 0
-	md := metadata.New(metadata.RoleResponder, func(metadata.Metadata) error {
+	md := New(RoleResponder, func(Metadata) error {
 		calls++
 		return nil
 	})
-	if err := metadata.FreezeOutgoingHeaders(md); err != nil {
+	if err := FreezeOutgoingHeaders(md); err != nil {
 		t.Fatal(err)
 	}
 	err := md.SendHeaders()
-	if !errors.Is(err, metadata.ErrHeadersAlreadySent) {
+	if !errors.Is(err, ErrHeadersAlreadySent) {
 		t.Fatalf("SendHeaders after freeze: %v", err)
 	}
 	if calls != 0 {

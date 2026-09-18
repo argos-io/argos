@@ -1,4 +1,4 @@
-package httpunary_test
+package httpunary
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
-	"github.com/argos-io/argos/framing/httpunary"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/status"
 	"github.com/argos-io/argos/stream"
@@ -60,7 +59,7 @@ func TestEarlyRejectionKeepsResponseReadable(t *testing.T) {
 	t.Parallel()
 
 	rejection := status.Error(status.Unauthenticated, "token expired")
-	body := httpunary.EncodeErrorBody(rejection)
+	body := EncodeErrorBody(rejection)
 
 	// The handler answers immediately and never reads the request body, which
 	// is what makes the client's body write fail: net/http stops reading the
@@ -82,7 +81,7 @@ func TestEarlyRejectionKeepsResponseReadable(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	method := descriptor.MustMethod("svc.Senderror", descriptor.Unary)
-	cs, err := httpunary.NewRPC().NewClientSession(ctx, conn, framing.SessionSpec{CodecName: "bytes"})
+	cs, err := NewRPC().NewClientSession(ctx, conn, framing.SessionSpec{CodecName: "bytes"})
 	if err != nil {
 		t.Fatalf("NewClientSession: %v", err)
 	}

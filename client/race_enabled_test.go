@@ -1,5 +1,5 @@
 //go:build !race
 
-package client_test
+package client
 
 const raceEnabled = false

@@ -1,4 +1,4 @@
-package reflection_test
+package reflection
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 	"github.com/argos-io/argos/framing"
 	grpcframing "github.com/argos-io/argos/framing/grpc"
 	"github.com/argos-io/argos/framing/grpc/internal/testpb"
-	"github.com/argos-io/argos/framing/grpc/reflection"
 	"github.com/argos-io/argos/server"
 	"github.com/argos-io/argos/transport"
 	argoshttp2 "github.com/argos-io/argos/transport/http2"
@@ -49,7 +48,7 @@ func startReflection(t *testing.T, services []string) string {
 	trFn, frFn, cdFn := mkAxes()
 	srv := server.New(
 		argos.WithConfig(cfg),
-		argos.WithService(reflection.ServiceV1,
+		argos.WithService(ServiceV1,
 			argos.ServiceTransport(trFn), argos.ServiceFraming(frFn), argos.ServiceCodec(cdFn),
 			argos.ServiceListenAddress(cfg.ListenAddress),
 		),
@@ -58,7 +57,7 @@ func startReflection(t *testing.T, services []string) string {
 	if err := files.RegisterFile(testpb.File_echo_proto); err != nil {
 		t.Fatal(err)
 	}
-	if err := reflection.Register(srv, reflection.Options{Services: services, Files: files}); err != nil {
+	if err := Register(srv, Options{Services: services, Files: files}); err != nil {
 		t.Fatal(err)
 	}
 	go func() { _ = srv.Run(context.Background()) }()
@@ -79,7 +78,7 @@ func startReflection(t *testing.T, services []string) string {
 
 func TestListServicesV1(t *testing.T) {
 	const echoSvc = "echo.v1.Echo"
-	addr := startReflection(t, []string{echoSvc, reflection.ServiceV1})
+	addr := startReflection(t, []string{echoSvc, ServiceV1})
 
 	cc, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {

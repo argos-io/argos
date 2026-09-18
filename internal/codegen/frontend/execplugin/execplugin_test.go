@@ -1,4 +1,4 @@
-package execplugin_test
+package execplugin
 
 import (
 	"os"
@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/argos-io/argos/internal/codegen/frontend/execplugin"
 	"github.com/argos-io/argos/internal/codegen/gen"
 	"github.com/argos-io/argos/internal/codegen/gen/message"
 	"github.com/argos-io/argos/internal/codegen/ir"
@@ -24,7 +23,7 @@ func TestPluginEmitIR(t *testing.T) {
 	if err := os.Chmod(script, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	files, err := execplugin.Frontend{Command: script}.Parse(
+	files, err := Frontend{Command: script}.Parse(
 		t.Context(),
 		[]string{"ignored.thrift"},
 	)
@@ -70,14 +69,14 @@ func TestPluginEmitIR(t *testing.T) {
 }
 
 func TestPluginEmptyCommand(t *testing.T) {
-	_, err := execplugin.Frontend{}.Parse(t.Context(), []string{"x"})
+	_, err := Frontend{}.Parse(t.Context(), []string{"x"})
 	if err == nil {
 		t.Fatal("empty command: want error")
 	}
 }
 
 func TestPluginBadExit(t *testing.T) {
-	_, err := execplugin.Frontend{Command: "/bin/false"}.Parse(
+	_, err := Frontend{Command: "/bin/false"}.Parse(
 		t.Context(),
 		[]string{"x"},
 	)

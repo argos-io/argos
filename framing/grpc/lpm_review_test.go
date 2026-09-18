@@ -1,4 +1,4 @@
-package grpc_test
+package grpc
 
 import (
 	"bytes"
@@ -6,7 +6,6 @@ import (
 	"errors"
 	"testing"
 
-	grpcframing "github.com/argos-io/argos/framing/grpc"
 	"github.com/argos-io/argos/status"
 )
 
@@ -39,14 +38,14 @@ func TestOversizeLPMDrainIsBounded(t *testing.T) {
 	body := append(lpmHeader(1<<30), make([]byte, 4096)...)
 	cr := &countingReader{r: bytes.NewReader(body)}
 
-	_, _, err := grpcframing.ReadLPMLimited(cr, maxLen)
+	_, _, err := ReadLPMLimited(cr, maxLen)
 	if err == nil {
 		t.Fatal("oversize LPM accepted")
 	}
 	if status.CodeOf(err) != status.ResourceExhausted {
 		t.Fatalf("code = %v, want ResourceExhausted", status.CodeOf(err))
 	}
-	if !errors.Is(err, grpcframing.ErrLPMUnsynced) {
+	if !errors.Is(err, ErrLPMUnsynced) {
 		t.Fatalf("err = %v, want it to report the stream is unsynced", err)
 	}
 	// Only the header should have been consumed.
@@ -69,14 +68,14 @@ func TestModestOversizeLPMKeepsStreamAligned(t *testing.T) {
 	buf.Write(want)
 
 	r := bytes.NewReader(buf.Bytes())
-	_, _, err := grpcframing.ReadLPMLimited(r, maxLen)
+	_, _, err := ReadLPMLimited(r, maxLen)
 	if status.CodeOf(err) != status.ResourceExhausted {
 		t.Fatalf("first read code = %v, want ResourceExhausted", status.CodeOf(err))
 	}
-	if errors.Is(err, grpcframing.ErrLPMUnsynced) {
+	if errors.Is(err, ErrLPMUnsynced) {
 		t.Fatalf("a %d-byte overshoot should stay resynchronisable: %v", len(over), err)
 	}
-	_, got, err := grpcframing.ReadLPMLimited(r, maxLen)
+	_, got, err := ReadLPMLimited(r, maxLen)
 	if err != nil {
 		t.Fatalf("second read: %v (the drain lost stream alignment)", err)
 	}
@@ -91,11 +90,11 @@ func TestTruncatedOversizeLPMDrainReportsUnsynced(t *testing.T) {
 	const maxLen = 1024
 	// Claim 4096 (within the drain bound) but deliver only part of it.
 	body := append(lpmHeader(4096), make([]byte, 100)...)
-	_, _, err := grpcframing.ReadLPMLimited(bytes.NewReader(body), maxLen)
+	_, _, err := ReadLPMLimited(bytes.NewReader(body), maxLen)
 	if err == nil {
 		t.Fatal("truncated oversize LPM accepted")
 	}
-	if !errors.Is(err, grpcframing.ErrLPMUnsynced) {
+	if !errors.Is(err, ErrLPMUnsynced) {
 		t.Fatalf("err = %v, want it to report the stream is unsynced", err)
 	}
 }

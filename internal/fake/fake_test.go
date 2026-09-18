@@ -1,4 +1,4 @@
-package fake_test
+package fake
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
-	"github.com/argos-io/argos/internal/fake"
 	"github.com/argos-io/argos/metadata"
 )
 
@@ -29,11 +28,11 @@ func callSpec(role metadata.Role) framing.CallSpec {
 
 func TestSequentialUnaryRoundTrip(t *testing.T) {
 	t.Parallel()
-	cliConn, srvConn := fake.BytePipe()
+	cliConn, srvConn := BytePipe()
 	defer cliConn.Close()
 	defer srvConn.Close()
 
-	f := fake.NewFraming(framing.Sequential)
+	f := NewFraming(framing.Sequential)
 	ctx := context.Background()
 	spec := framing.SessionSpec{CodecName: "fake"}
 
@@ -114,11 +113,11 @@ func TestSequentialUnaryRoundTrip(t *testing.T) {
 
 func TestSequentialCallCloseDoesNotCloseConn(t *testing.T) {
 	t.Parallel()
-	cliConn, srvConn := fake.BytePipe()
+	cliConn, srvConn := BytePipe()
 	defer cliConn.Close()
 	defer srvConn.Close()
 
-	f := fake.NewFraming(framing.Sequential)
+	f := NewFraming(framing.Sequential)
 	ctx := context.Background()
 	spec := framing.SessionSpec{}
 	cs, err := f.NewClientSession(ctx, cliConn, spec)
@@ -213,7 +212,7 @@ func TestReentryDetector(t *testing.T) {
 	defer pr.Close()
 	defer pw.Close()
 
-	d := &fake.ReentryDetector{R: pr}
+	d := &ReentryDetector{R: pr}
 	started := make(chan struct{})
 	blocked := make(chan struct{})
 
@@ -243,11 +242,11 @@ func TestReentryDetector(t *testing.T) {
 
 func TestOpenCallBusyScript(t *testing.T) {
 	t.Parallel()
-	cliConn, srvConn := fake.BytePipe()
+	cliConn, srvConn := BytePipe()
 	defer cliConn.Close()
 	defer srvConn.Close()
 
-	f := fake.NewFraming(framing.Sequential)
+	f := NewFraming(framing.Sequential)
 	f.OpenCallHook = func(callSeq int) error {
 		if callSeq >= 1 {
 			return framing.ErrSessionBusy

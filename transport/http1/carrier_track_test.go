@@ -1,4 +1,4 @@
-package http1_test
+package http1
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/transport"
-	argoshttp1 "github.com/argos-io/argos/transport/http1"
 )
 
 // startEchoServer responds to each request with its body, one exchange at a
@@ -67,7 +66,7 @@ func TestCarrierUntrackedAfterCallCompletes(t *testing.T) {
 		if string(got) != "ping" {
 			t.Fatalf("body #%d = %q, want ping", i, got)
 		}
-		if got := argoshttp1.TrackedCarrierCount(sc.(transport.Conn)); got != 0 {
+		if got := trackedCarrierCount(sc.(transport.Conn)); got != 0 {
 			t.Fatalf("after completed call #%d tracked=%d, want 0", i, got)
 		}
 	}
@@ -88,7 +87,7 @@ func TestCarrierUntrackedAfterAbort(t *testing.T) {
 		if err := car.Abort(); err != nil {
 			t.Fatalf("Abort #%d: %v", i, err)
 		}
-		if got := argoshttp1.TrackedCarrierCount(sc.(transport.Conn)); got != 0 {
+		if got := trackedCarrierCount(sc.(transport.Conn)); got != 0 {
 			t.Fatalf("after Abort #%d tracked=%d, want 0", i, got)
 		}
 	}
@@ -122,7 +121,7 @@ func TestCarrierTrackedWhileInFlight(t *testing.T) {
 		t.Fatalf("CloseSend: %v", err)
 	}
 
-	if got := argoshttp1.TrackedCarrierCount(sc.(transport.Conn)); got != 1 {
+	if got := trackedCarrierCount(sc.(transport.Conn)); got != 1 {
 		t.Fatalf("in-flight tracked=%d, want 1", got)
 	}
 }

@@ -1,11 +1,10 @@
-package argos_test
+package argos
 
 import (
 	"context"
 	"errors"
 	"testing"
 
-	"github.com/argos-io/argos"
 	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
@@ -16,14 +15,14 @@ func TestWithFilterAndOpenFilterStored(t *testing.T) {
 	t.Parallel()
 	// One per side: Filter is server-side, OpenFilter client-side, and the
 	// option types now say so.
-	server, err := argos.ServerConfig(argos.WithConfig(&argos.Config{}), argos.WithFilter(noopFilter()))
+	server, err := ServerConfig(WithConfig(&Config{}), WithFilter(noopFilter()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(server.Filters) != 1 || len(server.OpenFilters) != 0 {
 		t.Fatalf("server: Filters=%d OpenFilters=%d", len(server.Filters), len(server.OpenFilters))
 	}
-	client, err := argos.ClientConfig(argos.WithConfig(&argos.Config{}), argos.WithOpenFilter(noopOpenFilter()))
+	client, err := ClientConfig(WithConfig(&Config{}), WithOpenFilter(noopOpenFilter()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,13 +33,13 @@ func TestWithFilterAndOpenFilterStored(t *testing.T) {
 
 func TestWithServiceStoresProtocolAndTarget(t *testing.T) {
 	t.Parallel()
-	cfg, err := argos.ClientConfig(
-		argos.WithConfig(&argos.Config{}),
-		argos.WithService("echo.v1.EchoService",
+	cfg, err := ClientConfig(
+		WithConfig(&Config{}),
+		WithService("echo.v1.EchoService",
 			markerCodec(1),
-			argos.ServiceTarget("ip://127.0.0.1:7001")),
-		argos.WithService("other.Svc",
-			argos.ServiceTarget("ip://127.0.0.1:7002")),
+			ServiceTarget("ip://127.0.0.1:7001")),
+		WithService("other.Svc",
+			ServiceTarget("ip://127.0.0.1:7002")),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -60,13 +59,13 @@ func TestWithServiceStoresProtocolAndTarget(t *testing.T) {
 // wipe the half the first one filled in.
 func TestWithServiceMergesIntoExistingEntry(t *testing.T) {
 	t.Parallel()
-	cfg, err := argos.ClientConfig(
-		argos.WithConfig(&argos.Config{
-			Services: map[string]argos.ServiceConfig{
+	cfg, err := ClientConfig(
+		WithConfig(&Config{
+			Services: map[string]ServiceConfig{
 				"echo.v1.EchoService": {Codec: stubCodecFactory(1)},
 			},
 		}),
-		argos.WithService("echo.v1.EchoService", argos.ServiceTarget("ip://127.0.0.1:7001")),
+		WithService("echo.v1.EchoService", ServiceTarget("ip://127.0.0.1:7001")),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -84,14 +83,14 @@ func TestWithServiceMergesIntoExistingEntry(t *testing.T) {
 // the fields listed before it, so a caller can put it wherever it reads best.
 func TestWithConfigOrderIndependent(t *testing.T) {
 	t.Parallel()
-	base := &argos.Config{MaxFrameSize: 2 * miB, MaxSessionsPerEndpoint: 7}
+	base := &Config{MaxFrameSize: 2 * miB, MaxSessionsPerEndpoint: 7}
 	const msgSize = 1 * miB
 
-	first, err := argos.ClientConfig(argos.WithConfig(base), argos.WithMaxMessageSize(msgSize))
+	first, err := ClientConfig(WithConfig(base), WithMaxMessageSize(msgSize))
 	if err != nil {
 		t.Fatal(err)
 	}
-	last, err := argos.ClientConfig(argos.WithMaxMessageSize(msgSize), argos.WithConfig(base))
+	last, err := ClientConfig(WithMaxMessageSize(msgSize), WithConfig(base))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,11 +104,11 @@ func TestWithConfigOrderIndependent(t *testing.T) {
 			first.MaxFrameSize, first.MaxSessionsPerEndpoint)
 	}
 
-	srvFirst, err := argos.ServerConfig(argos.WithConfig(base), argos.WithMaxMessageSize(msgSize))
+	srvFirst, err := ServerConfig(WithConfig(base), WithMaxMessageSize(msgSize))
 	if err != nil {
 		t.Fatal(err)
 	}
-	srvLast, err := argos.ServerConfig(argos.WithMaxMessageSize(msgSize), argos.WithConfig(base))
+	srvLast, err := ServerConfig(WithMaxMessageSize(msgSize), WithConfig(base))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,11 +117,11 @@ func TestWithConfigOrderIndependent(t *testing.T) {
 
 func TestWithConfigNilUsesProcessDefault(t *testing.T) {
 	t.Parallel()
-	got, err := argos.ClientConfig(argos.WithConfig(nil))
+	got, err := ClientConfig(WithConfig(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := argos.ClientConfig()
+	want, err := ClientConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,13 +132,13 @@ func TestWithConfigNilUsesProcessDefault(t *testing.T) {
 // must survive both an appending Option and a later write to the returned copy.
 func TestConstructorsCopyTheBaseConfig(t *testing.T) {
 	t.Parallel()
-	base := &argos.Config{
+	base := &Config{
 		MaxIdleSessions: 3,
 		Filters:         []filter.Filter{noopFilter()},
 		OpenFilters:     []filter.OpenFilter{noopOpenFilter()},
 	}
 
-	server, err := argos.ServerConfig(argos.WithConfig(base), argos.WithFilter(noopFilter()))
+	server, err := ServerConfig(WithConfig(base), WithFilter(noopFilter()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,10 +146,10 @@ func TestConstructorsCopyTheBaseConfig(t *testing.T) {
 		t.Fatalf("server Filters = %d, want 2", len(server.Filters))
 	}
 
-	client, err := argos.ClientConfig(
-		argos.WithConfig(base),
-		argos.WithOpenFilter(noopOpenFilter()),
-		argos.WithMaxIdleSessions(argos.Disabled),
+	client, err := ClientConfig(
+		WithConfig(base),
+		WithOpenFilter(noopOpenFilter()),
+		WithMaxIdleSessions(Disabled),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -179,10 +178,10 @@ func TestConstructorsCopyTheBaseConfig(t *testing.T) {
 
 func TestNilOptionRejected(t *testing.T) {
 	t.Parallel()
-	if _, err := argos.ClientConfig(argos.WithMaxMessageSize(1*miB), nil); err == nil {
+	if _, err := ClientConfig(WithMaxMessageSize(1*miB), nil); err == nil {
 		t.Error("ClientConfig(nil): want error")
 	}
-	if _, err := argos.ServerConfig(argos.WithMaxMessageSize(1*miB), nil); err == nil {
+	if _, err := ServerConfig(WithMaxMessageSize(1*miB), nil); err == nil {
 		t.Error("ServerConfig(nil): want error")
 	}
 }
@@ -190,30 +189,30 @@ func TestNilOptionRejected(t *testing.T) {
 func TestSelectedServiceLayering(t *testing.T) {
 	t.Parallel()
 	const service = "echo.v1.EchoService"
-	entry := argos.WithService(service,
+	entry := WithService(service,
 		markerCodec(2),
-		argos.ServiceTarget("ip://127.0.0.1:7001"))
+		ServiceTarget("ip://127.0.0.1:7001"))
 
 	for _, tc := range []struct {
 		name       string
-		opts       []argos.ClientOption
+		opts       []ClientOption
 		wantName   string
 		wantID     int
 		wantTarget string
 	}{
 		{
 			name:       "services entry supplies protocol and target",
-			opts:       []argos.ClientOption{argos.WithServiceName(service), entry},
+			opts:       []ClientOption{WithServiceName(service), entry},
 			wantName:   service,
 			wantID:     2,
 			wantTarget: "ip://127.0.0.1:7001",
 		},
 		{
 			name: "call site beats the services entry",
-			opts: []argos.ClientOption{
-				argos.WithServiceName(service), entry,
-				argos.WithCodec(stubCodecFactory(3)),
-				argos.WithTarget("ip://127.0.0.1:9999"),
+			opts: []ClientOption{
+				WithServiceName(service), entry,
+				WithCodec(stubCodecFactory(3)),
+				WithTarget("ip://127.0.0.1:9999"),
 			},
 			wantName:   service,
 			wantID:     3,
@@ -223,14 +222,14 @@ func TestSelectedServiceLayering(t *testing.T) {
 			// No WithServiceName selects no entry at all, so the entry's Target
 			// stays out of the way instead of leaking into an unnamed Client.
 			name:     "no service name selects nothing",
-			opts:     []argos.ClientOption{entry},
+			opts:     []ClientOption{entry},
 			wantName: "",
 			wantID:   0,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			cfg, err := argos.ClientConfig(tc.opts...)
+			cfg, err := ClientConfig(tc.opts...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -254,15 +253,15 @@ func TestSelectedServiceLayering(t *testing.T) {
 // the first one's service and the missing-service-name guard never fired.
 func TestSelectionNotInheritedThroughWithConfig(t *testing.T) {
 	t.Parallel()
-	first, err := argos.ClientConfig(
-		argos.WithServiceName("echo.v1.EchoService"),
-		argos.WithTarget("ip://127.0.0.1:7001"),
-		argos.WithCodec(stubCodecFactory(1)),
+	first, err := ClientConfig(
+		WithServiceName("echo.v1.EchoService"),
+		WithTarget("ip://127.0.0.1:7001"),
+		WithCodec(stubCodecFactory(1)),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := argos.ClientConfig(argos.WithConfig(first))
+	second, err := ClientConfig(WithConfig(first))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +281,7 @@ func TestSelectionNotInheritedThroughWithConfig(t *testing.T) {
 // ClientConfig takes ClientOption and WithListenAddress only implements
 // ServerOption, so
 //
-//	argos.ClientConfig(argos.WithListenAddress(":0"))
+//	ClientConfig(WithListenAddress(":0"))
 //
 // does not build ("ServerOption does not implement ClientOption"). Side misuse
 // can no longer be tested by calling the constructor and expecting an error —
@@ -294,15 +293,15 @@ func TestOptionSideTyping(t *testing.T) {
 		opt            any
 		client, server bool
 	}{
-		{"WithListenAddress", argos.WithListenAddress(":0"), false, true},
-		{"WithServiceName", argos.WithServiceName("echo.v1.EchoService"), true, false},
-		{"WithService", argos.WithService("echo.v1.EchoService", argos.ServiceTarget("ip://127.0.0.1:1")), true, true},
-		{"WithMaxMessageSize", argos.WithMaxMessageSize(1 * miB), true, true},
+		{"WithListenAddress", WithListenAddress(":0"), false, true},
+		{"WithServiceName", WithServiceName("echo.v1.EchoService"), true, false},
+		{"WithService", WithService("echo.v1.EchoService", ServiceTarget("ip://127.0.0.1:1")), true, true},
+		{"WithMaxMessageSize", WithMaxMessageSize(1 * miB), true, true},
 	} {
-		if _, ok := tc.opt.(argos.ClientOption); ok != tc.client {
+		if _, ok := tc.opt.(ClientOption); ok != tc.client {
 			t.Errorf("%s satisfies ClientOption = %v, want %v", tc.name, ok, tc.client)
 		}
-		if _, ok := tc.opt.(argos.ServerOption); ok != tc.server {
+		if _, ok := tc.opt.(ServerOption); ok != tc.server {
 			t.Errorf("%s satisfies ServerOption = %v, want %v", tc.name, ok, tc.server)
 		}
 	}
@@ -310,11 +309,11 @@ func TestOptionSideTyping(t *testing.T) {
 
 func TestCallErrorObserverUnknownPhaseAndRecover(t *testing.T) {
 	t.Parallel()
-	var got argos.CallInfo
+	var got CallInfo
 	var gotErr error
-	cfg, err := argos.ClientConfig(
-		argos.WithConfig(&argos.Config{}),
-		argos.WithCallErrorObserver(func(info argos.CallInfo, e error) {
+	cfg, err := ClientConfig(
+		WithConfig(&Config{}),
+		WithCallErrorObserver(func(info CallInfo, e error) {
 			got = info
 			gotErr = e
 		}))
@@ -325,32 +324,32 @@ func TestCallErrorObserverUnknownPhaseAndRecover(t *testing.T) {
 		t.Fatal("CallErrorObserver nil")
 	}
 
-	info := argos.CallInfo{
+	info := CallInfo{
 		Service:   "svc",
 		Method:    "m",
 		Peer:      "peer",
 		SessionID: "s1",
-		Phase:     argos.Phase(99), // unknown; must still invoke
+		Phase:     Phase(99), // unknown; must still invoke
 	}
 	want := errors.New("boom")
-	argos.NotifyCallError(cfg, info, want)
-	if got.Phase != argos.Phase(99) || got.SessionID != "s1" || !errors.Is(gotErr, want) {
+	NotifyCallError(cfg, info, want)
+	if got.Phase != Phase(99) || got.SessionID != "s1" || !errors.Is(gotErr, want) {
 		t.Fatalf("got=%+v err=%v", got, gotErr)
 	}
 
-	panicCfg, err := argos.ClientConfig(
-		argos.WithConfig(&argos.Config{}),
-		argos.WithCallErrorObserver(func(argos.CallInfo, error) {
+	panicCfg, err := ClientConfig(
+		WithConfig(&Config{}),
+		WithCallErrorObserver(func(CallInfo, error) {
 			panic("observer panic")
 		}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	argos.NotifyCallError(panicCfg, argos.CallInfo{Phase: argos.PhaseOpen}, want) // must not panic
+	NotifyCallError(panicCfg, CallInfo{Phase: PhaseOpen}, want) // must not panic
 
 	// "Nil clears the observer" reads two ways now that the field is public and
 	// a base Config can carry one: pin the clearing reading.
-	cleared, err := argos.ClientConfig(argos.WithConfig(cfg), argos.WithCallErrorObserver(nil))
+	cleared, err := ClientConfig(WithConfig(cfg), WithCallErrorObserver(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,10 +361,10 @@ func TestCallErrorObserverUnknownPhaseAndRecover(t *testing.T) {
 func TestConnErrorObserverInvokeOnceAndRecover(t *testing.T) {
 	t.Parallel()
 	var n int
-	var got argos.ConnInfo
-	cfg, err := argos.ServerConfig(
-		argos.WithConfig(&argos.Config{}),
-		argos.WithConnErrorObserver(func(info argos.ConnInfo, e error) {
+	var got ConnInfo
+	cfg, err := ServerConfig(
+		WithConfig(&Config{}),
+		WithConnErrorObserver(func(info ConnInfo, e error) {
 			n++
 			got = info
 		}))
@@ -376,33 +375,33 @@ func TestConnErrorObserverInvokeOnceAndRecover(t *testing.T) {
 		t.Fatal("ConnErrorObserver nil")
 	}
 
-	info := argos.ConnInfo{
-		Side:      argos.SideServer,
+	info := ConnInfo{
+		Side:      SideServer,
 		Binding:   "b1",
 		Peer:      "p",
 		SessionID: "s1",
-		Phase:     argos.ConnPhaseHandshake,
+		Phase:     ConnPhaseHandshake,
 	}
-	argos.NotifyConnError(cfg, info, errors.New("hs"))
-	if n != 1 || got.Phase != argos.ConnPhaseHandshake || got.SessionID != "s1" {
+	NotifyConnError(cfg, info, errors.New("hs"))
+	if n != 1 || got.Phase != ConnPhaseHandshake || got.SessionID != "s1" {
 		t.Fatalf("n=%d got=%+v", n, got)
 	}
 
 	// Unknown ConnPhase still notifies.
-	argos.NotifyConnError(cfg, argos.ConnInfo{Phase: argos.ConnPhase(77)}, errors.New("x"))
+	NotifyConnError(cfg, ConnInfo{Phase: ConnPhase(77)}, errors.New("x"))
 	if n != 2 {
 		t.Fatalf("unknown phase: n=%d", n)
 	}
 
-	panicCfg, err := argos.ServerConfig(
-		argos.WithConfig(&argos.Config{}),
-		argos.WithConnErrorObserver(func(argos.ConnInfo, error) {
+	panicCfg, err := ServerConfig(
+		WithConfig(&Config{}),
+		WithConnErrorObserver(func(ConnInfo, error) {
 			panic("conn observer panic")
 		}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	argos.NotifyConnError(panicCfg, argos.ConnInfo{Phase: argos.ConnPhaseDial}, errors.New("d"))
+	NotifyConnError(panicCfg, ConnInfo{Phase: ConnPhaseDial}, errors.New("d"))
 }
 
 func noopFilter() filter.Filter {
@@ -417,15 +416,15 @@ func noopOpenFilter() filter.OpenFilter {
 	}
 }
 
-func stubCodecFactory(id int) argos.CodecFunc {
+func stubCodecFactory(id int) CodecFunc {
 	return func() (codec.Codec, error) { return &stubCodec{id: id}, nil }
 }
 
-func markerCodec(id int) argos.ServiceOption {
-	return argos.ServiceCodec(stubCodecFactory(id))
+func markerCodec(id int) ServiceOption {
+	return ServiceCodec(stubCodecFactory(id))
 }
 
-func protocolCodecID(t *testing.T, sc argos.ServiceConfig) int {
+func protocolCodecID(t *testing.T, sc ServiceConfig) int {
 	t.Helper()
 	if sc.Codec == nil {
 		return 0

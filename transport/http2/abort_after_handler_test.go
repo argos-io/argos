@@ -1,4 +1,4 @@
-package http2_test
+package http2
 
 import (
 	"context"

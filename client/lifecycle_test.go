@@ -1,4 +1,4 @@
-package client_test
+package client
 
 import (
 	"context"
@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
-	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/framing"
 	"github.com/argos-io/argos/internal/fake"
@@ -64,7 +63,7 @@ func freshLoopback(t *testing.T, factoryCalls *atomic.Int64, dialed *[]*fake.Byt
 func TestProtocolAssembleOncePerClient(t *testing.T) {
 	t.Parallel()
 	var calls atomic.Int64
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
@@ -72,7 +71,7 @@ func TestProtocolAssembleOncePerClient(t *testing.T) {
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
-		t.Fatalf("client.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	defer cli.Close()
 
@@ -128,15 +127,15 @@ func TestClientsFromSameFactoryIsolated(t *testing.T) {
 		MaxBufferedBytes:   4 * 16 * 1024 * 1024,
 	}
 
-	cli1, err := client.New(argos.WithConfig(cfg),
+	cli1, err := New(argos.WithConfig(cfg),
 		argos.WithServiceName(testService), argos.WithTarget(testTarget), isolatedPreset)
 	if err != nil {
-		t.Fatalf("client.New #1: %v", err)
+		t.Fatalf("New #1: %v", err)
 	}
-	cli2, err := client.New(argos.WithConfig(cfg),
+	cli2, err := New(argos.WithConfig(cfg),
 		argos.WithServiceName(testService), argos.WithTarget(testTarget), isolatedPreset)
 	if err != nil {
-		t.Fatalf("client.New #2: %v", err)
+		t.Fatalf("New #2: %v", err)
 	}
 	defer cli1.Close()
 	defer cli2.Close()
@@ -180,7 +179,7 @@ func TestCloseDrainsIdleSessions(t *testing.T) {
 	var calls atomic.Int64
 	fn := freshLoopback(t, &calls, &dialed, &dialMu)
 
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
@@ -189,7 +188,7 @@ func TestCloseDrainsIdleSessions(t *testing.T) {
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
-		t.Fatalf("client.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	cs, err := cli.Open(context.Background(), testMethod(t))
@@ -239,7 +238,7 @@ func TestCallStreamLeakReportsPhaseLeak(t *testing.T) {
 
 	var leaked atomic.Bool
 	var phase atomic.Uint32
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
@@ -253,7 +252,7 @@ func TestCallStreamLeakReportsPhaseLeak(t *testing.T) {
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
-		t.Fatalf("client.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	defer cli.Close()
 
@@ -342,7 +341,7 @@ func TestDroppedClientReleasesItsResources(t *testing.T) {
 	}
 
 	func() {
-		cli, err := client.New(
+		cli, err := New(
 			argos.WithServiceName(testService),
 			argos.WithConnErrorObserver(func(ci argos.ConnInfo, _ error) {
 				info.Store(ci)
@@ -352,7 +351,7 @@ func TestDroppedClientReleasesItsResources(t *testing.T) {
 			argos.WithTarget(testTarget),
 		)
 		if err != nil {
-			t.Fatalf("client.New: %v", err)
+			t.Fatalf("New: %v", err)
 		}
 		// Intentionally leak: drop without Close so AddCleanup can fire. This
 		// only works because the pool's DialFunc does not point back at the

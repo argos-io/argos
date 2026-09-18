@@ -1,4 +1,4 @@
-package ws_test
+package ws
 
 import (
 	"context"
@@ -7,15 +7,14 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/transport"
-	"github.com/argos-io/argos/transport/ws"
 )
 
 // startHangupServer upgrades each connection and closes it at once: the peer
 // stops accepting messages without this side closing anything.
 func startHangupServer(t *testing.T) (addr string) {
 	t.Helper()
-	raw := ws.New()
-	tr := raw.(*ws.Transport)
+	raw := New()
+	tr := raw.(*Transport)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
@@ -44,7 +43,7 @@ func startHangupServer(t *testing.T) (addr string) {
 func TestSendFailureOnHangupKeepsReceiveOpen(t *testing.T) {
 	addr := startHangupServer(t)
 
-	clientTr := ws.New()
+	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -84,7 +83,7 @@ func TestSendFailureOnHangupKeepsReceiveOpen(t *testing.T) {
 func TestSendFailureAfterCloseReportsReceiveClosed(t *testing.T) {
 	_, addr := startEchoServer(t)
 
-	clientTr := ws.New()
+	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

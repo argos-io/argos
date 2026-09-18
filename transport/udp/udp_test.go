@@ -1,4 +1,4 @@
-package udp_test
+package udp
 
 import (
 	"context"
@@ -9,10 +9,9 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/transport"
-	"github.com/argos-io/argos/transport/udp"
 )
 
-func waitAddr(t *testing.T, tr *udp.Transport) net.Addr {
+func waitAddr(t *testing.T, tr *Transport) net.Addr {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -25,10 +24,10 @@ func waitAddr(t *testing.T, tr *udp.Transport) net.Addr {
 	return nil
 }
 
-func startEchoServer(t *testing.T) (tr *udp.Transport, addr string) {
+func startEchoServer(t *testing.T) (tr *Transport, addr string) {
 	t.Helper()
-	raw := udp.New()
-	tr = raw.(*udp.Transport)
+	raw := New()
+	tr = raw.(*Transport)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
@@ -66,7 +65,7 @@ func startEchoServer(t *testing.T) (tr *udp.Transport, addr string) {
 func TestDialServeRoundTrip(t *testing.T) {
 	_, addr := startEchoServer(t)
 
-	clientTr := udp.New()
+	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -97,7 +96,7 @@ func TestDialServeRoundTrip(t *testing.T) {
 func TestSequentialExchanges(t *testing.T) {
 	_, addr := startEchoServer(t)
 
-	clientTr := udp.New()
+	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -132,7 +131,7 @@ func TestSequentialExchanges(t *testing.T) {
 func TestOversizedSendFails(t *testing.T) {
 	_, addr := startEchoServer(t)
 
-	clientTr := udp.New()
+	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -146,7 +145,7 @@ func TestOversizedSendFails(t *testing.T) {
 
 	car := conn.(transport.CarrierConn).Carrier().(transport.DatagramCarrier)
 
-	oversized := make([]byte, udp.MaxDatagramSize+1)
+	oversized := make([]byte, MaxDatagramSize+1)
 	err = car.SendDatagram(oversized)
 	if err == nil {
 		t.Fatal("SendDatagram(oversized) succeeded, want error")
@@ -156,7 +155,7 @@ func TestOversizedSendFails(t *testing.T) {
 	}
 
 	// Max-sized datagram must still be accepted by the API gate.
-	maxOK := make([]byte, udp.MaxDatagramSize)
+	maxOK := make([]byte, MaxDatagramSize)
 	for i := range maxOK {
 		maxOK[i] = byte(i)
 	}
@@ -173,8 +172,8 @@ func TestOversizedSendFails(t *testing.T) {
 }
 
 func TestAddrAfterServe(t *testing.T) {
-	raw := udp.New()
-	tr := raw.(*udp.Transport)
+	raw := New()
+	tr := raw.(*Transport)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -201,8 +200,8 @@ func TestAddrAfterServe(t *testing.T) {
 }
 
 func TestShutdownStopsAccepts(t *testing.T) {
-	raw := udp.New()
-	tr := raw.(*udp.Transport)
+	raw := New()
+	tr := raw.(*Transport)
 
 	var mu sync.Mutex
 	accepted := 0
@@ -225,7 +224,7 @@ func TestShutdownStopsAccepts(t *testing.T) {
 
 	addr := waitAddr(t, tr).String()
 
-	clientTr := udp.New()
+	clientTr := New()
 	defer clientTr.Close()
 
 	c1, err := clientTr.Dial(ctx, transport.DialSpec{Endpoint: addr})

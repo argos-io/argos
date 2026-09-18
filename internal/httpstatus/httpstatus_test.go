@@ -1,16 +1,15 @@
-package httpstatus_test
+package httpstatus
 
 import (
 	"testing"
 
-	"github.com/argos-io/argos/internal/httpstatus"
 	"github.com/argos-io/argos/status"
 )
 
 // Every built-in Code 0–16 must have a positive HTTP correspondence.
 func TestToHTTP_EveryCodeMapped(t *testing.T) {
 	for c := status.Code(0); c <= 16; c++ {
-		httpStatus := httpstatus.ToHTTP(c)
+		httpStatus := ToHTTP(c)
 		if httpStatus <= 0 {
 			t.Errorf("ToHTTP(%d) = %d, want > 0", c, httpStatus)
 		}
@@ -41,11 +40,11 @@ func TestToHTTP_Table(t *testing.T) {
 		{status.Unauthenticated, 401},
 	}
 	for _, tc := range cases {
-		if got := httpstatus.ToHTTP(tc.code); got != tc.http {
+		if got := ToHTTP(tc.code); got != tc.http {
 			t.Errorf("ToHTTP(%v) = %d, want %d", tc.code, got, tc.http)
 		}
 	}
-	if got := httpstatus.ToHTTP(99); got != 500 {
+	if got := ToHTTP(99); got != 500 {
 		t.Errorf("ToHTTP(99) = %d, want 500", got)
 	}
 }
@@ -70,7 +69,7 @@ func TestFromHTTP_Known(t *testing.T) {
 		{504, status.DeadlineExceeded},
 	}
 	for _, tc := range cases {
-		if got := httpstatus.FromHTTP(tc.http); got != tc.code {
+		if got := FromHTTP(tc.http); got != tc.code {
 			t.Errorf("FromHTTP(%d) = %v, want %v", tc.http, got, tc.code)
 		}
 	}
@@ -78,7 +77,7 @@ func TestFromHTTP_Known(t *testing.T) {
 
 func TestFromHTTP_Unknown(t *testing.T) {
 	for _, httpStatus := range []int{0, 201, 418, 502, 599, -1} {
-		if got := httpstatus.FromHTTP(httpStatus); got != status.Unknown {
+		if got := FromHTTP(httpStatus); got != status.Unknown {
 			t.Errorf("FromHTTP(%d) = %v, want Unknown", httpStatus, got)
 		}
 	}
@@ -101,8 +100,8 @@ func TestRoundTrip_WhereDefined(t *testing.T) {
 		status.Unauthenticated,
 	}
 	for _, c := range unique {
-		httpStatus := httpstatus.ToHTTP(c)
-		if got := httpstatus.FromHTTP(httpStatus); got != c {
+		httpStatus := ToHTTP(c)
+		if got := FromHTTP(httpStatus); got != c {
 			t.Errorf("FromHTTP(ToHTTP(%v)) = %v, want %v (http=%d)", c, got, c, httpStatus)
 		}
 	}

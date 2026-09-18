@@ -1,4 +1,4 @@
-package http1_test
+package http1
 
 import (
 	"bytes"
@@ -11,10 +11,9 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/transport"
-	argoshttp1 "github.com/argos-io/argos/transport/http1"
 )
 
-func waitAddr(t *testing.T, tr *argoshttp1.Transport) net.Addr {
+func waitAddr(t *testing.T, tr *Transport) net.Addr {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -27,10 +26,10 @@ func waitAddr(t *testing.T, tr *argoshttp1.Transport) net.Addr {
 	return nil
 }
 
-func startServer(t *testing.T, onConn func(context.Context, transport.Conn)) (*argoshttp1.Transport, string) {
+func startServer(t *testing.T, onConn func(context.Context, transport.Conn)) (*Transport, string) {
 	t.Helper()
-	raw := argoshttp1.New()
-	tr := raw.(*argoshttp1.Transport)
+	raw := New()
+	tr := raw.(*Transport)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
@@ -53,7 +52,7 @@ func startServer(t *testing.T, onConn func(context.Context, transport.Conn)) (*a
 
 func dial(t *testing.T, addr string) (transport.Transport, transport.StreamConn) {
 	t.Helper()
-	clientTr := argoshttp1.New()
+	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -390,7 +389,7 @@ func TestConnCloseDoesNotKillSharedClient(t *testing.T) {
 		_ = car.WriteResponse(200, transport.Headers{{Name: "Content-Type", Value: "text/plain"}}, []byte("ok"))
 	})
 
-	clientTr := argoshttp1.New()
+	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx := context.Background()

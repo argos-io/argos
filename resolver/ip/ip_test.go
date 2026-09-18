@@ -1,4 +1,4 @@
-package ip_test
+package ip
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/argos-io/argos/resolver"
-	_ "github.com/argos-io/argos/resolver/ip"
 )
 
 func TestSelectHostname(t *testing.T) {

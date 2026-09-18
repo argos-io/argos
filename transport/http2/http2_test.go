@@ -1,4 +1,4 @@
-package http2_test
+package http2
 
 import (
 	"context"
@@ -9,10 +9,9 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/transport"
-	argoshttp2 "github.com/argos-io/argos/transport/http2"
 )
 
-func waitAddr(t *testing.T, tr *argoshttp2.Transport) net.Addr {
+func waitAddr(t *testing.T, tr *Transport) net.Addr {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -25,10 +24,10 @@ func waitAddr(t *testing.T, tr *argoshttp2.Transport) net.Addr {
 	return nil
 }
 
-func startServer(t *testing.T, onConn func(context.Context, transport.Conn)) (*argoshttp2.Transport, string) {
+func startServer(t *testing.T, onConn func(context.Context, transport.Conn)) (*Transport, string) {
 	t.Helper()
-	raw := argoshttp2.New()
-	tr := raw.(*argoshttp2.Transport)
+	raw := New()
+	tr := raw.(*Transport)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errCh := make(chan error, 1)
@@ -51,7 +50,7 @@ func startServer(t *testing.T, onConn func(context.Context, transport.Conn)) (*a
 
 func dial(t *testing.T, addr string) (transport.Transport, transport.StreamConn) {
 	t.Helper()
-	clientTr := argoshttp2.New()
+	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -386,7 +385,7 @@ func TestNoGRPCImports(t *testing.T) {
 	// Production import graph is also covered by invariants_test; this keeps
 	// the package self-contained for Task 3.2 verify.
 	// The compile of this package already fails if http2 imports grpc.
-	_ = argoshttp2.New
+	_ = New
 }
 
 func TestConnCloseDoesNotKillSharedClient(t *testing.T) {
@@ -400,7 +399,7 @@ func TestConnCloseDoesNotKillSharedClient(t *testing.T) {
 		_ = car.Finish(200, transport.Headers{{Name: "Content-Type", Value: "text/plain"}}, nil)
 	})
 
-	clientTr := argoshttp2.New()
+	clientTr := New()
 	t.Cleanup(func() { _ = clientTr.Close() })
 
 	ctx := context.Background()
@@ -482,7 +481,7 @@ func TestOpenStreamCarrierUntrackedAfterAbort(t *testing.T) {
 		_ = car.(transport.SendCloser).CloseSend()
 		_, _ = io.Copy(io.Discard, car.(transport.ByteStreamCarrier))
 		_ = car.Abort()
-		if got := argoshttp2.TrackedCarrierCount(sc.(transport.Conn)); got != 0 {
+		if got := trackedCarrierCount(sc.(transport.Conn)); got != 0 {
 			t.Fatalf("after Abort #%d tracked=%d, want 0", i, got)
 		}
 	}

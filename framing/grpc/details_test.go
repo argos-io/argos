@@ -1,4 +1,4 @@
-package grpc_test
+package grpc
 
 import (
 	"encoding/base64"
@@ -9,7 +9,6 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 
-	grpcframing "github.com/argos-io/argos/framing/grpc"
 	"github.com/argos-io/argos/status"
 )
 
@@ -24,7 +23,7 @@ func TestEncodeDecodeStatusDetailsBinRoundTrip(t *testing.T) {
 		},
 	)
 
-	wire, ok := grpcframing.EncodeStatusDetailsBin(err)
+	wire, ok := EncodeStatusDetailsBin(err)
 	if !ok {
 		t.Fatal("EncodeStatusDetailsBin: want ok")
 	}
@@ -32,7 +31,7 @@ func TestEncodeDecodeStatusDetailsBinRoundTrip(t *testing.T) {
 		t.Fatalf("wire value must be non-empty unpadded base64, got %q", wire)
 	}
 
-	got := grpcframing.DecodeStatusDetailsBin(status.NotFound, "ignored trailer message", wire)
+	got := DecodeStatusDetailsBin(status.NotFound, "ignored trailer message", wire)
 	if status.CodeOf(got) != status.NotFound {
 		t.Fatalf("CodeOf = %v, want NotFound", status.CodeOf(got))
 	}
@@ -54,18 +53,18 @@ func TestEncodeDecodeStatusDetailsBinRoundTrip(t *testing.T) {
 
 func TestEncodeStatusDetailsBinOmitsOKAndEmpty(t *testing.T) {
 	t.Parallel()
-	if _, ok := grpcframing.EncodeStatusDetailsBin(nil); ok {
+	if _, ok := EncodeStatusDetailsBin(nil); ok {
 		t.Fatal("nil must not emit details-bin")
 	}
-	if _, ok := grpcframing.EncodeStatusDetailsBin(status.Error(status.OK, "")); ok {
+	if _, ok := EncodeStatusDetailsBin(status.Error(status.OK, "")); ok {
 		t.Fatal("OK must not emit details-bin")
 	}
-	if _, ok := grpcframing.EncodeStatusDetailsBin(status.Error(status.Internal, "boom")); ok {
+	if _, ok := EncodeStatusDetailsBin(status.Error(status.Internal, "boom")); ok {
 		t.Fatal("status without details must not emit details-bin")
 	}
 	// OK with details attached still must not emit (§7.2).
 	with := status.WithDetails(status.Error(status.OK, "ok"), status.Detail{TypeURL: "t", Value: []byte("v")})
-	if _, ok := grpcframing.EncodeStatusDetailsBin(with); ok {
+	if _, ok := EncodeStatusDetailsBin(with); ok {
 		t.Fatal("OK+details must not emit details-bin")
 	}
 }
@@ -83,7 +82,7 @@ func TestDecodeStatusDetailsBinCodeConflict(t *testing.T) {
 	}
 	wire := base64.RawStdEncoding.EncodeToString(raw)
 
-	got := grpcframing.DecodeStatusDetailsBin(status.NotFound, "from trailer", wire)
+	got := DecodeStatusDetailsBin(status.NotFound, "from trailer", wire)
 	if status.CodeOf(got) != status.Internal {
 		t.Fatalf("CodeOf = %v, want Internal on code conflict", status.CodeOf(got))
 	}
@@ -99,7 +98,7 @@ func TestDecodeStatusDetailsBinCorruptedFallback(t *testing.T) {
 	t.Parallel()
 
 	t.Run("bad_base64", func(t *testing.T) {
-		got := grpcframing.DecodeStatusDetailsBin(status.Unavailable, "down", "!!!not-base64!!!")
+		got := DecodeStatusDetailsBin(status.Unavailable, "down", "!!!not-base64!!!")
 		if status.CodeOf(got) != status.Unavailable {
 			t.Fatalf("CodeOf = %v, want Unavailable", status.CodeOf(got))
 		}
@@ -113,7 +112,7 @@ func TestDecodeStatusDetailsBinCorruptedFallback(t *testing.T) {
 
 	t.Run("bad_protobuf", func(t *testing.T) {
 		wire := base64.RawStdEncoding.EncodeToString([]byte("not a status proto"))
-		got := grpcframing.DecodeStatusDetailsBin(status.Aborted, "stop", wire)
+		got := DecodeStatusDetailsBin(status.Aborted, "stop", wire)
 		if status.CodeOf(got) != status.Aborted || got.Error() != "stop" {
 			t.Fatalf("got %v %q", status.CodeOf(got), got.Error())
 		}
@@ -123,7 +122,7 @@ func TestDecodeStatusDetailsBinCorruptedFallback(t *testing.T) {
 	})
 
 	t.Run("missing", func(t *testing.T) {
-		got := grpcframing.DecodeStatusDetailsBin(status.Internal, "boom")
+		got := DecodeStatusDetailsBin(status.Internal, "boom")
 		if status.CodeOf(got) != status.Internal || got.Error() != "boom" {
 			t.Fatalf("got %v %q", status.CodeOf(got), got.Error())
 		}
@@ -133,7 +132,7 @@ func TestDecodeStatusDetailsBinCorruptedFallback(t *testing.T) {
 		pb := &spb.Status{Code: int32(status.Internal), Message: "d"}
 		raw, _ := proto.Marshal(pb)
 		wire := base64.RawStdEncoding.EncodeToString(raw)
-		got := grpcframing.DecodeStatusDetailsBin(status.Internal, "boom", wire, wire)
+		got := DecodeStatusDetailsBin(status.Internal, "boom", wire, wire)
 		if status.CodeOf(got) != status.Internal || got.Error() != "boom" {
 			t.Fatalf("duplicate must fall back to trailer message, got %q", got.Error())
 		}
@@ -150,7 +149,7 @@ func TestDecodeStatusDetailsBinCorruptedFallback(t *testing.T) {
 		}
 		raw, _ := proto.Marshal(pb)
 		padded := base64.StdEncoding.EncodeToString(raw)
-		got := grpcframing.DecodeStatusDetailsBin(status.PermissionDenied, "ignored", padded)
+		got := DecodeStatusDetailsBin(status.PermissionDenied, "ignored", padded)
 		if status.CodeOf(got) != status.PermissionDenied || got.Error() != "denied" {
 			t.Fatalf("got %v %q", status.CodeOf(got), got.Error())
 		}
@@ -168,7 +167,7 @@ func TestDecodeStatusDetailsBinDifferentMessageAccepted(t *testing.T) {
 	}
 	raw, _ := proto.Marshal(pb)
 	wire := base64.RawStdEncoding.EncodeToString(raw)
-	got := grpcframing.DecodeStatusDetailsBin(status.InvalidArgument, "from grpc-message header", wire)
+	got := DecodeStatusDetailsBin(status.InvalidArgument, "from grpc-message header", wire)
 	if got.Error() != "from details proto" {
 		t.Fatalf("message mismatch is not a protocol error; want details message, got %q", got.Error())
 	}
@@ -176,7 +175,7 @@ func TestDecodeStatusDetailsBinDifferentMessageAccepted(t *testing.T) {
 
 func TestStatusDetailsBinKey(t *testing.T) {
 	t.Parallel()
-	if grpcframing.StatusDetailsBinKey != "grpc-status-details-bin" {
-		t.Fatalf("StatusDetailsBinKey = %q", grpcframing.StatusDetailsBinKey)
+	if StatusDetailsBinKey != "grpc-status-details-bin" {
+		t.Fatalf("StatusDetailsBinKey = %q", StatusDetailsBinKey)
 	}
 }

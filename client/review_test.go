@@ -1,4 +1,4 @@
-package client_test
+package client
 
 import (
 	"context"
@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
-	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/status"
 )
 
@@ -21,7 +20,7 @@ func TestCallStreamLeakReturnsAdmission(t *testing.T) {
 	}
 
 	const slots = 2
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(slots),
 		argos.WithMaxBufferedBytes(slots*16*1024*1024),
@@ -29,7 +28,7 @@ func TestCallStreamLeakReturnsAdmission(t *testing.T) {
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
-		t.Fatalf("client.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	defer cli.Close()
 
@@ -67,7 +66,7 @@ func TestCallStreamLeakReturnsAdmission(t *testing.T) {
 // for a call that was already dead. Header() must report the cancellation.
 func TestHeaderReportsCancellationAfterCancelledRecv(t *testing.T) {
 	t.Parallel()
-	cli, err := client.New(
+	cli, err := New(
 		argos.WithServiceName(testService),
 		argos.WithMaxConcurrentCalls(4),
 		argos.WithMaxBufferedBytes(4*16*1024*1024),
@@ -75,7 +74,7 @@ func TestHeaderReportsCancellationAfterCancelledRecv(t *testing.T) {
 		argos.WithTarget(testTarget),
 	)
 	if err != nil {
-		t.Fatalf("client.New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	defer cli.Close()
 

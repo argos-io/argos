@@ -1,14 +1,12 @@
-package descriptor_test
+package descriptor
 
 import (
 	"reflect"
 	"testing"
-
-	"github.com/argos-io/argos/descriptor"
 )
 
 func TestNewMethodSuccess(t *testing.T) {
-	m, err := descriptor.NewMethod("echo.v1.EchoService.Echo", descriptor.Unary)
+	m, err := NewMethod("echo.v1.EchoService.Echo", Unary)
 	if err != nil {
 		t.Fatalf("NewMethod: %v", err)
 	}
@@ -21,7 +19,7 @@ func TestNewMethodSuccess(t *testing.T) {
 	if got, want := m.Name(), "Echo"; got != want {
 		t.Errorf("Name = %q, want %q", got, want)
 	}
-	if got, want := m.Shape(), descriptor.Unary; got != want {
+	if got, want := m.Shape(), Unary; got != want {
 		t.Errorf("Shape = %v, want %v", got, want)
 	}
 	if m.IsZero() {
@@ -30,14 +28,14 @@ func TestNewMethodSuccess(t *testing.T) {
 }
 
 func TestNewMethodShapes(t *testing.T) {
-	shapes := []descriptor.Shape{
-		descriptor.Unary,
-		descriptor.ServerStreaming,
-		descriptor.ClientStreaming,
-		descriptor.BidiStreaming,
+	shapes := []Shape{
+		Unary,
+		ServerStreaming,
+		ClientStreaming,
+		BidiStreaming,
 	}
 	for _, shape := range shapes {
-		m, err := descriptor.NewMethod("svc.Method", shape)
+		m, err := NewMethod("svc.Method", shape)
 		if err != nil {
 			t.Fatalf("NewMethod(shape=%d): %v", shape, err)
 		}
@@ -51,19 +49,19 @@ func TestNewMethodErrors(t *testing.T) {
 	cases := []struct {
 		name     string
 		fullName string
-		shape    descriptor.Shape
+		shape    Shape
 	}{
-		{"empty", "", descriptor.Unary},
-		{"no_dot", "Echo", descriptor.Unary},
-		{"trailing_dot", "echo.v1.EchoService.", descriptor.Unary},
-		{"leading_dot", ".Echo", descriptor.Unary},
-		{"empty_segment", "echo..Echo", descriptor.Unary},
-		{"only_dot", ".", descriptor.Unary},
-		{"invalid_shape", "svc.Method", descriptor.Shape(99)},
+		{"empty", "", Unary},
+		{"no_dot", "Echo", Unary},
+		{"trailing_dot", "echo.v1.EchoService.", Unary},
+		{"leading_dot", ".Echo", Unary},
+		{"empty_segment", "echo..Echo", Unary},
+		{"only_dot", ".", Unary},
+		{"invalid_shape", "svc.Method", Shape(99)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m, err := descriptor.NewMethod(tc.fullName, tc.shape)
+			m, err := NewMethod(tc.fullName, tc.shape)
 			if err == nil {
 				t.Fatalf("NewMethod(%q, %v) succeeded: %+v", tc.fullName, tc.shape, m)
 			}
@@ -75,15 +73,15 @@ func TestNewMethodErrors(t *testing.T) {
 }
 
 func TestMethodIsZero(t *testing.T) {
-	var m descriptor.Method
+	var m Method
 	if !m.IsZero() {
 		t.Error("zero Method.IsZero() = false, want true")
 	}
 }
 
 func TestMustMethod(t *testing.T) {
-	m := descriptor.MustMethod("svc.Method", descriptor.ClientStreaming)
-	if m.FullName() != "svc.Method" || m.Shape() != descriptor.ClientStreaming {
+	m := MustMethod("svc.Method", ClientStreaming)
+	if m.FullName() != "svc.Method" || m.Shape() != ClientStreaming {
 		t.Fatalf("MustMethod returned unexpected Method: fullName=%q shape=%v", m.FullName(), m.Shape())
 	}
 
@@ -97,20 +95,20 @@ func TestMustMethod(t *testing.T) {
 			t.Fatalf("MustMethod panic value = %#v, want non-empty string", r)
 		}
 	}()
-	_ = descriptor.MustMethod("", descriptor.Unary)
+	_ = MustMethod("", Unary)
 }
 
 func TestNewServiceSuccess(t *testing.T) {
-	echo, err := descriptor.NewMethod("echo.v1.EchoService.Echo", descriptor.Unary)
+	echo, err := NewMethod("echo.v1.EchoService.Echo", Unary)
 	if err != nil {
 		t.Fatal(err)
 	}
-	watch, err := descriptor.NewMethod("echo.v1.EchoService.Watch", descriptor.ServerStreaming)
+	watch, err := NewMethod("echo.v1.EchoService.Watch", ServerStreaming)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	s, err := descriptor.NewService("echo.v1.EchoService", echo, watch)
+	s, err := NewService("echo.v1.EchoService", echo, watch)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -127,7 +125,7 @@ func TestNewServiceSuccess(t *testing.T) {
 }
 
 func TestNewServiceEmptyMethods(t *testing.T) {
-	s, err := descriptor.NewService("echo.v1.EchoService")
+	s, err := NewService("echo.v1.EchoService")
 	if err != nil {
 		t.Fatalf("NewService with no methods: %v", err)
 	}
@@ -137,15 +135,15 @@ func TestNewServiceEmptyMethods(t *testing.T) {
 }
 
 func TestNewServiceErrors(t *testing.T) {
-	ok, err := descriptor.NewMethod("svc.A", descriptor.Unary)
+	ok, err := NewMethod("svc.A", Unary)
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := descriptor.NewMethod("other.A", descriptor.Unary)
+	other, err := NewMethod("other.A", Unary)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dup, err := descriptor.NewMethod("svc.A", descriptor.ServerStreaming)
+	dup, err := NewMethod("svc.A", ServerStreaming)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,15 +151,15 @@ func TestNewServiceErrors(t *testing.T) {
 	cases := []struct {
 		name     string
 		fullName string
-		methods  []descriptor.Method
+		methods  []Method
 	}{
-		{"empty_name", "", []descriptor.Method{ok}},
-		{"wrong_service", "svc", []descriptor.Method{other}},
-		{"duplicate_name", "svc", []descriptor.Method{ok, dup}},
+		{"empty_name", "", []Method{ok}},
+		{"wrong_service", "svc", []Method{other}},
+		{"duplicate_name", "svc", []Method{ok, dup}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := descriptor.NewService(tc.fullName, tc.methods...)
+			_, err := NewService(tc.fullName, tc.methods...)
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -170,17 +168,17 @@ func TestNewServiceErrors(t *testing.T) {
 }
 
 func TestServiceMethodsCopyIsolation(t *testing.T) {
-	m, err := descriptor.NewMethod("svc.A", descriptor.Unary)
+	m, err := NewMethod("svc.A", Unary)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := descriptor.NewService("svc", m)
+	s, err := NewService("svc", m)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	got := s.Methods()
-	got[0] = descriptor.Method{}
+	got[0] = Method{}
 	again := s.Methods()
 	if again[0].IsZero() {
 		t.Fatal("mutating Methods() slice mutated Service")
@@ -191,8 +189,8 @@ func TestServiceMethodsCopyIsolation(t *testing.T) {
 }
 
 func TestMustService(t *testing.T) {
-	m := descriptor.MustMethod("svc.A", descriptor.Unary)
-	s := descriptor.MustService("svc", m)
+	m := MustMethod("svc.A", Unary)
+	s := MustService("svc", m)
 	if s.FullName() != "svc" || len(s.Methods()) != 1 {
 		t.Fatalf("MustService returned unexpected Service: fullName=%q methods=%d", s.FullName(), len(s.Methods()))
 	}
@@ -207,13 +205,13 @@ func TestMustService(t *testing.T) {
 			t.Fatalf("MustService panic value = %#v, want non-empty string", r)
 		}
 	}()
-	_ = descriptor.MustService("")
+	_ = MustService("")
 }
 
 func TestNoExportedFields(t *testing.T) {
 	for _, typ := range []reflect.Type{
-		reflect.TypeOf(descriptor.Method{}),
-		reflect.TypeOf(descriptor.Service{}),
+		reflect.TypeOf(Method{}),
+		reflect.TypeOf(Service{}),
 	} {
 		for i := 0; i < typ.NumField(); i++ {
 			f := typ.Field(i)

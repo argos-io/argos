@@ -1,4 +1,4 @@
-package client_test
+package client
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos"
-	"github.com/argos-io/argos/client"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/filter"
 	"github.com/argos-io/argos/status"
@@ -63,7 +62,7 @@ func TestRecvKeepsStreamResultWhenCancelRaces(t *testing.T) {
 			entered := make(chan struct{})
 			release := make(chan struct{})
 			var once sync.Once
-			cli, err := client.New(
+			cli, err := New(
 				argos.WithServiceName(testService),
 				argos.WithMaxConcurrentCalls(4),
 				argos.WithMaxBufferedBytes(4*16*1024*1024),
@@ -81,7 +80,7 @@ func TestRecvKeepsStreamResultWhenCancelRaces(t *testing.T) {
 				argos.WithTarget(testTarget),
 			)
 			if err != nil {
-				t.Fatalf("client.New: %v", err)
+				t.Fatalf("New: %v", err)
 			}
 			defer cli.Close()
 

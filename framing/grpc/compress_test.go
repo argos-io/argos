@@ -1,4 +1,4 @@
-package grpc_test
+package grpc
 
 import (
 	"bytes"
@@ -13,7 +13,6 @@ import (
 	"github.com/argos-io/argos/compressor/gzip"
 	"github.com/argos-io/argos/descriptor"
 	"github.com/argos-io/argos/framing"
-	grpcframing "github.com/argos-io/argos/framing/grpc"
 	"github.com/argos-io/argos/internal/fake"
 	"github.com/argos-io/argos/metadata"
 	"github.com/argos-io/argos/status"
@@ -26,9 +25,9 @@ func TestCompressionIdentityDefaultRoundTrip(t *testing.T) {
 
 func TestCompressionGzipEnabledRoundTrip(t *testing.T) {
 	t.Parallel()
-	opts := []grpcframing.Option{
-		grpcframing.WithCompressors(gzip.New()),
-		grpcframing.WithSendCompressor(gzip.Name),
+	opts := []Option{
+		WithCompressors(gzip.New()),
+		WithSendCompressor(gzip.Name),
 	}
 	runCompressionRoundTrip(t, opts, opts, true)
 }
@@ -37,13 +36,13 @@ func TestCompressionUnknownAcceptIgnored(t *testing.T) {
 	t.Parallel()
 	// Client advertises a mystery algorithm in accept-encoding but sends identity.
 	mystery := namedCompressor("mystery")
-	clientOpts := []grpcframing.Option{
-		grpcframing.WithCompressors(mystery),
-		grpcframing.WithSendCompressor(compressor.Identity.Name()),
+	clientOpts := []Option{
+		WithCompressors(mystery),
+		WithSendCompressor(compressor.Identity.Name()),
 	}
-	serverOpts := []grpcframing.Option{
-		grpcframing.WithCompressors(gzip.New()),
-		grpcframing.WithSendCompressor(gzip.Name), // peer accept lacks gzip → identity
+	serverOpts := []Option{
+		WithCompressors(gzip.New()),
+		WithSendCompressor(gzip.Name), // peer accept lacks gzip → identity
 	}
 	runCompressionRoundTrip(t, clientOpts, serverOpts, false)
 }
@@ -55,8 +54,8 @@ func TestCompressionUnknownEncodingUnimplemented(t *testing.T) {
 
 	mystery := namedCompressor("mystery")
 	clientF := newTestFraming(t,
-		grpcframing.WithCompressors(mystery),
-		grpcframing.WithSendCompressor("mystery"),
+		WithCompressors(mystery),
+		WithSendCompressor("mystery"),
 	)
 	serverF := newTestFraming(t) // identity only
 
@@ -136,21 +135,21 @@ func TestCompressionUnknownEncodingUnimplemented(t *testing.T) {
 
 func TestCompressionDuplicateCompressorName(t *testing.T) {
 	t.Parallel()
-	_, err := grpcframing.New(grpcframing.WithCompressors(gzip.New(), gzip.New()))
+	_, err := New(WithCompressors(gzip.New(), gzip.New()))
 	if err == nil {
 		t.Fatal("duplicate gzip names: want error")
 	}
-	_, err = grpcframing.New(grpcframing.WithCompressors(compressor.Identity))
+	_, err = New(WithCompressors(compressor.Identity))
 	if err == nil {
 		t.Fatal("duplicate identity: want error")
 	}
-	_, err = grpcframing.New(grpcframing.WithSendCompressor("gzip"))
+	_, err = New(WithSendCompressor("gzip"))
 	if err == nil {
 		t.Fatal("send gzip without enabling: want error")
 	}
 }
 
-func runCompressionRoundTrip(t *testing.T, clientOpts, serverOpts []grpcframing.Option, wantCompressedWire bool) {
+func runCompressionRoundTrip(t *testing.T, clientOpts, serverOpts []Option, wantCompressedWire bool) {
 	t.Helper()
 	cli, lis := fake.HTTPLoopback()
 	t.Cleanup(func() { _ = cli.Close() })
@@ -564,12 +563,12 @@ func TestCompressionBombMaxMessageSize(t *testing.T) {
 	t.Cleanup(func() { _ = cli.Close() })
 
 	gz := gzip.New()
-	clientOpts := []grpcframing.Option{
-		grpcframing.WithCompressors(gz),
-		grpcframing.WithSendCompressor(gzip.Name),
+	clientOpts := []Option{
+		WithCompressors(gz),
+		WithSendCompressor(gzip.Name),
 	}
-	serverOpts := []grpcframing.Option{
-		grpcframing.WithCompressors(gzip.New()),
+	serverOpts := []Option{
+		WithCompressors(gzip.New()),
 	}
 	clientF := newTestFraming(t, clientOpts...)
 	serverF := newTestFraming(t, serverOpts...)

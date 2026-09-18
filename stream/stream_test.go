@@ -1,4 +1,4 @@
-package stream_test
+package stream
 
 import (
 	"bytes"
@@ -8,16 +8,16 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/framing"
-	"github.com/argos-io/argos/stream"
 	"github.com/argos-io/argos/transport"
 )
 
 func TestErrSendClosedIsEOF(t *testing.T) {
 	t.Parallel()
-	if !errors.Is(stream.ErrSendClosed, io.EOF) {
+	if !errors.Is(ErrSendClosed, io.EOF) {
 		t.Fatal("errors.Is(ErrSendClosed, io.EOF) want true")
 	}
-	if errors.Is(io.EOF, stream.ErrSendClosed) {
+	//lint:ignore SA1032 intentional reverse-direction probe; see comment below.
+	if errors.Is(io.EOF, ErrSendClosed) {
 		// One-way Is is enough; reverse may or may not hold depending on
 		// implementation. Document expected Send/HalfClose-only usage.
 	}
@@ -92,7 +92,7 @@ var _ framing.Call = (*fakeCall)(nil)
 func TestWrapSendRecv(t *testing.T) {
 	t.Parallel()
 	call := &fakeCall{recvPayload: []byte("in")}
-	st := stream.Wrap(call, bytesCodec{})
+	st := Wrap(call, bytesCodec{})
 
 	var out []byte
 	if err := st.Recv(&out); err != nil {
@@ -121,9 +121,9 @@ func TestWrapSendRecv(t *testing.T) {
 func TestSendMapsReceiveOpenSendErrorToErrSendClosed(t *testing.T) {
 	t.Parallel()
 	call := &fakeCall{sendErr: &sendErr{msg: "peer reset send", receiveOpen: true}}
-	st := stream.Wrap(call, bytesCodec{})
+	st := Wrap(call, bytesCodec{})
 	err := st.Send([]byte("x"))
-	if !errors.Is(err, stream.ErrSendClosed) {
+	if !errors.Is(err, ErrSendClosed) {
 		t.Fatalf("Send error = %v, want ErrSendClosed", err)
 	}
 	if !errors.Is(err, io.EOF) {
@@ -134,9 +134,9 @@ func TestSendMapsReceiveOpenSendErrorToErrSendClosed(t *testing.T) {
 func TestHalfCloseMapsReceiveOpenSendErrorToErrSendClosed(t *testing.T) {
 	t.Parallel()
 	call := &fakeCall{halfCloseErr: &sendErr{msg: "peer reset send", receiveOpen: true}}
-	st := stream.Wrap(call, bytesCodec{})
+	st := Wrap(call, bytesCodec{})
 	err := st.HalfClose()
-	if !errors.Is(err, stream.ErrSendClosed) {
+	if !errors.Is(err, ErrSendClosed) {
 		t.Fatalf("HalfClose error = %v, want ErrSendClosed", err)
 	}
 }
@@ -145,12 +145,12 @@ func TestSendPassesThroughReceiveClosedSendError(t *testing.T) {
 	t.Parallel()
 	want := &sendErr{msg: "both directions dead", receiveOpen: false}
 	call := &fakeCall{sendErr: want}
-	st := stream.Wrap(call, bytesCodec{})
+	st := Wrap(call, bytesCodec{})
 	err := st.Send([]byte("x"))
 	if !errors.Is(err, want) {
 		t.Fatalf("Send error = %v, want original SendError", err)
 	}
-	if errors.Is(err, stream.ErrSendClosed) {
+	if errors.Is(err, ErrSendClosed) {
 		t.Fatal("ReceiveOpen=false must not map to ErrSendClosed")
 	}
 }
@@ -161,20 +161,20 @@ func TestRecvNeverReturnsErrSendClosed(t *testing.T) {
 	// not rewrite it to ErrSendClosed (that sentinel is Send/HalfClose-only).
 	recvSE := &sendErr{msg: "unexpected on recv", receiveOpen: true}
 	call := &fakeCall{recvErr: recvSE}
-	st := stream.Wrap(call, bytesCodec{})
+	st := Wrap(call, bytesCodec{})
 	var out []byte
 	err := st.Recv(&out)
 	if !errors.Is(err, recvSE) {
 		t.Fatalf("Recv error = %v, want original", err)
 	}
-	if errors.Is(err, stream.ErrSendClosed) {
+	if errors.Is(err, ErrSendClosed) {
 		t.Fatal("Recv must never yield ErrSendClosed")
 	}
 }
 
 func TestRecvPropagatesEOF(t *testing.T) {
 	t.Parallel()
-	st := stream.Wrap(&fakeCall{recvErr: io.EOF}, bytesCodec{})
+	st := Wrap(&fakeCall{recvErr: io.EOF}, bytesCodec{})
 	var out []byte
 	err := st.Recv(&out)
 	if !errors.Is(err, io.EOF) {
@@ -182,7 +182,7 @@ func TestRecvPropagatesEOF(t *testing.T) {
 	}
 	// Bare io.EOF from Recv must not be confused with ErrSendClosed:
 	// only ErrSendClosed.Is(io.EOF) is true, not the reverse.
-	if errors.Is(err, stream.ErrSendClosed) {
+	if errors.Is(err, ErrSendClosed) {
 		t.Fatal("Recv io.EOF must not satisfy errors.Is(_, ErrSendClosed)")
 	}
 }
@@ -190,8 +190,8 @@ func TestRecvPropagatesEOF(t *testing.T) {
 func TestCloserClose(t *testing.T) {
 	t.Parallel()
 	call := &fakeCall{}
-	st := stream.Wrap(call, bytesCodec{})
-	cl, ok := st.(stream.Closer)
+	st := Wrap(call, bytesCodec{})
+	cl, ok := st.(Closer)
 	if !ok {
 		t.Fatal("Wrap result must implement Closer")
 	}
@@ -206,7 +206,7 @@ func TestCloserClose(t *testing.T) {
 func TestSendEncodeFailureNeverReachesCall(t *testing.T) {
 	t.Parallel()
 	call := &fakeCall{}
-	st := stream.Wrap(call, failCodec{})
+	st := Wrap(call, failCodec{})
 	if err := st.Send([]byte("x")); !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("Send error = %v", err)
 	}
@@ -222,5 +222,5 @@ func (failCodec) Unmarshal([]byte, any) error { return nil }
 
 func TestWrappedStreamIsACloser(t *testing.T) {
 	t.Parallel()
-	var _ stream.Closer = stream.Wrap(&fakeCall{}, bytesCodec{}).(stream.Closer)
+	var _ Closer = Wrap(&fakeCall{}, bytesCodec{}).(Closer)
 }

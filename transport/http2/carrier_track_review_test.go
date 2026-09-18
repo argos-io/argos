@@ -1,4 +1,4 @@
-package http2_test
+package http2
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/argos-io/argos/transport"
-	argoshttp2 "github.com/argos-io/argos/transport/http2"
 )
 
 // A completed call must leave the carrier map empty even when the caller reads
@@ -32,7 +31,7 @@ func TestCarrierUntrackedAfterBodyRead(t *testing.T) {
 		_ = car.Finish(200, nil, nil)
 	})
 
-	tr := argoshttp2.New()
+	tr := New()
 	t.Cleanup(func() { _ = tr.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -66,7 +65,7 @@ func TestCarrierUntrackedAfterBodyRead(t *testing.T) {
 			t.Fatalf("body #%d = %q, want ping", i, got)
 		}
 		// No ResponseTrailers, no Abort: reading to EOF ends the exchange.
-		if n := argoshttp2.TrackedCarrierCount(conn); n != 0 {
+		if n := trackedCarrierCount(conn); n != 0 {
 			t.Fatalf("after completed call #%d tracked=%d, want 0", i, n)
 		}
 	}
@@ -77,7 +76,7 @@ func TestCarrierUntrackedAfterBodyRead(t *testing.T) {
 func TestCarrierUntrackedAfterFailedRoundTrip(t *testing.T) {
 	srvTr, addr := startServer(t, func(context.Context, transport.Conn) {})
 
-	tr := argoshttp2.New()
+	tr := New()
 	t.Cleanup(func() { _ = tr.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -101,7 +100,7 @@ func TestCarrierUntrackedAfterFailedRoundTrip(t *testing.T) {
 	if _, err := io.ReadAll(car.(transport.ByteStreamCarrier)); err == nil {
 		t.Skip("round trip unexpectedly succeeded; nothing to assert")
 	}
-	if n := argoshttp2.TrackedCarrierCount(conn); n != 0 {
+	if n := trackedCarrierCount(conn); n != 0 {
 		t.Fatalf("after a failed round trip tracked=%d, want 0", n)
 	}
 }

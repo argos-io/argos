@@ -1,10 +1,9 @@
-package stubgen_test
+package stubgen
 
 import (
 	"path/filepath"
 	"testing"
 
-	"github.com/argos-io/argos/internal/codegen/gen/stubgen"
 	"github.com/argos-io/argos/internal/codegen/gogenrun"
 	"github.com/argos-io/argos/internal/codegen/ir"
 )
@@ -24,7 +23,7 @@ func stubRepoRoot(t *testing.T) string {
 // import it never uses, which only the type checker rejects.
 func compileStub(t *testing.T, file ir.File, refs string) {
 	t.Helper()
-	source, err := stubgen.Generate(file)
+	source, err := Generate(file)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}

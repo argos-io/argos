@@ -1,16 +1,15 @@
-package irjson_test
+package irjson
 
 import (
 	"path/filepath"
 	"testing"
 
-	"github.com/argos-io/argos/internal/codegen/frontend/irjson"
 	"github.com/argos-io/argos/internal/codegen/ir"
 )
 
 func TestParseSingleFile(t *testing.T) {
 	path := filepath.Join("testdata", "echo.ir.json")
-	files, err := irjson.Frontend{}.Parse(t.Context(), []string{path})
+	files, err := Frontend{}.Parse(t.Context(), []string{path})
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -46,7 +45,7 @@ func TestParseSingleFile(t *testing.T) {
 
 func TestParseArrayFile(t *testing.T) {
 	path := filepath.Join("testdata", "files.ir.json")
-	files, err := irjson.Frontend{}.Parse(t.Context(), []string{path})
+	files, err := Frontend{}.Parse(t.Context(), []string{path})
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -57,14 +56,14 @@ func TestParseArrayFile(t *testing.T) {
 
 func TestParseInvalidJSON(t *testing.T) {
 	path := filepath.Join("testdata", "invalid.ir.json")
-	_, err := irjson.Frontend{}.Parse(t.Context(), []string{path})
+	_, err := Frontend{}.Parse(t.Context(), []string{path})
 	if err == nil {
 		t.Fatal("Parse invalid JSON: want error")
 	}
 }
 
 func TestParseNoInputs(t *testing.T) {
-	_, err := irjson.Frontend{}.Parse(t.Context(), nil)
+	_, err := Frontend{}.Parse(t.Context(), nil)
 	if err == nil {
 		t.Fatal("Parse empty inputs: want error")
 	}

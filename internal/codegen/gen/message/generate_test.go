@@ -1,4 +1,4 @@
-package message_test
+package message
 
 import (
 	"bytes"
@@ -11,7 +11,6 @@ import (
 
 	"github.com/argos-io/argos/internal/codegen/check"
 	"github.com/argos-io/argos/internal/codegen/frontend/proto"
-	"github.com/argos-io/argos/internal/codegen/gen/message"
 )
 
 func TestGenerateEchoMessages(t *testing.T) {
@@ -27,7 +26,7 @@ func TestGenerateEchoMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	got, err := message.Generate(files[0])
+	got, err := Generate(files[0])
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
@@ -49,7 +48,7 @@ func TestGenerateComplexMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse complex proto: %v", err)
 	}
-	got, err := message.Generate(files[0])
+	got, err := Generate(files[0])
 	if err != nil {
 		t.Fatalf("generate complex messages: %v", err)
 	}
