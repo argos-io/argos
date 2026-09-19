@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"runtime"
 
 	"github.com/argos-io/argos/codec"
 	"github.com/argos-io/argos/transport"
@@ -118,6 +119,27 @@ func isNil(value any) bool {
 }
 
 // Wrap turns a Call and Codec into a Stream.
+//
+// The Stream is what actually holds the Call: a caller's CallStream holds it,
+// and so does any filter that kept it. Whoever holds it last therefore decides
+// when the Call is finished — including when nobody closes it explicitly. A
+// Stream that becomes unreachable while its Call is still open leaves a call
+// nobody can reach and nobody has released, pinning its connection to the axis
+// for the life of the process; the cleanup below closes it then.
+//
+// It is anchored on the Stream rather than on the Call because a cleanup may
+// not reach its own object: runtime.AddCleanup never collects a ptr that is
+// reachable from cleanup or arg, so the Call travels as the argument.
+//
+// Closing there is safe for the same reason it is right: the Call is
+// unreachable from user code by then, so no exchange can be in flight on it,
+// and Call.Close is idempotent — a call that was already closed is unaffected.
 func Wrap(c transport.Call, cd codec.Codec) Stream {
-	return &wrappedStream{call: c, codec: cd}
+	ws := &wrappedStream{call: c, codec: cd}
+	runtime.AddCleanup(ws, func(call transport.Call) {
+		if !isNil(call) {
+			_ = call.Close()
+		}
+	}, c)
+	return ws
 }

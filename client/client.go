@@ -230,13 +230,16 @@ func (c *Client) Open(ctx context.Context, m descriptor.Method) (*CallStream, er
 		}
 		argos.NotifyCallError(st.cfg, st.info, errors.New("client: CallStream leaked without Close"))
 		// Reclaim the admission reservation. Reporting alone left one slot of
-		// MaxConcurrentCalls slot held for the
-		// life of the Client, so a leak eventually produced ErrCallsExhausted
-		// with no call in flight. The connection is deliberately not touched
-		// here: only Call.Close returns it to the axis, and nobody called it,
-		// so the call's wire state is unknown and handing the connection to
-		// another call would be worse than losing it. stopWatch closes the call
-		// when the lifetime ctx ends.
+		// MaxConcurrentCalls held for the life of the Client, so a leak
+		// eventually produced ErrCallsExhausted with no call in flight.
+		//
+		// Only admission is released here. This cleanup knows the CallStream is
+		// unreachable, which is not the same as knowing the call is finished: a
+		// filter may still hold the Stream and be using it, so closing the call
+		// from here would cut a live exchange. Closing is safe and necessary
+		// once the last holder lets go, which is what stream.Wrap's own cleanup
+		// does — the Call then goes back to the axis, which decides whether the
+		// connection is reusable or must be discarded.
 		if st.client != nil {
 			st.client.releaseAdmit()
 		}
