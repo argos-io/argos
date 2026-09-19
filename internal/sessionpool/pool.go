@@ -129,10 +129,18 @@ func (p *Pool) Options() Options {
 	return p.cfg
 }
 
-// New builds a pool. Limits are taken as given: zero means the pool does not
-// bound that dimension (see DefaultOptions). MaxCallsPerConn <= 0 other than
-// -1 means one call per connection.
+// New builds a pool that reclaims idle and expired connections on a goroutine
+// of its own; Close stops it. Limits are taken as given: zero means the pool
+// does not bound that dimension (see DefaultOptions). MaxCallsPerConn <= 0
+// other than -1 means one call per connection.
 func New(dial DialFunc, cfg Options) *Pool {
+	return newPool(dial, cfg, true)
+}
+
+// newPool builds a pool. ownLoop=false leaves reclamation to the caller, which
+// is how a Cache drives every pool it holds from one process-level sweep
+// instead of one goroutine per pool.
+func newPool(dial DialFunc, cfg Options, ownLoop bool) *Pool {
 	capPer := 1
 	if cfg.MaxCallsPerConn < 0 {
 		capPer = -1
@@ -148,9 +156,43 @@ func New(dial DialFunc, cfg Options) *Pool {
 		flights: make(map[string]*dialFlight),
 		stopCh:  make(chan struct{}),
 	}
-	p.wg.Add(1)
-	go p.reclaimLoop()
+	if ownLoop {
+		p.wg.Add(1)
+		go p.reclaimLoop()
+	}
 	return p
+}
+
+// Reclaim runs one reclamation pass: idle and expired connections are closed.
+// A pool with its own loop calls it from there; a Cache calls it on every pool
+// it holds, which is why this is exported but the loop is not.
+func (p *Pool) Reclaim(now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.closed {
+		p.reclaimLocked(now)
+	}
+}
+
+// Idle reports whether nothing outside this pool is using it: every connection
+// it holds has been returned and no dial is in flight. Such a pool can be closed
+// without cutting anything off, which is the only kind a Cache may evict.
+//
+// Note that a pooled idle connection does not make a pool busy: it is still
+// tracked in bySess, so the test is the entries' refcount rather than whether
+// the map is empty.
+func (p *Pool) Idle() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.flights) > 0 {
+		return false
+	}
+	for _, e := range p.bySess {
+		if e.refcount > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // Acquire pretakes one in-flight slot on a reusable session, or dials a new
@@ -653,11 +695,7 @@ func (p *Pool) reclaimLoop() {
 		case <-p.stopCh:
 			return
 		case now := <-ticker.C:
-			p.mu.Lock()
-			if !p.closed {
-				p.reclaimLocked(now)
-			}
-			p.mu.Unlock()
+			p.Reclaim(now)
 		}
 	}
 }
