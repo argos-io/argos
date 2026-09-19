@@ -28,7 +28,7 @@ transport.Transport OpenCall/Serve
 
 1. 在 `codec` / `transport` 包 `Register` 名称（内置子包 `init` 已注册常见组合）；`ServiceOptions` 写 **Transport + Codec 名称**
 2. 客户端：`client.New(WithServiceName, WithTarget, WithTransport, WithCodec)`（值为注册名）
-3. 服务端：`server.New(WithServerService(..., ServiceListenAddress))` + `Register(desc, XxxHandlers(impl))`
+3. 服务端：`server.New(WithServerOptions(... Services ...))` + `Register(desc, XxxHandlers(impl))`
 4. 进程级默认与限额：`argos.DefaultOptions()`、`argos.Options` 字段；见 [usage.md](usage.md)
 5. 参考 [example/echo](../example/echo) 与 [codec-and-wiring.md](codec-and-wiring.md)
 

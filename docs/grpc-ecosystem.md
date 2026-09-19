@@ -38,20 +38,16 @@ const (
 )
 
 func main() {
-	srv := server.New(
-		argos.WithServerService(echoService,
-			argos.ServiceTransport("grpc"), argos.ServiceCodec("protobuf"),
-			argos.ServiceListenAddress(listen),
-		),
-		argos.WithServerService(health.ServiceName,
-			argos.ServiceTransport("grpc"), argos.ServiceCodec("protobuf"),
-			argos.ServiceListenAddress(listen),
-		),
-		argos.WithServerService(reflection.ServiceV1,
-			argos.ServiceTransport("grpc"), argos.ServiceCodec("protobuf"),
-			argos.ServiceListenAddress(listen),
-		),
-	)
+	stack := argos.ServiceOptions{
+		Transport: "grpc", Codec: "protobuf", ListenAddress: listen,
+	}
+	srv := server.New(argos.WithServerOptions(&argos.Options{
+		Services: map[string]argos.ServiceOptions{
+			echoService:              stack,
+			health.ServiceName:       stack,
+			reflection.ServiceV1:     stack,
+		},
+	}))
 
 	if err := srv.Register(echov1.EchoServiceDesc, echov1.EchoServiceHandlers(echov1.NewEchoImpl())); err != nil {
 		log.Fatal(err)

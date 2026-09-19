@@ -266,12 +266,12 @@ func startArgosEchoServer(t *testing.T, bindOpts []composeOpt, extra ...argos.Se
 	}
 	trName := teststack.TransportName(t, ax)
 	t.Cleanup(func() { _ = ax.Close() })
-	srv := server.New(append(append([]argos.ServerOption{argos.WithServerOptions(cfg)}, extra...),
-		argos.WithServerService(interopService,
-			argos.ServiceTransport(trName),
-			argos.ServiceCodec(codecName),
-			argos.ServiceListenAddress(cfg.ListenAddress),
-		))...)
+	cfg.Services = map[string]argos.ServiceOptions{
+		interopService: {
+			Transport: trName, Codec: codecName, ListenAddress: cfg.ListenAddress,
+		},
+	}
+	srv := server.New(append([]argos.ServerOption{argos.WithServerOptions(cfg)}, extra...)...)
 	if err := srv.Register(interopDesc(), argosEchoHandlers()); err != nil {
 		t.Fatal(err)
 	}

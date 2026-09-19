@@ -60,11 +60,13 @@ flowchart TB
 [`example/echo`](example/echo) 演示同一服务多种传输（gRPC×HTTP/2 与 HTTP/1 unary 等）。
 
 ```go
-srv := server.New(
-    argos.WithServerService("echo.v1.EchoService",
-        argos.ServiceBindListen(":9090", "grpc", "protobuf"),
-    ),
-)
+srv := server.New(argos.WithServerOptions(&argos.Options{
+    Services: map[string]argos.ServiceOptions{
+        "echo.v1.EchoService": {
+            Transport: "grpc", Codec: "protobuf", ListenAddress: ":9090",
+        },
+    },
+}))
 _ = srv.Register(echov1.EchoServiceDesc, echov1.EchoServiceHandlers(impl))
 go srv.Run(ctx)
 

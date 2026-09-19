@@ -11,7 +11,7 @@
 | `resp`（example） | tcp + RESP2 | Sequential | 连接级 HELLO/AUTH、无 metadata |
 | `synth`（example） | tcp + 合成协议 | Sequential | 服务端先发 greeting 等合成行为 |
 
-产品选型：**`ServiceBindListen(addr, transportName, codecName)`** 与 client 的 `WithTransport` / `WithCodec`（如 `grpc` + `protobuf`、`httpunary` + `json`）。echo 见 [`example/echo/main.go`](../example/echo/main.go)。
+产品选型：在 **`ServiceOptions`**（或 `ServiceListen` 多面）写 transport / codec 注册名，client 侧用 `WithTransport` / `WithCodec`（如 `grpc` + `protobuf`、`httpunary` + `json`）。echo 见 [`example/echo/main.go`](../example/echo/main.go)。
 
 上表「pipe」列仅便于对照 `Reuse()` 与 Carrier；对外只配 Transport 名与 Codec 名。
 

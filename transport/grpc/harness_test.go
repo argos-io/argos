@@ -104,14 +104,12 @@ func startEchoHarness(t *testing.T, srvOpts, cliOpts []composeOpt) *echoHarness 
 	srvTr := teststack.TransportName(t, srvAx)
 	cliTr := teststack.TransportName(t, cliAx)
 
-	srv := server.New(
-		argos.WithServerOptions(cfg),
-		argos.WithServerService(echoService,
-			argos.ServiceTransport(srvTr),
-			argos.ServiceCodec(codecName),
-			argos.ServiceListenAddress(cfg.ListenAddress),
-		),
-	)
+	cfg.Services = map[string]argos.ServiceOptions{
+		echoService: {
+			Transport: srvTr, Codec: codecName, ListenAddress: cfg.ListenAddress,
+		},
+	}
+	srv := server.New(argos.WithServerOptions(cfg))
 	if err := srv.Register(echoDesc(), map[string]filter.Handler{"Echo": echoHandler}); err != nil {
 		t.Fatal(err)
 	}

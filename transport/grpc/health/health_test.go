@@ -28,14 +28,12 @@ func startArgosHealth(t *testing.T, hs *Server) string {
 		t.Fatal(err)
 	}
 	trName := teststack.TransportName(t, ax)
-	srv := server.New(
-		argos.WithServerOptions(cfg),
-		argos.WithServerService(ServiceName,
-			argos.ServiceTransport(trName),
-			argos.ServiceCodec("protobuf"),
-			argos.ServiceListenAddress(cfg.ListenAddress),
-		),
-	)
+	cfg.Services = map[string]argos.ServiceOptions{
+		ServiceName: {
+			Transport: trName, Codec: "protobuf", ListenAddress: cfg.ListenAddress,
+		},
+	}
+	srv := server.New(argos.WithServerOptions(cfg))
 	if err := Register(srv, hs); err != nil {
 		t.Fatal(err)
 	}

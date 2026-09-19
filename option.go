@@ -89,29 +89,6 @@ func WithOpenFilter(f filter.OpenFilter) ClientOption {
 	})
 }
 
-func mergeServiceEntry(c *Options, fullName string, opts ...ServiceOption) {
-	if c.Services == nil {
-		c.Services = make(map[string]ServiceOptions)
-	}
-	sc := c.Services[fullName]
-	for _, o := range opts {
-		if o != nil {
-			o.applyService(&sc)
-		}
-	}
-	c.Services[fullName] = sc
-}
-
-// WithClientService stores or merges per-service settings for client dial targets.
-func WithClientService(fullName string, opts ...ServiceOption) ClientOption {
-	return clientOption(func(c *Options) { mergeServiceEntry(c, fullName, opts...) })
-}
-
-// WithServerService stores or merges per-service settings for server listen surfaces.
-func WithServerService(fullName string, opts ...ServiceOption) ServerOption {
-	return serverOption(func(c *Options) { mergeServiceEntry(c, fullName, opts...) })
-}
-
 // WithClientCallErrorObserver sets the client per-call local transport error observer (§7.5).
 func WithClientCallErrorObserver(fn func(CallInfo, error)) ClientOption {
 	return clientOption(func(c *Options) { c.CallErrorObserver = fn })

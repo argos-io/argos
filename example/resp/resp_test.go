@@ -88,10 +88,10 @@ func startRESP(t *testing.T, register func(*server.Server, *Store) error, frOpts
 	srvTr := teststack.TransportName(t, srvAxis)
 	cliTr := teststack.TransportName(t, cliAxis)
 
-	srv := server.New(argos.WithServerOptions(cfg), argos.WithServerService(svcName,
-		argos.ServiceTransport(srvTr), argos.ServiceCodec("raw"),
-		argos.ServiceListenAddress(testListenAddr),
-	))
+	cfg.Services = map[string]argos.ServiceOptions{
+		svcName: {Transport: srvTr, Codec: "raw", ListenAddress: testListenAddr},
+	}
+	srv := server.New(argos.WithServerOptions(cfg))
 	if err := register(srv, store); err != nil {
 		t.Fatal(err)
 	}

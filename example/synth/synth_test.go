@@ -49,11 +49,10 @@ func startSynthServer(t *testing.T, handlers map[string]filter.Handler, extra ..
 	// Default pool keeps no idle sessions (MaxIdleSessions=0); tests expect reuse.
 	cliAxis := New(WithPool(0, 8, 50*time.Second, 30*time.Minute))
 	srvTr := teststack.TransportName(t, srvAxis)
-	srv := server.New(append(append([]argos.ServerOption{argos.WithServerOptions(cfg)}, extra...),
-		argos.WithServerService(ServiceName,
-			argos.ServiceTransport(srvTr), argos.ServiceCodec("raw"),
-			argos.ServiceListenAddress(cfg.ListenAddress),
-		))...)
+	cfg.Services = map[string]argos.ServiceOptions{
+		ServiceName: {Transport: srvTr, Codec: "raw", ListenAddress: cfg.ListenAddress},
+	}
+	srv := server.New(append([]argos.ServerOption{argos.WithServerOptions(cfg)}, extra...)...)
 
 	methods := []descriptor.Method{
 		descriptor.MustMethod(MethodPing, descriptor.Unary),
@@ -473,10 +472,10 @@ func TestExclusiveKeepsConnectionOutOfPool(t *testing.T) {
 	srvTr := teststack.TransportName(t, srvAxis)
 	cliTr := teststack.TransportName(t, cliAxis)
 	cfg := testOptions()
-	srv := server.New(argos.WithServerOptions(cfg), argos.WithServerService(ServiceName,
-		argos.ServiceTransport(srvTr), argos.ServiceCodec("raw"),
-		argos.ServiceListenAddress(cfg.ListenAddress),
-	))
+	cfg.Services = map[string]argos.ServiceOptions{
+		ServiceName: {Transport: srvTr, Codec: "raw", ListenAddress: cfg.ListenAddress},
+	}
+	srv := server.New(argos.WithServerOptions(cfg))
 	methods := []descriptor.Method{
 		descriptor.MustMethod(MethodPing, descriptor.Unary),
 		descriptor.MustMethod(MethodEcho, descriptor.Unary),

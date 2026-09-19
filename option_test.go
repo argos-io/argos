@@ -34,14 +34,12 @@ func TestWithFilterAndOpenFilterStored(t *testing.T) {
 
 func TestWithServiceStoresProtocolAndTarget(t *testing.T) {
 	t.Parallel()
-	cfg, err := ClientOptions(
-		WithClientOptions(&Options{}),
-		WithClientService("echo.v1.EchoService",
-			markerCodec(1),
-			ServiceTarget("ip://127.0.0.1:7001")),
-		WithClientService("other.Svc",
-			ServiceTarget("ip://127.0.0.1:7002")),
-	)
+	cfg, err := ClientOptions(WithClientOptions(&Options{
+		Services: map[string]ServiceOptions{
+			"echo.v1.EchoService": {Codec: stubCodecName(1), Target: "ip://127.0.0.1:7001"},
+			"other.Svc":           {Target: "ip://127.0.0.1:7002"},
+		},
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,16 +53,13 @@ func TestWithServiceStoresProtocolAndTarget(t *testing.T) {
 	}
 }
 
-func TestWithServiceMergesIntoExistingEntry(t *testing.T) {
+func TestServicesEntryCarriesProtocolAndTarget(t *testing.T) {
 	t.Parallel()
-	cfg, err := ClientOptions(
-		WithClientOptions(&Options{
-			Services: map[string]ServiceOptions{
-				"echo.v1.EchoService": {Codec: stubCodecName(1)},
-			},
-		}),
-		WithClientService("echo.v1.EchoService", ServiceTarget("ip://127.0.0.1:7001")),
-	)
+	cfg, err := ClientOptions(WithClientOptions(&Options{
+		Services: map[string]ServiceOptions{
+			"echo.v1.EchoService": {Codec: stubCodecName(1), Target: "ip://127.0.0.1:7001"},
+		},
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,9 +177,11 @@ func TestNilOptionRejected(t *testing.T) {
 func TestSelectedServiceLayering(t *testing.T) {
 	t.Parallel()
 	const service = "echo.v1.EchoService"
-	entry := WithClientService(service,
-		markerCodec(2),
-		ServiceTarget("ip://127.0.0.1:7001"))
+	entry := WithClientOptions(&Options{
+		Services: map[string]ServiceOptions{
+			service: {Codec: stubCodecName(2), Target: "ip://127.0.0.1:7001"},
+		},
+	})
 
 	for _, tc := range []struct {
 		name       string
@@ -273,8 +270,6 @@ func TestOptionSideTyping(t *testing.T) {
 	}{
 		{"WithListenAddress", WithListenAddress(":0"), false, true},
 		{"WithServiceName", WithServiceName("echo.v1.EchoService"), true, false},
-		{"WithClientService", WithClientService("echo.v1.EchoService", ServiceTarget("ip://127.0.0.1:1")), true, false},
-		{"WithServerService", WithServerService("echo.v1.EchoService", ServiceListenAddress(":0")), false, true},
 		{"WithMaxConcurrentCalls", WithMaxConcurrentCalls(2), true, false},
 		{"WithServerMaxConcurrentCalls", WithServerMaxConcurrentCalls(2), false, true},
 	} {
@@ -404,10 +399,6 @@ func init() {
 			return &stubCodec{id: n}, nil
 		})
 	}
-}
-
-func markerCodec(id int) ServiceOption {
-	return ServiceCodec(stubCodecName(id))
 }
 
 func protocolCodecID(t *testing.T, sc ServiceOptions) int {

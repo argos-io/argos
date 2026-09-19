@@ -38,13 +38,13 @@ type Codec interface {
 ## `ServiceOptions` 装配
 
 ```go
-server.New(
-    argos.WithServerService("my.v1.Service",
-        argos.ServiceTransport("grpc"),
-        argos.ServiceCodec("protobuf"),
-        argos.ServiceListenAddress(":7001"),
-    ),
-)
+server.New(argos.WithServerOptions(&argos.Options{
+    Services: map[string]argos.ServiceOptions{
+        "my.v1.Service": {
+            Transport: "grpc", Codec: "protobuf", ListenAddress: ":7001",
+        },
+    },
+}))
 
 client.New(
     argos.WithServiceName("my.v1.Service"),
@@ -54,9 +54,9 @@ client.New(
 )
 ```
 
-也可直接写 `Options.Services[fullName] = argos.ServiceOptions{Transport: "grpc", Codec: "protobuf", Target: "..."}`。
+客户端也可在 `Options.Services` 写 `Target`（及默认 Transport/Codec），由 `WithServiceName` 选中。
 
-多监听面：`ServiceBindListen(addr, transportName, codecName)`；见 `example/echo/main.go`。
+多监听面：在 `ServiceOptions.Listeners` 写 `[]argos.ServiceListen`（每项含 `Address`、`Transport`、`Codec`）；见 `example/echo/main.go`。
 
 ## `SessionSpec` / `CallSpec`
 
@@ -74,6 +74,6 @@ Transport 实现内部握手时使用：
 
 ## 检查单
 
-- [ ] Transport 与 Codec 名称在 `ServiceOptions`（`ServiceTransport` + `ServiceCodec`）或 client `WithTransport` + `WithCodec` 中成组出现，且已在对应包 `Register`
+- [ ] Transport 与 Codec 名称写在 `ServiceOptions` 字段上，或 client 侧 `WithTransport` + `WithCodec`，且已在对应包 `Register`
 - [ ] `CodecName` 与 codec 实现一致（若实现了 `Named`）
 - [ ] `make verify` 通过；若新组合进入 echo 集成，更新 `example/echo` 测试

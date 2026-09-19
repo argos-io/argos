@@ -197,18 +197,25 @@ func init() {
 	codec.Register(testRefusingCodecName, func() (codec.Codec, error) { return nil, errCodecFactory })
 }
 
-func testServiceBindListen(t *testing.T, tr *testTransport, fr session.Framing, addr string) argos.ServiceOption {
+func testServiceListen(t *testing.T, tr *testTransport, fr session.Framing, addr string) argos.ServiceListen {
 	t.Helper()
 	trName := teststack.TransportName(t, testServiceAxis(tr, fr))
-	return argos.ServiceBindListen(addr, trName, testServerCodecName)
+	return argos.ServiceListen{Address: addr, Transport: trName, Codec: testServerCodecName}
+}
+
+func withTestServerService(t *testing.T, listens ...argos.ServiceListen) argos.ServerOption {
+	t.Helper()
+	return argos.WithServerOptions(&argos.Options{
+		Services: map[string]argos.ServiceOptions{
+			svcName: {Listeners: listens},
+		},
+	})
 }
 
 func startServer(t *testing.T, tr *testTransport, fr session.Framing, h filter.Handler, opts ...argos.ServerOption) *Server {
 	t.Helper()
 	base := append([]argos.ServerOption{
-		argos.WithServerService(svcName,
-			testServiceBindListen(t, tr, fr, "127.0.0.1:0"),
-		),
+		withTestServerService(t, testServiceListen(t, tr, fr, "127.0.0.1:0")),
 	}, opts...)
 	srv := New(base...)
 	if err := srv.Register(echoService(), map[string]filter.Handler{
@@ -364,9 +371,7 @@ func TestServiceListenFilterChain(t *testing.T) {
 
 	srv := New(
 		argos.WithFilter(count(&serverLevel)),
-		argos.WithServerService(svcName,
-			testServiceBindListen(t, tr, srvFr, "127.0.0.1:0"),
-		),
+		withTestServerService(t, testServiceListen(t, tr, srvFr, "127.0.0.1:0")),
 		argos.WithFilter(count(&perBinding)),
 	)
 	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: h}); err != nil {
@@ -509,9 +514,7 @@ func TestShutdownIdleConnExitsQuickly(t *testing.T) {
 	}
 	srv := New(
 		argos.WithMaxInboundConnIdle(30*time.Second),
-		argos.WithServerService(svcName,
-			testServiceBindListen(t, tr, fr, "127.0.0.1:0"),
-		),
+		withTestServerService(t, testServiceListen(t, tr, fr, "127.0.0.1:0")),
 	)
 	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: h}); err != nil {
 		t.Fatal(err)

@@ -22,12 +22,16 @@ const echoService = "echo.v1.EchoService"
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
-	srv := server.New(
-		argos.WithServerService(echoService,
-			argos.ServiceBindListen(":9090", "grpc", "protobuf"),
-			argos.ServiceBindListen(":8080", "httpunary", "json"),
-		),
-	)
+	srv := server.New(argos.WithServerOptions(&argos.Options{
+		Services: map[string]argos.ServiceOptions{
+			echoService: {
+				Listeners: []argos.ServiceListen{
+					{Address: ":9090", Transport: "grpc", Codec: "protobuf"},
+					{Address: ":8080", Transport: "httpunary", Codec: "json"},
+				},
+			},
+		},
+	}))
 	if err := srv.Register(echov1.EchoServiceDesc, echov1.EchoServiceHandlers(echov1.NewEchoImpl())); err != nil {
 		slog.Error("Register", "err", err)
 		os.Exit(1)

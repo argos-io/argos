@@ -60,10 +60,10 @@ func startLoadRESP(t *testing.T, tune func(*argos.Options), axOpts ...Option) *l
 		tune(cfg)
 	}
 
-	srv := server.New(argos.WithServerOptions(cfg), argos.WithServerService(svcName,
-		argos.ServiceTransport(srvTr), argos.ServiceCodec("raw"),
-		argos.ServiceListenAddress(testListenAddr),
-	))
+	cfg.Services = map[string]argos.ServiceOptions{
+		svcName: {Transport: srvTr, Codec: "raw", ListenAddress: testListenAddr},
+	}
+	srv := server.New(argos.WithServerOptions(cfg))
 	if err := Register(srv, store); err != nil {
 		t.Fatal(err)
 	}

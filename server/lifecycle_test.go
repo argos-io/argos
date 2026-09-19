@@ -26,9 +26,7 @@ func TestProtocolAssembleOncePerServerStart(t *testing.T) {
 		drainRecv(st)
 		return st.Send(req)
 	}
-	srv := New(argos.WithServerService(svcName,
-		testServiceBindListen(t, tr, fr, "127.0.0.1:0"),
-	))
+	srv := New(withTestServerService(t, testServiceListen(t, tr, fr, "127.0.0.1:0")))
 	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: h}); err != nil {
 		t.Fatal(err)
 	}
@@ -75,9 +73,9 @@ func TestShutdownIdempotent(t *testing.T) {
 func TestFactoryIsolationAcrossListeners(t *testing.T) {
 	tr1, tr2 := newTestTransport(), newTestTransport()
 	fr1, fr2 := fake.NewFraming(session.Sequential), fake.NewFraming(session.Sequential)
-	srv := New(argos.WithServerService(svcName,
-		testServiceBindListen(t, tr1, fr1, "127.0.0.1:1"),
-		testServiceBindListen(t, tr2, fr2, "127.0.0.1:2"),
+	srv := New(withTestServerService(t,
+		testServiceListen(t, tr1, fr1, "127.0.0.1:1"),
+		testServiceListen(t, tr2, fr2, "127.0.0.1:2"),
 	))
 	h := func(ctx context.Context, m descriptor.Method, st stream.Stream) error { return nil }
 	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: h}); err != nil {
@@ -99,9 +97,13 @@ func newAbortingServer(t *testing.T) (*Server, *testTransport, *testTransport) {
 	t.Helper()
 	tr1, tr2 := newTestTransport(), newTestTransport()
 	fr := fake.NewFraming(session.Sequential)
-	srv := New(argos.WithServerService(svcName,
-		testServiceBindListen(t, tr1, fr, "127.0.0.1:1"),
-		argos.ServiceBindListen("127.0.0.1:2", teststack.TransportName(t, testServiceAxis(tr2, fr)), testRefusingCodecName),
+	srv := New(withTestServerService(t,
+		testServiceListen(t, tr1, fr, "127.0.0.1:1"),
+		argos.ServiceListen{
+			Address:   "127.0.0.1:2",
+			Transport: teststack.TransportName(t, testServiceAxis(tr2, fr)),
+			Codec:     testRefusingCodecName,
+		},
 	))
 	if err := srv.Register(echoService(), map[string]filter.Handler{
 		methodEcho: func(context.Context, descriptor.Method, stream.Stream) error { return nil },
@@ -152,7 +154,7 @@ func TestRejectedOptionsSurfaceFromRun(t *testing.T) {
 	fr := fake.NewFraming(session.Sequential)
 	srv := New(
 		argos.WithServerMaxConcurrentCalls(-5),
-		argos.WithServerService(svcName, testServiceBindListen(t, tr, fr, "127.0.0.1:0")),
+		withTestServerService(t, testServiceListen(t, tr, fr, "127.0.0.1:0")),
 	)
 	if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: func(context.Context, descriptor.Method, stream.Stream) error {
 		return nil
@@ -189,9 +191,9 @@ func TestStopLeavesAxisUsable(t *testing.T) {
 	axis := testServiceAxis(tr, srvFr)
 	trName := teststack.TransportName(t, axis)
 	serve := func() *Server {
-		srv := New(argos.WithServerService(svcName,
-			argos.ServiceBindListen("127.0.0.1:0", trName, testServerCodecName),
-		))
+		srv := New(withTestServerService(t, argos.ServiceListen{
+			Address: "127.0.0.1:0", Transport: trName, Codec: testServerCodecName,
+		}))
 		if err := srv.Register(echoService(), map[string]filter.Handler{methodEcho: echoHandler}); err != nil {
 			t.Fatal(err)
 		}

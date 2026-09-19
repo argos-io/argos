@@ -310,7 +310,7 @@ func (s *Server) buildListenRegs() ([]listenReg, error) {
 	for svcName := range s.routes {
 		sc, ok := s.cfg.Services[svcName]
 		if !ok {
-			return nil, fmt.Errorf("server: service %q registered but missing from Options.Services (use argos.WithServerService)", svcName)
+			return nil, fmt.Errorf("server: service %q registered but missing from Options.Services", svcName)
 		}
 		plans, err := sc.ServerListenPlans(s.cfg.ListenAddress)
 		if err != nil {

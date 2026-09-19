@@ -58,7 +58,7 @@ Argos 是 **C/S 协议组合运行时**：对外选型为 **Transport × Codec**
 
 要点：
 
-- **Transport × Codec**——`ServiceOptions` 存已注册的 transport / codec **名称**（`codec.Register` / `transport.Register`）；`ServiceTransport` + `ServiceCodec` 与 client `WithTransport` + `WithCodec` 引用这些名称，装配时 `New(name)` 实例化。
+- **Transport × Codec**——`ServiceOptions` 存已注册的 transport / codec **名称**（`codec.Register` / `transport.Register`）；写在 `Options.Services` 或 client `WithTransport` + `WithCodec`，装配时 `New(name)` 实例化。
 - **Compressor 不是核心概念**——仅 gRPC 路径（`grpc`）。
 - **复用不是第三选配维**——轴内 `session.Framing.Reuse()` 声明承载力；借还由轴上的客户端会话池执行。
 

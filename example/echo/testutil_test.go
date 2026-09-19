@@ -74,13 +74,16 @@ func startEchoServer(
 
 	transportName := teststack.TransportName(t, link)
 
+	cfg.Services = map[string]argos.ServiceOptions{
+		"echo.v1.EchoService": {
+			Transport:     transportName,
+			Codec:         codecName,
+			ListenAddress: testListenAddr,
+		},
+	}
 	srv := server.New(
 		argos.WithServerOptions(cfg),
 		argos.WithListenAddress(testListenAddr),
-		argos.WithServerService("echo.v1.EchoService",
-			argos.ServiceTransport(transportName),
-			argos.ServiceCodec(codecName),
-		),
 	)
 	if err := srv.Register(EchoServiceDesc, EchoServiceHandlers(NewEchoImpl())); err != nil {
 		t.Fatal(err)

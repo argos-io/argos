@@ -29,13 +29,15 @@ func TestGRPCEcosystemOnEchoServer(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ax.Close() })
 	trName := teststack.TransportName(t, ax)
-	stack := []argos.ServiceOption{argos.ServiceTransport(trName), argos.ServiceCodec(GRPCCodecName)}
-	srv := server.New(
-		argos.WithServerOptions(cfg),
-		argos.WithServerService(echoSvc, append(stack, argos.ServiceListenAddress(testListenAddr))...),
-		argos.WithServerService(health.ServiceName, append(stack, argos.ServiceListenAddress(testListenAddr))...),
-		argos.WithServerService(reflection.ServiceV1, append(stack, argos.ServiceListenAddress(testListenAddr))...),
-	)
+	stack := argos.ServiceOptions{
+		Transport: trName, Codec: GRPCCodecName, ListenAddress: testListenAddr,
+	}
+	cfg.Services = map[string]argos.ServiceOptions{
+		echoSvc:              stack,
+		health.ServiceName:   stack,
+		reflection.ServiceV1: stack,
+	}
+	srv := server.New(argos.WithServerOptions(cfg))
 	if err := srv.Register(EchoServiceDesc, EchoServiceHandlers(NewEchoImpl())); err != nil {
 		t.Fatal(err)
 	}

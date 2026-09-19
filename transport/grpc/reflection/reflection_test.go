@@ -28,14 +28,12 @@ func startReflection(t *testing.T, services []string) string {
 		t.Fatal(err)
 	}
 	trName := teststack.TransportName(t, ax)
-	srv := server.New(
-		argos.WithServerOptions(cfg),
-		argos.WithServerService(ServiceV1,
-			argos.ServiceTransport(trName),
-			argos.ServiceCodec("protobuf"),
-			argos.ServiceListenAddress(cfg.ListenAddress),
-		),
-	)
+	cfg.Services = map[string]argos.ServiceOptions{
+		ServiceV1: {
+			Transport: trName, Codec: "protobuf", ListenAddress: cfg.ListenAddress,
+		},
+	}
+	srv := server.New(argos.WithServerOptions(cfg))
 	files := new(protoregistry.Files)
 	if err := files.RegisterFile(testpb.File_echo_proto); err != nil {
 		t.Fatal(err)
