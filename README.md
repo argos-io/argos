@@ -1,25 +1,21 @@
-# Argos
+# Argos 设计与需求
 
-Argos 是内部团队使用的站点生成与管理系统：Web 工作台调用编码 agent 组装插件、创建或编辑插件和主题，交付可在 Cloudflare 或标准 Node.js 上运行的站点源码及独立业务后台。
+Argos 处于需求与设计阶段。需求分为永久仅供内部团队使用的管理端，以及交给客户的站点交付物两套，以可维护的源码交付和插件、主题组装为核心。管理端不向客户交付或开放使用。操作人只组装插件、创建或编辑插件和主题，核心代码由独立维护流程管理。
 
-本仓库承载核心系统，包括内部管理端基础、站点最小运行时、通用业务后台宿主，以及插件、主题和平台适配的公共契约。管理端永久仅供内部使用，交付运行时与管理端分别打包。
+本仓库 `argos` 保留需求与设计文档，与核心仓库 `core`、插件及主题仓库 `plugins` 并列放置。仓库组织、职责和本地迁移说明见 [仓库结构](docs/repositories.md)。
 
-## 独立仓库
+- [总体需求与澄清记录](docs/requirements.md)
+- [管理端需求](docs/management-system.md)：Web 工作台与 agent 执行生成、工程管理、构建、交付与托管；部署不限定 Cloudflare。
+- [站点交付物需求](docs/site-deliverable.md)：双平台运行时、业务插件与开放 API。
+- [插件生命周期](docs/plugins.md)：构建时安装、运行时启停、操作人负责插件安全。
+- [站点业务后台](docs/business-admin.md)：随源码交付，插件注册对应管理功能。
+- [主题与操作边界](docs/themes.md)：页面定制位于主题，操作人及生成任务不修改核心代码。
+- [仓库结构](docs/repositories.md)：设计、核心、插件三个并列的独立仓库。
+- [电商需求基线](docs/commerce.md)
+- [市场与物流](docs/shipping.md)：市场配置、主流物流接口适配及履约能力。
+- [用户管理与 CRM](docs/users-crm.md)
+- [领域术语](CONTEXT.md)
+- [EmDash 调研](docs/research/emdash.md)
+- [Codex 集成调研](docs/research/codex-integration.md)
 
-三个仓库并列放置在 `/root/src/github.com/argos-io/`，各自维护 Git 历史、提交与远端。
-
-| 仓库 | 职责 |
-| --- | --- |
-| `argos`（本仓库） | 核心系统、内部管理端基础、运行时、后台宿主与扩展契约 |
-| [argos-design](../argos-design/README.md) | 需求、领域术语、设计、ADR 与调研 |
-| [argos-plugins](../argos-plugins/README.md) | 业务插件、供应商适配器、主题及其后台管理功能 |
-
-操作人只组装插件、创建或编辑插件与主题，站点生成任务不调整核心代码。核心维护走独立开发和发布流程，详见 [操作边界](../argos-design/docs/themes.md) 与 [仓库组织](../argos-design/docs/repositories.md)。
-
-## 当前状态
-
-目前已落地需求设计与独立仓库骨架，运行时与管理端代码尚未实现，技术栈和具体包结构待设计。
-
-本次只调整本地仓库。`argos` 复用已有远端配置；`argos-design` 与 `argos-plugins` 已配置目标远端，尚未在 GitHub 创建或推送。
-
-历史备份分支 `paas` 保留在 `argos-design` 中。迁移前快照保存在本仓库的 Git 元数据中；原核心骨架提交通过 `migration/core-initial` 标签保留。
+已确认架构决策位于 [docs/adr](docs/adr/)。各文档明确区分已确认需求和待确认的设计建议。
