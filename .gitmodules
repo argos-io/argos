@@ -1,9 +1,0 @@
-[submodule "design"]
-	path = design
-	url = ../argos-design.git
-[submodule "core"]
-	path = core
-	url = ../argos-core.git
-[submodule "plugins"]
-	path = plugins
-	url = ../argos-plugins.git
