@@ -2,6 +2,8 @@
 
 调研日期：2026-11-06。仅依据官方 OpenAI documentation；未安装 SDK、调用服务或完成集成验证。具体能力与兼容性以实施时固定版本为准。
 
+后续进度：本文件保留原入口调研；当前 demo 的执行基线已采用 TypeScript Codex SDK，接口与发布包核对见 [demo-design.md](../demo-design.md)，实现验证见 [首批任务](../demo-tasks.md)。下述 SDK/app-server 比较不作为当前重复澄清项，仍不声明已完成真实集成。
+
 ## 已确认的产品要求
 
 管理端采用 Web 工作台，由 agent 执行站点及插件生成，可以使用成熟 agent SDK，用户以 Codex 为例。管理端自身部署不限定 Cloudflare。这些要求不等于已经选定 Codex SDK、app-server、某个模型或某种托管执行方式。

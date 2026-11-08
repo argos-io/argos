@@ -2,6 +2,10 @@
 
 状态：已确认安装、启用与插件信任边界；具体生命周期契约为讨论稿。更新：2026-11-08。
 
+当前第一期验证生成、组装和独立运行的可行性，电商延期；已确认用企业展示与公告插件验证依赖、启停和后台注册，而不先实现 CRM 或交易模块。完整业务生命周期与数据交付要求仍保留，demo 只验证实际安装的演示能力，范围见 [需求第 8 节](requirements.md#8-编码前的澄清进度与就绪条件)。
+
+本期已确认薄 Astro 宿主：构建时将插件页面声明注册到 Astro，API 注册到 Hono，后台组件注册到 React 宿主；运行时仍由 Argos 检查插件状态、依赖与权限，不卸载已编译路由。主题入口、按需渲染及核心不随生成任务修改的边界见 [ADR-0013](adr/0013-astro-site-host-and-plugin-boundaries.md)，具体 demo 实现基线与任务见 [demo-design.md](demo-design.md)、[demo-tasks.md](demo-tasks.md)。
+
 关联 [系统需求](requirements.md)、[ADR-0002](adr/0002-build-time-plugins-runtime-enablement.md)、[电商](commerce.md) 与 [用户管理和 CRM](users-crm.md)。
 
 ## 1. 已确认边界
