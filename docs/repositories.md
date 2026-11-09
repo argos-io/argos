@@ -1,6 +1,6 @@
 # Argos 仓库组织
 
-状态：三个并列的独立仓库已确认。更新：2026-11-07。
+状态：三个并列的独立仓库及远端已就绪。更新：2026-11-09。
 
 ## 目录和仓库职责
 
@@ -35,6 +35,6 @@
 
 `argos` 沿用已有仓库的 Git 历史和远端 `argos-io/argos`，设计文档迁回该仓库。此前独立设计仓库的提交通过 `migration/design-history` 标签保留，`paas` 备份分支及历史引用一并保留在 `argos`。
 
-`core` 从原核心骨架提交继续开发，配置目标远端 `argos-io/core`；`plugins` 保留原插件仓库历史，配置目标远端 `argos-io/plugins`。本次只完成本地调整与提交，尚未在 GitHub 创建或推送这两个远端。远端创建并推送后，三个仓库分别克隆即可。
+`core` 从原核心骨架提交继续开发，远端为 [argos-io/core](https://github.com/argos-io/core)；`plugins` 保留原插件仓库历史，远端为 [argos-io/plugins](https://github.com/argos-io/plugins)。这两个远端已创建为私有仓库，各自的 `master` 分支及其历史已推送，并设为默认分支。三个仓库分别克隆即可，私有仓库需要相应的访问权限。
 
 迁移检查覆盖文档完整性、Git 引用保留、仓库独立性、远端配置、工作区路径及文档命名。迁移前完整快照保存在 `argos/.git/argos-migration/` 中，不作为项目源码交付。历史项目仅作为备份保留，不作为 Argos 新核心或插件实现。
