@@ -11,6 +11,6 @@ date: 2026-11-08
 
 用户随后整体确认“企业展示站＋由真实 agent 新生成的公告插件＋独立业务后台”样例，以及 [需求第 8 节](../requirements.md#8-编码前的澄清进度与就绪条件) 的精简范围和 DM1–DM6。CRM、访客账号、外部客服、完整后台管理流程和生产托管自动化后置；demo 保留最小真实认证与基本权限验证、独立源码运行和双目标最小数据恢复。
 
-用户随后同意 Astro 分工和核心/插件边界，见 [ADR-0013](0013-astro-site-host-and-plugin-boundaries.md)。Demo 执行基线见 [最小技术方案](../demo-design.md)，首批任务见 [demo-tasks.md](../demo-tasks.md)；完整 RBAC v1 与后续产品提案不因本期设计确认而整体获批，尚未实现功能。
+用户随后同意 Astro 分工和核心/插件边界，见 [ADR-0013](0013-astro-site-host-and-plugin-boundaries.md)。Demo 执行基线见 [最小技术方案](../demo-design.md)，首批任务见 [demo-tasks.md](../demo-tasks.md)；完整 RBAC v1 与后续产品提案不因本期设计确认而整体获批；当前实现与验收状态见任务清单。
 
 今后的用户确认聚焦范围或关键架构取舍；常规实施细节由 Agent 设计，不把后续模块的详细规则作为 demo 开工阻塞。本决策仅调整分期及澄清顺序，不表示已授权生产发布或已完成可行性验证。
